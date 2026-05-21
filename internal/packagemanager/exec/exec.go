@@ -34,6 +34,14 @@ var NpxFlagsWithValues = argv.FlagsWithValues{
 	"--userconfig": {},
 }
 
+// NpxSpecFlags is the subset of NpxFlagsWithValues whose value is itself the
+// package to fetch. `npx -p evil-pkg some-cmd` must be gated on "evil-pkg",
+// not "some-cmd" (which is a binary inside the fetched package).
+var NpxSpecFlags = argv.FlagsWithValues{
+	"--package": {},
+	"-p":        {},
+}
+
 // BunxFlagsWithValues mirrors `bunx` (a thin wrapper over `bun x`).
 var BunxFlagsWithValues = argv.FlagsWithValues{
 	"--cwd":       {},
@@ -50,6 +58,12 @@ var PnpxFlagsWithValues = argv.FlagsWithValues{
 	"--registry": {},
 	"--store-dir": {},
 	"--prefix":   {},
+}
+
+// PnpxSpecFlags: like NpxSpecFlags but for pnpm's dlx-style invocation.
+var PnpxSpecFlags = argv.FlagsWithValues{
+	"--package": {},
+	"-p":        {},
 }
 
 // UvxFlagsWithValues lists uvx flags whose next argv token is the value.
@@ -83,6 +97,12 @@ var PipxFlagsWithValues = argv.FlagsWithValues{
 	"-e":         {},
 }
 
+// PipxSpecFlags: `pipx run --spec evil-pkg some-cmd` fetches evil-pkg and
+// runs some-cmd from it. The spec to gate is evil-pkg.
+var PipxSpecFlags = argv.FlagsWithValues{
+	"--spec": {},
+}
+
 // Options configures one exec-style Manager.
 type Options struct {
 	// Name is the binary (e.g. "npx", "bunx", "pipx").
@@ -99,6 +119,17 @@ type Options struct {
 	// value, so the parser doesn't mistake that value for the spec.
 	// Optional — a nil table degrades to flag-name-only skipping.
 	FlagsWithValues argv.FlagsWithValues
+
+	// SpecFlags is the subset of FlagsWithValues whose VALUE is itself the
+	// package spec to be gated, not a tunable to skip. npx uses --package/-p
+	// this way: `npx -p evil-pkg some-cmd` fetches evil-pkg, then runs
+	// some-cmd from it — the package to gate is evil-pkg, not some-cmd.
+	// pipx uses --spec analogously. Each name listed here must ALSO appear
+	// in FlagsWithValues so the surrounding parser correctly accounts for
+	// the consumed token. When any spec-flag value is present, the
+	// first-positional fallback is skipped (the positional is the command
+	// name, not a package).
+	SpecFlags argv.FlagsWithValues
 }
 
 // Manager parses exec-style commands for one binary.
@@ -127,9 +158,16 @@ func (m *Manager) Ecosystem() intel.Ecosystem { return m.opts.Ecosystem }
 
 // ParseInstalls implements packagemanager.PackageManager.
 //
-// For non-pipx exec tools, returns one Install for the first non-flag token
-// (the package to fetch and run). For pipx, requires a "run" or "install"
-// verb before the spec.
+// Two shapes:
+//
+//   - Spec via flag: `npx -p evil-pkg some-cmd`, `pipx run --spec evil-pkg
+//     some-cmd`. The flag's value (or values, when repeated) is the package
+//     spec; the trailing positional is the command name, not a package.
+//   - Spec via positional: `npx evil-pkg`, `bunx evil-pkg`, `pipx run
+//     evil-pkg`. The first non-flag token is the spec.
+//
+// For PipxStyle managers we first locate the action verb (`run`, `install`,
+// `upgrade`, `inject`) and parse what follows.
 func (m *Manager) ParseInstalls(args []string) []packagemanager.Install {
 	rest := args
 	if m.opts.PipxStyle {
@@ -145,6 +183,20 @@ func (m *Manager) ParseInstalls(args []string) []packagemanager.Install {
 		}
 	}
 
+	// Spec-via-flag wins over spec-via-positional: when the user wrote
+	// `npx -p foo cmd`, "cmd" is a binary name inside the package "foo",
+	// not itself a package.
+	if len(m.opts.SpecFlags) > 0 {
+		flagSpecs := argv.CollectFlagValues(rest, m.opts.SpecFlags, m.opts.FlagsWithValues)
+		if len(flagSpecs) > 0 {
+			out := make([]packagemanager.Install, 0, len(flagSpecs))
+			for _, spec := range flagSpecs {
+				out = append(out, m.parseSpec(spec))
+			}
+			return out
+		}
+	}
+
 	spec, _, ok := argv.FirstNonFlagWithTable(rest, m.opts.FlagsWithValues)
 	if !ok {
 		return nil
@@ -154,20 +206,21 @@ func (m *Manager) ParseInstalls(args []string) []packagemanager.Install {
 	if spec == "help" {
 		return nil
 	}
+	return []packagemanager.Install{m.parseSpec(spec)}
+}
 
-	var install packagemanager.Install
+func (m *Manager) parseSpec(spec string) packagemanager.Install {
 	switch m.opts.Ecosystem {
 	case intel.EcosystemNPM:
-		install = jsspec.Parse(spec)
+		return jsspec.Parse(spec)
 	case intel.EcosystemPyPI:
-		install = pyspec.Parse(spec)
+		return pyspec.Parse(spec)
 	default:
-		install = packagemanager.Install{
+		return packagemanager.Install{
 			Ref:     intel.PackageRef{Ecosystem: m.opts.Ecosystem, Name: spec},
 			RawSpec: spec,
 		}
 	}
-	return []packagemanager.Install{install}
 }
 
 // ManifestRefs implements packagemanager.PackageManager. The exec-style

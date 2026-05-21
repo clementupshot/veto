@@ -15,6 +15,7 @@ func TestNpxParseInstalls(t *testing.T) {
 		Name:            "npx",
 		Ecosystem:       intel.EcosystemNPM,
 		FlagsWithValues: pmexec.NpxFlagsWithValues,
+		SpecFlags:       pmexec.NpxSpecFlags,
 	})
 	require.Equal(t, "npx", m.Name())
 	require.Equal(t, intel.EcosystemNPM, m.Ecosystem())
@@ -25,25 +26,45 @@ func TestNpxParseInstalls(t *testing.T) {
 		want []packagemanager.Install
 	}{
 		{
-			name: "global flag-with-value before spec is skipped",
-			args: []string{"--package", "create-react-app", "my-cli"},
-			// Note: --package's value IS itself a package (the one npx fetches),
-			// but per the simple "first non-flag" model the spec is what comes
-			// after. We test only that the parser doesn't crash and returns
-			// the trailing positional.
+			// `npx --package pkg cmd` fetches pkg and runs cmd FROM IT — the
+			// thing to gate is the value of --package, not the positional.
+			name: "--package value is the spec, positional is the command name",
+			args: []string{"--package", "evil-pkg", "my-cli"},
 			want: []packagemanager.Install{
-				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "my-cli"}, RawSpec: "my-cli"},
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil-pkg"}, RawSpec: "evil-pkg"},
 			},
 		},
 		{
-			name: "--flag=value form skipped",
-			args: []string{"--package=create-react-app", "my-cli"},
+			name: "-p alias works the same way",
+			args: []string{"-p", "evil-pkg", "my-cli"},
 			want: []packagemanager.Install{
-				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "my-cli"}, RawSpec: "my-cli"},
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil-pkg"}, RawSpec: "evil-pkg"},
 			},
 		},
 		{
-			name: "plain flag (no value) still works",
+			name: "--package=value form",
+			args: []string{"--package=evil-pkg", "my-cli"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil-pkg"}, RawSpec: "evil-pkg"},
+			},
+		},
+		{
+			name: "repeated --package flags gate each value",
+			args: []string{"-p", "eslint", "--package", "prettier", "lint-cmd"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "eslint"}, RawSpec: "eslint"},
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "prettier"}, RawSpec: "prettier"},
+			},
+		},
+		{
+			name: "no --package falls back to first positional",
+			args: []string{"create-react-app", "myapp"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "create-react-app"}, RawSpec: "create-react-app"},
+			},
+		},
+		{
+			name: "non-spec flags before positional still work",
 			args: []string{"--yes", "create-react-app"},
 			want: []packagemanager.Install{
 				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "create-react-app"}, RawSpec: "create-react-app"},
@@ -63,6 +84,7 @@ func TestPipxParseInstalls(t *testing.T) {
 		Ecosystem:       intel.EcosystemPyPI,
 		PipxStyle:       true,
 		FlagsWithValues: pmexec.PipxFlagsWithValues,
+		SpecFlags:       pmexec.PipxSpecFlags,
 	})
 
 	cases := []struct {
@@ -71,31 +93,46 @@ func TestPipxParseInstalls(t *testing.T) {
 		want []packagemanager.Install
 	}{
 		{
-			name: "global flag-with-value before verb",
+			// `pipx run --spec pkg cmd` fetches pkg and runs cmd from it.
+			name: "--spec value is the spec",
+			args: []string{"run", "--spec", "evil-pkg", "actual-cmd"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-pkg"}, RawSpec: "evil-pkg"},
+			},
+		},
+		{
+			name: "--spec=value form",
+			args: []string{"run", "--spec=evil-pkg", "actual-cmd"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-pkg"}, RawSpec: "evil-pkg"},
+			},
+		},
+		{
+			name: "no --spec falls back to first positional",
+			args: []string{"run", "ruff"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ruff"}, RawSpec: "ruff"},
+			},
+		},
+		{
+			name: "global flag-with-value before verb, no spec flag",
 			args: []string{"--python", "python3.12", "run", "ruff"},
 			want: []packagemanager.Install{
 				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ruff"}, RawSpec: "ruff"},
 			},
 		},
 		{
-			name: "--flag=value before verb",
-			args: []string{"--python=python3.12", "run", "ruff"},
+			name: "install verb with positional",
+			args: []string{"install", "ruff"},
 			want: []packagemanager.Install{
 				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ruff"}, RawSpec: "ruff"},
 			},
 		},
 		{
-			name: "flag-with-value after verb",
-			args: []string{"install", "--python", "python3.12", "ruff"},
+			name: "install verb with --spec",
+			args: []string{"install", "--spec", "evil-pkg", "actual-cmd"},
 			want: []packagemanager.Install{
-				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ruff"}, RawSpec: "ruff"},
-			},
-		},
-		{
-			name: "plain flag (no value) still works",
-			args: []string{"install", "--force", "ruff"},
-			want: []packagemanager.Install{
-				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ruff"}, RawSpec: "ruff"},
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-pkg"}, RawSpec: "evil-pkg"},
 			},
 		},
 	}

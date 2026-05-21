@@ -59,7 +59,16 @@ const (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	args := os.Args[1:]
+	// Shim dispatch: when invoked as a symlink whose basename matches a
+	// known package manager (e.g. ~/.local/bin/npm → bouncer), prepend the
+	// PM name so `npm install foo` behaves like `bouncer npm install foo`.
+	// This is the integration path for Codex and any other agent/CI that
+	// doesn't expose a per-tool hook protocol.
+	if self := filepath.Base(os.Args[0]); isShimName(self) {
+		args = append([]string{self}, args...)
+	}
+	os.Exit(run(args))
 }
 
 func run(args []string) int {
@@ -84,9 +93,26 @@ func run(args []string) int {
 		return runSync(logger, cfg)
 	case "status":
 		return runStatus(logger, cfg)
+	case "install-shims":
+		return runInstallShims(logger, args[1:])
+	case "uninstall-shims":
+		return runUninstallShims(logger, args[1:])
 	}
 
 	return runGate(logger, cfg, args)
+}
+
+// isShimName reports whether basename matches one of the package-manager
+// binaries bouncer shadows via PATH shims. Kept in main.go so shim dispatch
+// stays fast and dependency-free (no config or store touched on the hot path).
+func isShimName(basename string) bool {
+	switch basename {
+	case "npm", "pnpm", "yarn", "bun",
+		"npx", "pnpx", "bunx",
+		"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm":
+		return true
+	}
+	return false
 }
 
 // runGate handles the `bouncer <pm> <args...>` path: gate the install, then
@@ -375,11 +401,11 @@ func buildPackageManagers() map[string]packagemanager.PackageManager {
 		"pdm":    pdm.New(),
 
 		// Fetch-and-run binaries — every non-help invocation is treated as install.
-		"npx":  pmexec.New(pmexec.Options{Name: "npx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.NpxFlagsWithValues}),
-		"pnpx": pmexec.New(pmexec.Options{Name: "pnpx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.PnpxFlagsWithValues}),
+		"npx":  pmexec.New(pmexec.Options{Name: "npx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.NpxFlagsWithValues, SpecFlags: pmexec.NpxSpecFlags}),
+		"pnpx": pmexec.New(pmexec.Options{Name: "pnpx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.PnpxFlagsWithValues, SpecFlags: pmexec.PnpxSpecFlags}),
 		"bunx": pmexec.New(pmexec.Options{Name: "bunx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.BunxFlagsWithValues}),
 		"uvx":  pmexec.New(pmexec.Options{Name: "uvx", Ecosystem: intel.EcosystemPyPI, FlagsWithValues: pmexec.UvxFlagsWithValues}),
-		"pipx": pmexec.New(pmexec.Options{Name: "pipx", Ecosystem: intel.EcosystemPyPI, PipxStyle: true, FlagsWithValues: pmexec.PipxFlagsWithValues}),
+		"pipx": pmexec.New(pmexec.Options{Name: "pipx", Ecosystem: intel.EcosystemPyPI, PipxStyle: true, FlagsWithValues: pmexec.PipxFlagsWithValues, SpecFlags: pmexec.PipxSpecFlags}),
 	}
 }
 
@@ -401,6 +427,13 @@ func printUsage(w io.Writer) {
 Usage:
   bouncer <pm> <pm-args...>    gate a package-manager invocation, then exec it
   bouncer sync                 refresh malware intel from all configured sources
+  bouncer install-shims [--dir DIR] [--force]
+                               create PATH symlinks so `+"`npm install foo`"+` is
+                               routed through bouncer transparently (default
+                               dir: ~/.local/bin). Use this to wire up Codex,
+                               Sirene, CI, or any shell without a hook layer.
+  bouncer uninstall-shims [--dir DIR]
+                               remove bouncer-managed symlinks from DIR
   bouncer status               print configured sources and cache location
   bouncer help                 this message
 

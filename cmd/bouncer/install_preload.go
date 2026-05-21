@@ -19,12 +19,16 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/brynbellomy/go-utils/errors"
 	"github.com/rs/zerolog"
@@ -77,6 +81,23 @@ func runInstallPreload(logger zerolog.Logger, args []string) int {
 		return exitInternal
 	}
 
+	// Verify dyld accepts the SOURCE dylib before copying it into place.
+	// If we copied first then verified, a bad dylib would overwrite the
+	// user's existing (good) install at the same path — and since their
+	// shell rc already points at that path, every new terminal would
+	// abort with a dyld error. Verifying first means a failure leaves
+	// both the installed copy AND the shell rc untouched.
+	if err := verifyInterposerLoads(opts.libPath, bouncerPath); err != nil {
+		logger.Error().Err(err).Msg("interposer load check")
+		fmt.Fprintln(os.Stderr, "bouncer: ERROR — dyld rejected the interposer.")
+		fmt.Fprintf(os.Stderr, "  underlying error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Possible causes: arch mismatch (try `make clean && make interposer`),")
+		fmt.Fprintln(os.Stderr, "corrupted dylib, or a macOS code-signing policy blocking it.")
+		fmt.Fprintln(os.Stderr, "Nothing was modified — your previous Layer 3 install (if any) is intact.")
+		return exitInternal
+	}
+	fmt.Println("bouncer: verified — dyld accepted the interposer in a test process.")
+
 	installedLibPath, err := copyInterposer(opts.libPath, opts.installTo)
 	if err != nil {
 		logger.Error().Err(err).Msg("copy interposer")
@@ -117,10 +138,74 @@ func runInstallPreload(logger zerolog.Logger, args []string) int {
 		return exitInternal
 	}
 	fmt.Printf("bouncer: wrote preload block to %s\n", rcPath)
-	fmt.Println("         Start a fresh shell (or `source` the rc) for the interposer to take effect.")
+	fmt.Println("         Open a new terminal (or `source ~/.zshrc`), then run `bouncer doctor` —")
+	fmt.Println("         the 'interposer env' check should go from WARN to PASS.")
 	fmt.Println()
 	printSIPCaveat(os.Stdout)
 	return exitOK
+}
+
+// verifyInterposerLoads spawns a quick test subprocess with the
+// preload env var set, exec'ing the bouncer binary itself with `help`.
+// If dyld can't load the dylib, the child aborts with a stderr message
+// starting "dyld[…]: terminating because inserted dylib '…' could not
+// be loaded". We surface that as an error so install-preload can roll
+// back before touching the user's shell rc.
+//
+// We exec the bouncer binary specifically because (a) we just installed
+// it and know it exists, (b) it's user-installed, not SIP-protected,
+// so DYLD_INSERT_LIBRARIES actually applies, and (c) `bouncer help`
+// completes in milliseconds without doing any I/O.
+func verifyInterposerLoads(libPath, bouncerPath string) error {
+	envVar := "DYLD_INSERT_LIBRARIES"
+	if runtime.GOOS != "darwin" {
+		envVar = "LD_PRELOAD"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bouncerPath, "help")
+	cmd.Env = []string{
+		envVar + "=" + libPath,
+		"BOUNCER_PATH=" + bouncerPath,
+		"PATH=/usr/bin:/bin",
+		"HOME=" + os.Getenv("HOME"),
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = io.Discard
+	err := cmd.Run()
+	// Two failure modes worth catching:
+	//   1. exec failed (binary doesn't exist, permissions, etc.) — wrapped.
+	//   2. dyld error message in stderr — surface it directly.
+	if msg := stderr.String(); strings.Contains(msg, "could not be loaded") ||
+		strings.Contains(msg, "cannot be preloaded") {
+		// First line is usually the most useful — drop anything after.
+		firstLine := msg
+		if idx := strings.IndexByte(msg, '\n'); idx > 0 {
+			firstLine = msg[:idx]
+		}
+		return errors.WithNew(strings.TrimSpace(firstLine))
+	}
+	if err != nil {
+		// Distinguish "process exited non-zero" from "process aborted by
+		// signal" — the second is what dyld does on a load failure. We
+		// don't strictly need this branch (the stderr scan above covers
+		// the common case), but it catches truncated-stderr edge cases.
+		return errors.With(err, "verification subprocess failed").Set(
+			"stderr_excerpt", truncateForError(stderr.String(), 200),
+		)
+	}
+	return nil
+}
+
+// truncateForError caps a stderr capture for inclusion in an error
+// message, so a multi-line dyld trace doesn't explode the output.
+func truncateForError(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // runUninstallPreload removes the managed block from the shell rc and
@@ -411,14 +496,20 @@ func autoDetectShellRC() (string, error) {
 }
 
 // printSIPCaveat surfaces the macOS-specific gotcha so colleagues
-// configuring the interposer know what won't be covered. Linux users see
-// nothing — LD_PRELOAD has fewer gotchas.
+// configuring the interposer know what won't be covered AND what
+// closes most of the gap. Linux users see nothing — LD_PRELOAD has
+// fewer gotchas.
 func printSIPCaveat(w io.Writer) {
 	if runtime.GOOS != "darwin" {
 		return
 	}
 	fmt.Fprintln(w, "macOS note: DYLD_INSERT_LIBRARIES is stripped by dyld for SIP-protected")
-	fmt.Fprintln(w, "binaries (everything under /usr/bin, /usr/sbin, /System/...). If an agent")
-	fmt.Fprintln(w, "directly invokes /usr/bin/* to fetch packages, the interposer won't load.")
-	fmt.Fprintln(w, "Coverage still applies to user-installed binaries (homebrew, mise, etc.).")
+	fmt.Fprintln(w, "binaries (/usr/bin, /usr/sbin, /System/...). Layer 3 will not load")
+	fmt.Fprintln(w, "into those processes.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Layer 4 (`bouncer install-wrappers`) closes most of the gap: it replaces")
+	fmt.Fprintln(w, "the actual binary bytes at homebrew/mise install paths, so the gate fires")
+	fmt.Fprintln(w, "even when DYLD_INSERT_LIBRARIES is stripped or never inherited (e.g. a")
+	fmt.Fprintln(w, "Python subprocess.run with shell=False and env={}). SIP-protected binaries")
+	fmt.Fprintln(w, "themselves remain out of reach — those dirs are read-only by macOS design.")
 }

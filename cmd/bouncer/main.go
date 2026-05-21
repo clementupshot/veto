@@ -56,6 +56,15 @@ const (
 	// headroom so the first-time experience isn't surprising. Subsequent
 	// refreshes short-circuit via etag in milliseconds.
 	syncTimeout = 5 * time.Minute
+
+	// minHealthyReportCount is the sanity floor below which we treat the
+	// intel store as broken and refuse to gate. Aikido alone publishes
+	// >120k npm entries today; OpenSSF and OSV add hundreds of thousands
+	// more. A value under this floor means either every source is empty,
+	// a CDN returned [] for every feed, or the user pointed BOUNCER_SOURCES
+	// at a non-source name and got the NopSource fallback. None of these
+	// states are safe to gate against.
+	minHealthyReportCount = 1000
 )
 
 func main() {
@@ -147,7 +156,21 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 		// Don't fail open: if we have zero intel, we can't gate. Refuse with
 		// a clear message rather than letting an install through unchecked.
 		logger.Error().Err(err).Msg("intel refresh failed — refusing to gate without data")
-		fmt.Fprintln(os.Stderr, "bouncer: intel refresh failed; install refused to fail closed")
+		fmt.Fprintln(os.Stderr, "bouncer: INTERNAL ERROR — intel refresh failed; install aborted fail-closed.")
+		return exitInternal
+	}
+
+	// Sanity floor on store health. An empty store means every lookup would
+	// return "clean," which is worse than useless — it's silently allowing
+	// packages through under the appearance of being gated. Either upstream
+	// is broken or compromised. Fail closed loudly.
+	if reportCount := store.ReportCount(); reportCount < minHealthyReportCount {
+		logger.Error().
+			Int("reports", reportCount).
+			Int("floor", minHealthyReportCount).
+			Msg("intel store below sanity floor — refusing to gate")
+		fmt.Fprintf(os.Stderr, "bouncer: INTERNAL ERROR — intel store has only %d reports (expected at least %d); install aborted fail-closed.\n", reportCount, minHealthyReportCount)
+		fmt.Fprintln(os.Stderr, "Check that your sources are configured correctly and reachable: `bouncer status` and `bouncer sync`.")
 		return exitInternal
 	}
 
@@ -162,6 +185,9 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 	case gate.OutcomeRefuse:
 		printRefusal(os.Stderr, decision)
 		return exitRefused
+	case gate.OutcomeAbort:
+		printAbort(os.Stderr, decision)
+		return exitInternal
 	}
 
 	logger.Error().Str("outcome", string(decision.Outcome)).Msg("unknown gate outcome")
@@ -209,6 +235,23 @@ func printRefusal(w io.Writer, decision gate.Decision) {
 		}
 	}
 	fmt.Fprintln(w, "\nTo override (you really shouldn't), set BOUNCER_BYPASS=1 and re-invoke the package manager directly.")
+}
+
+// printAbort writes a loud, distinct error when the gate could not make a
+// confident decision (e.g., a manifest file failed to parse). Distinguishing
+// this from a malware-driven refusal matters: a colleague seeing "refused"
+// might assume a package was flagged, but Abort means bouncer's own
+// machinery couldn't reach a verdict and refused to take the risk.
+func printAbort(w io.Writer, decision gate.Decision) {
+	fmt.Fprintln(w, "bouncer: INTERNAL ERROR — install aborted fail-closed.")
+	fmt.Fprintln(w, "  The gate could not make a confident safety decision and refused to run the package manager.")
+	if len(decision.Errors) > 0 {
+		fmt.Fprintln(w, "  Underlying errors:")
+		for _, e := range decision.Errors {
+			fmt.Fprintf(w, "    - %v\n", e)
+		}
+	}
+	fmt.Fprintln(w, "\nThis is not a malware block — it's a bouncer-side failure. Investigate before retrying.")
 }
 
 func displayVersion(v string) string {

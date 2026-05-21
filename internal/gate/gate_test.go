@@ -150,11 +150,13 @@ func TestEvaluateManifestExpansionGatesAlongsideArgvInstalls(t *testing.T) {
 	require.Len(t, dec.Flagged(), 1)
 }
 
-func TestEvaluateManifestExpanderErrorLogsAndContinues(t *testing.T) {
-	// I/O failure on the manifest must NOT crash the gate; argv-named installs
-	// still get checked.
+func TestEvaluateManifestExpanderErrorAbortsFailClosed(t *testing.T) {
+	// I/O failure on the manifest must NOT silently pass argv-named installs
+	// through — we can't prove the manifest's contents are safe, so the whole
+	// install is aborted with a distinct outcome.
 	store := buildStore(t)
-	exp := &fakeExpander{err: errSentinel{}}
+	sentinel := errSentinel{}
+	exp := &fakeExpander{err: sentinel}
 	policy := gate.DefaultPolicy()
 	policy.ManifestExpander = exp
 	g := gate.New(store, policy)
@@ -165,7 +167,9 @@ func TestEvaluateManifestExpanderErrorLogsAndContinues(t *testing.T) {
 		},
 		packagemanager.ManifestRef{Path: "missing.txt", Kind: packagemanager.ManifestKindRequirements},
 	)
-	require.Equal(t, gate.OutcomeAllow, dec.Outcome)
+	require.Equal(t, gate.OutcomeAbort, dec.Outcome)
+	require.Len(t, dec.Errors, 1)
+	require.ErrorIs(t, dec.Errors[0], sentinel)
 }
 
 type errSentinel struct{}

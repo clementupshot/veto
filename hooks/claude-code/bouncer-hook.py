@@ -16,7 +16,9 @@ Escape hatch: prepend `BOUNCER_BYPASS=1 ` to the command.
 """
 
 import json
+import os
 import shlex
+import shutil
 import sys
 
 PMS = {
@@ -247,6 +249,19 @@ def analyze(cmd):
     return None
 
 
+def bouncer_reachable():
+    """Returns the absolute path to the bouncer binary on PATH, or None if
+    it cannot be resolved or isn't executable. Hooks must fail closed if
+    bouncer can't actually be invoked — telling the agent to "prefix with
+    bouncer" is useless if the prefix won't run."""
+    path = shutil.which("bouncer")
+    if not path:
+        return None
+    if not os.access(path, os.X_OK):
+        return None
+    return path
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -261,6 +276,35 @@ def main():
     if not finding:
         return
     pm, tokens = finding
+
+    # Fail-closed if bouncer itself isn't reachable: telling the agent to add
+    # a `bouncer` prefix is meaningless when there's no bouncer to invoke.
+    # Surface this loudly so colleagues notice the mis-install instead of
+    # silently believing the gate is running.
+    if not bouncer_reachable():
+        out = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    f"bouncer-hook: BLOCKED unguarded `{pm}` invocation, "
+                    f"AND the bouncer binary itself was not found on PATH.\n\n"
+                    f"This means the safety gate is not installed correctly. "
+                    f"Do NOT retry this command — the agent has no way to "
+                    f"route a package-manager call through a malware scan "
+                    f"right now.\n\n"
+                    f"To fix:\n"
+                    f"  1. Build and install bouncer: `make install` in the "
+                    f"package-bouncer repo, OR `go install "
+                    f"github.com/brynbellomy/package-bouncer/cmd/bouncer@latest`\n"
+                    f"  2. Confirm `which bouncer` resolves to a real binary\n"
+                    f"  3. Then retry the original command."
+                ),
+            }
+        }
+        json.dump(out, sys.stdout)
+        return
+
     corrected = "bouncer " + " ".join(shlex.quote(t) for t in tokens)
     out = {
         "hookSpecificOutput": {
@@ -280,5 +324,48 @@ def main():
     json.dump(out, sys.stdout)
 
 
+# Claude Code's PreToolUse hooks "fail open" when the hook script exits with
+# any non-zero status other than 2 — the tool call proceeds as if no hook ran.
+# That makes uncaught exceptions in this script a silent fail-open hole: a
+# missing import, a parser bug, anything that lets an exception escape would
+# let an unguarded `npm install evil` through.
+#
+# Two-part defense:
+#  1. Wrap main() so any exception is converted to a hard `deny` JSON output
+#     on stdout and a clean exit 0. The tool call is blocked with a clear
+#     "INTERNAL ERROR — install aborted" message.
+#  2. If even that fails (e.g. stdout is closed, JSON encoding raises), exit
+#     with status 2, which Claude Code treats as a blocking error.
+#
+# The only fail-open path that remains is "Python interpreter not present at
+# the shebang path" — at that point Claude Code never even runs this script.
+# A Go rewrite would close that final hole; tracked as a deferred task.
+def safe_main():
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001 — intentional catch-all
+        try:
+            json.dump({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "bouncer-hook: INTERNAL ERROR in hook script — install "
+                        "aborted fail-closed.\n\n"
+                        "The hook crashed before it could make a routing "
+                        "decision. The agent's command was NOT executed.\n\n"
+                        f"Underlying error: {type(exc).__name__}: {exc}\n\n"
+                        "Re-run the original command only after the hook is "
+                        "fixed (or temporarily unwire it from "
+                        "~/.claude/settings.json if you accept the risk)."
+                    ),
+                }
+            }, sys.stdout)
+        except Exception:
+            # stdout broken or JSON encoder choked. Exit 2 makes Claude Code
+            # treat this as a blocking error per its documented contract.
+            sys.exit(2)
+
+
 if __name__ == "__main__":
-    main()
+    safe_main()

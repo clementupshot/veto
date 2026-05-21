@@ -26,6 +26,13 @@ const (
 	// OutcomePassThrough: the command did not describe an install (parser
 	// returned nil). The bouncer execs the real binary unchanged.
 	OutcomePassThrough Outcome = "passthrough"
+
+	// OutcomeAbort: an internal failure prevented the gate from making a
+	// confident decision — typically a manifest file the gate was supposed to
+	// read raised an I/O error. The bouncer must NOT exec the real package
+	// manager; the agent sees a distinct error from malware-driven refusals
+	// so the failure isn't mistaken for a normal block.
+	OutcomeAbort Outcome = "abort"
 )
 
 // Decision is the full result of an evaluation, including per-install
@@ -33,6 +40,10 @@ const (
 type Decision struct {
 	Outcome  Outcome
 	Verdicts []intel.Verdict
+
+	// Errors carries internal failures that pushed Outcome to OutcomeAbort.
+	// Always nil for OutcomeAllow / OutcomeRefuse / OutcomePassThrough.
+	Errors []error
 }
 
 // Flagged returns the verdicts that produced refusals, in order. Empty when
@@ -134,6 +145,12 @@ func (g *Gate) WithLogger(logger zerolog.Logger) *Gate {
 // to discover transitive Installs (pip's `-r requirements.txt`, npm's
 // `package.json`, poetry's `pyproject.toml`). Any installs the expander
 // produces are gated alongside the argv-named ones.
+//
+// Fail-closed semantics: if a ManifestExpander returns an error (typically
+// because a referenced manifest file can't be parsed or doesn't exist when
+// it should), Evaluate returns OutcomeAbort. The agent's command never
+// reaches the real package manager; the caller sees a clearly-distinct
+// error from malware-driven refusals.
 func (g *Gate) Evaluate(installs []packagemanager.Install, manifestRefs ...packagemanager.ManifestRef) Decision {
 	if installs == nil && len(manifestRefs) == 0 {
 		return Decision{Outcome: OutcomePassThrough}
@@ -142,20 +159,27 @@ func (g *Gate) Evaluate(installs []packagemanager.Install, manifestRefs ...packa
 	// Expand manifest refs first so a refusal from inside a requirements.txt
 	// flips the decision even when argv named no explicit specs.
 	expanded := installs
+	var expanderErrs []error
 	for _, ref := range manifestRefs {
 		extra, err := g.expander.Expand(ref)
 		if err != nil {
-			// Log and continue: we'd rather gate the explicit args than refuse
-			// because a requirements file path was wrong. The caller already
-			// sees argv-named installs even if the manifest can't be read.
-			g.logger.Warn().
+			// Fail-closed: we cannot prove the manifest's contents are safe, so
+			// the install must not proceed. The caller maps OutcomeAbort to an
+			// internal-error exit code so the failure isn't mistaken for a
+			// "package is malicious" block.
+			g.logger.Error().
 				Err(err).
 				Str("path", ref.Path).
 				Str("kind", string(ref.Kind)).
-				Msg("manifest expansion failed; gating argv-named installs only")
+				Msg("manifest expansion failed; aborting install fail-closed")
+			expanderErrs = append(expanderErrs, err)
 			continue
 		}
 		expanded = append(expanded, extra...)
+	}
+
+	if len(expanderErrs) > 0 {
+		return Decision{Outcome: OutcomeAbort, Errors: expanderErrs}
 	}
 
 	if expanded == nil {

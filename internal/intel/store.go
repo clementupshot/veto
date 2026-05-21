@@ -28,6 +28,11 @@ type Store interface {
 	// SourceIDs returns the IDs of all sources registered with this Store, in
 	// registration order.
 	SourceIDs() []string
+
+	// ReportCount returns the total number of indexed (source, package, version)
+	// tuples. Callers can use this to fail closed when the index is implausibly
+	// small (e.g. an upstream feed returning an empty payload).
+	ReportCount() int
 }
 
 // NewStore builds a Store backed by the given sources. The Store is empty
@@ -205,4 +210,28 @@ func (s *memStore) SourceIDs() []string {
 		out = append(out, src.ID())
 	}
 	return out
+}
+
+// ReportCount implements Store. Sums the size of every value slice in the
+// version-keyed index plus name-only reports (those with empty Version, kept
+// only in byName). The number is a coarse signal of intel-store health — a
+// healthy store has hundreds of thousands of reports.
+func (s *memStore) ReportCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	total := 0
+	for _, reports := range s.byVersion {
+		total += len(reports)
+	}
+	// Add reports that are name-only (no entry in byVersion). These are
+	// the "any version of this package is bad" findings.
+	for k, reports := range s.byName {
+		for _, r := range reports {
+			if r.Version == "" {
+				_ = k
+				total++
+			}
+		}
+	}
+	return total
 }

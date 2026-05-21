@@ -124,3 +124,29 @@ func TestNopSource(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, reports)
 }
+
+func TestStoreReportCount(t *testing.T) {
+	logger := zerolog.Nop()
+
+	t.Run("empty store reports zero", func(t *testing.T) {
+		store := intel.NewStore(logger, intel.NopSource{})
+		require.NoError(t, store.Refresh(context.Background()))
+		require.Equal(t, 0, store.ReportCount())
+	})
+
+	t.Run("counts unique (source, ref, version) tuples", func(t *testing.T) {
+		src := &fakeSource{
+			id: "alpha",
+			per: map[intel.Ecosystem][]intel.MalwareReport{
+				intel.EcosystemNPM: {
+					{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil", Version: "1.0.0"}, SourceID: "alpha"},
+					{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil", Version: "1.0.1"}, SourceID: "alpha"},
+					{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "any-version-bad"}, SourceID: "alpha"},
+				},
+			},
+		}
+		store := intel.NewStore(logger, src)
+		require.NoError(t, store.Refresh(context.Background()))
+		require.Equal(t, 3, store.ReportCount())
+	})
+}

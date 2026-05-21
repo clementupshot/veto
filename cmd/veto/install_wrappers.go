@@ -33,8 +33,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,6 +83,25 @@ type wrapperEntry struct {
 	// ("homebrew", "mise", "asdf", "user"). Cosmetic — used only in
 	// the per-wrapper status line.
 	Source string `json:"source"`
+	// Sha256 is the hex sha256 of the .veto-original file content at
+	// install time. Verified by findRealBinary before syscall.Exec —
+	// a mismatch means a malicious package install script has
+	// replaced the sibling with attacker code, which would otherwise
+	// persist as a wormable RCE across PM invocations.
+	//
+	// Empty for legacy entries written before this PR; the
+	// integrity-check call site logs a one-time warning and proceeds
+	// so existing installs keep working until the user re-runs
+	// install-wrappers (the install path always populates this).
+	Sha256 string `json:"sha256,omitempty"`
+	// OriginalTarget captures os.Readlink(c.path) at install time when
+	// c.path was a symlink (homebrew shape: /opt/homebrew/bin/npm →
+	// ../Cellar/.../bin/npm). Used by unwrap --force when the symlink
+	// can no longer be resolved (the binary moved, the target was
+	// removed) — EvalSymlinks would fail there; OriginalTarget lets
+	// us still compare against the recorded value. Empty when the
+	// wrapped target was a regular file.
+	OriginalTarget string `json:"original_target,omitempty"`
 }
 
 // wrappedManagers is the set of PM names we wrap. Sourced from
@@ -139,26 +161,29 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 
 	stats := wrapperStats{}
 	for _, c := range candidates {
-		switch action, err := applyWrapper(c, vetoPath, opts.dryRun, opts.force); {
+		res, err := applyWrapper(c, vetoPath, opts.dryRun, opts.force)
+		switch {
 		case err != nil:
 			stats.failed++
 			fmt.Fprintf(os.Stderr, "  %-10s  FAIL  %s — %v\n", c.pm, c.path, err)
-		case action == wrapperActionSkipAlreadyOurs:
+		case res.action == wrapperActionSkipAlreadyOurs:
 			stats.alreadyOurs++
 			if opts.verbose {
 				fmt.Printf("  %-10s  ok    already wrapped: %s\n", c.pm, c.path)
 			}
-		case action == wrapperActionSkipDryRun:
+		case res.action == wrapperActionSkipDryRun:
 			stats.wouldWrap++
 			fmt.Printf("  %-10s  ok    would wrap: %s\n", c.pm, c.path)
-		case action == wrapperActionWrapped:
+		case res.action == wrapperActionWrapped:
 			stats.wrapped++
 			fmt.Printf("  %-10s  ok    wrapped: %s\n", c.pm, c.path)
 			state.add(wrapperEntry{
-				Path:         c.path,
-				OriginalPath: c.path + wrapperSuffix,
-				PM:           c.pm,
-				Source:       c.source,
+				Path:           c.path,
+				OriginalPath:   c.path + wrapperSuffix,
+				PM:             c.pm,
+				Source:         c.source,
+				Sha256:         res.sha256,
+				OriginalTarget: res.originalTarget,
 			})
 		}
 	}
@@ -210,7 +235,7 @@ func runUninstallWrappers(logger zerolog.Logger, cfg config, args []string) int 
 	failed := 0
 	removed := 0
 	for _, w := range state.Wrappers {
-		switch err := unwrap(w, vetoPath, opts.dryRun); {
+		switch err := unwrap(w, vetoPath, opts.dryRun, opts.force); {
 		case err != nil:
 			failed++
 			remaining = append(remaining, w)
@@ -442,6 +467,12 @@ func pointsAtVeto(linkPath, vetoPath string) bool {
 // "Already ours" is decided by pointsAtVeto (strict physical-path
 // identity), NOT by name substring matching — see that helper for the
 // rationale.
+//
+// TODO: emit a debug log on each silent-false return so the operator
+// can diagnose `veto install-wrappers: no candidate PM binaries found`
+// without re-running with strace. Requires plumbing a logger through
+// the discovery layer; surfaced in PR #1 review, deferred to a
+// follow-up because the plumbing is invasive.
 func isWrappableTarget(p, vetoPath string) bool {
 	info, err := os.Lstat(p)
 	if err != nil {
@@ -472,55 +503,125 @@ func isWrappableTarget(p, vetoPath string) bool {
 	return info.Mode()&0o111 != 0
 }
 
-// applyWrapper does the rename + symlink dance for one candidate.
-// Idempotent against already-installed wrappers (returns
-// wrapperActionSkipAlreadyOurs); refuses to clobber an existing
-// non-veto file unless --force was passed.
+// wrapResult carries the side-channel data the caller needs to
+// populate a wrapperEntry without re-statting the filesystem.
+type wrapResult struct {
+	action         wrapAction
+	sha256         string // hex sha256 of the .veto-original contents at install time
+	originalTarget string // os.Readlink(c.path) when c.path was a symlink; "" otherwise
+}
+
+// applyWrapper installs one wrapper at c.path. The flow is:
 //
-// Atomicity: we rename the original BEFORE creating the symlink. If
-// the symlink-create step fails we've still left the system in a
-// recoverable state: the user can move .veto-original back manually,
-// or re-run install-wrappers to retry.
-func applyWrapper(c wrapCandidate, vetoPath string, dryRun, force bool) (wrapAction, error) {
+//  1. Detect "already wrapped" (idempotent re-install).
+//  2. Detect partial-state: a veto symlink at c.path WITH no
+//     .veto-original sibling, or with a sibling that is itself a veto
+//     symlink. Refuse loudly — clobbering would lose the only path
+//     back to a working PM.
+//  3. Refuse to clobber an existing .veto-original unless --force.
+//  4. Capture os.Readlink(c.path) before the rename (M1 — restores
+//     unwrap --force when the symlink target has moved).
+//  5. Rename the real binary aside (atomic at the syscall level).
+//  6. Compute sha256 of the .veto-original contents (H4 — integrity
+//     pin verified before exec).
+//  7. Atomic temp-symlink-then-rename swap so a concurrent reader
+//     never sees ENOENT between (a) removing the renamed file and (b)
+//     putting the symlink there. macOS has no portable renameat2 from
+//     Go's stdlib, so the temp-link-then-rename pattern is the
+//     portable shape that gives us atomicity at the c.path inode.
+//
+// On step 7 failure we roll the rename in step 5 back so the user's
+// PM stays callable.
+func applyWrapper(c wrapCandidate, vetoPath string, dryRun, force bool) (wrapResult, error) {
+	res := wrapResult{}
 	original := c.path + wrapperSuffix
 
-	// Already wrapped? `c.path` is a symlink that resolves to the SAME
-	// physical file as vetoPath AND `<c.path>.veto-original` exists.
-	// Strict physical-path identity (not name substring) — see
-	// pointsAtVeto for rationale.
-	if existing, err := os.Lstat(c.path); err == nil && existing.Mode()&os.ModeSymlink != 0 {
-		if pointsAtVeto(c.path, vetoPath) {
-			if _, err := os.Lstat(original); err == nil {
-				return wrapperActionSkipAlreadyOurs, nil
-			}
+	existing, statErr := os.Lstat(c.path)
+	isExistingSymlink := statErr == nil && existing.Mode()&os.ModeSymlink != 0
+	isExistingVetoSymlink := isExistingSymlink && pointsAtVeto(c.path, vetoPath)
+
+	if isExistingVetoSymlink {
+		// Wrapper symlink already pointing at veto. The .veto-original
+		// must exist AND not itself be a veto symlink — otherwise we'd
+		// recurse on exec and `findRealBinary` would loop until the
+		// daemon ran out of file descriptors.
+		origInfo, origErr := os.Lstat(original)
+		switch {
+		case origErr != nil:
+			return res, errors.WithNew(
+				"wrapper symlink exists but .veto-original is missing — refusing to overwrite; "+
+					"restore .veto-original manually or remove the symlink before retrying").
+				Set("path", c.path).
+				Set("original", original)
+		case origInfo.Mode()&os.ModeSymlink != 0 && pointsAtVeto(original, vetoPath):
+			return res, errors.WithNew(
+				".veto-original is itself a veto symlink — refusing to overwrite; "+
+					"this state would cause findRealBinary to loop on exec").
+				Set("path", c.path).
+				Set("original", original)
+		default:
+			res.action = wrapperActionSkipAlreadyOurs
+			return res, nil
 		}
 	}
 
-	// Refuse to clobber if `.veto-original` already exists and we
-	// didn't ask for --force. This protects against the partial-state
-	// case where a previous wrap moved the original but failed to
-	// install the symlink.
 	if _, err := os.Lstat(original); err == nil && !force {
-		return wrapperActionWrapped, errors.WithNew(".veto-original already exists; pass --force to overwrite").
+		return res, errors.WithNew(".veto-original already exists; pass --force to overwrite").
 			Set("path", original)
 	}
 
 	if dryRun {
-		return wrapperActionSkipDryRun, nil
+		res.action = wrapperActionSkipDryRun
+		return res, nil
 	}
 
-	// 1) Move the real binary aside.
+	if isExistingSymlink {
+		if target, rerr := os.Readlink(c.path); rerr == nil {
+			res.originalTarget = target
+		}
+	}
+
 	if err := os.Rename(c.path, original); err != nil {
-		return wrapperActionWrapped, errors.With(err, "rename real binary aside").Set("from", c.path, "to", original)
+		return res, errors.With(err, "rename real binary aside").Set("from", c.path, "to", original)
 	}
-	// 2) Install the symlink at the original path.
-	if err := os.Symlink(vetoPath, c.path); err != nil {
-		// Best-effort rollback so we don't strand the user with a
-		// PM that's invisible.
+
+	sum, hashErr := sha256File(original)
+	if hashErr != nil {
 		_ = os.Rename(original, c.path)
-		return wrapperActionWrapped, errors.With(err, "create veto symlink").Set("path", c.path)
+		return res, errors.With(hashErr, "hash .veto-original").Set("path", original)
 	}
-	return wrapperActionWrapped, nil
+	res.sha256 = sum
+
+	tmpLink := c.path + ".veto-tmp"
+	_ = os.Remove(tmpLink) // any stragglers from a previous crash
+	if err := os.Symlink(vetoPath, tmpLink); err != nil {
+		_ = os.Rename(original, c.path)
+		return res, errors.With(err, "create temp veto symlink").Set("path", tmpLink)
+	}
+	if err := os.Rename(tmpLink, c.path); err != nil {
+		_ = os.Remove(tmpLink)
+		_ = os.Rename(original, c.path)
+		return res, errors.With(err, "rename temp veto symlink into place").Set("path", c.path)
+	}
+
+	res.action = wrapperActionWrapped
+	return res, nil
+}
+
+// sha256File returns the hex sha256 of the file at path, following
+// symlinks (so homebrew's Cellar-target shape hashes the real binary
+// content, not the symlink bytes).
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // unwrap reverses one wrapper entry. Symmetric with applyWrapper: it
@@ -534,32 +635,57 @@ func applyWrapper(c wrapCandidate, vetoPath string, dryRun, force bool) (wrapAct
 // replaced by a brew upgrade or by a third party, we bail out rather
 // than clobber it. Name-substring matching (the prior pattern) would
 // have accepted an attacker-planted symlink to /tmp/veto-evil.
-func unwrap(w wrapperEntry, vetoPath string, dryRun bool) error {
+//
+// force semantics (M1): when true and pointsAtVeto fails because
+// EvalSymlinks can't resolve (the wrapped binary moved, the symlink
+// target is dangling), we fall back to comparing os.Readlink(w.Path)
+// against w.OriginalTarget. This lets `uninstall-wrappers --force`
+// recover state when the upstream toolchain renamed its install dir
+// under us; without it the user is stranded with no clean unwrap path.
+func unwrap(w wrapperEntry, vetoPath string, dryRun, force bool) error {
 	if dryRun {
 		return nil
 	}
-	// Confirm Path is still a veto symlink before touching it.
 	info, err := os.Lstat(w.Path)
 	if err != nil {
-		// Path is gone (maybe an upgrade reinstalled it). If the
-		// `.veto-original` is also gone we have nothing to do; if
-		// it exists we leave it for the user.
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return errors.With(err, "lstat").Set("path", w.Path)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
+		// pointsAtVeto requires both sides to resolve via
+		// EvalSymlinks. When the wrapped binary's filesystem moved
+		// out from under us the resolved target is unavailable and
+		// the check fails — fall back to the recorded
+		// OriginalTarget when --force lets us.
 		if !pointsAtVeto(w.Path, vetoPath) {
-			// The symlink no longer resolves to our veto binary —
-			// either an upgrade replaced it with a real binary
-			// (homebrew/mise's reinstall behavior) or a third party
-			// swapped in a same-named target. Either way, we don't own
-			// it anymore — refuse to remove.
 			current, _ := os.Readlink(w.Path)
-			return errors.WithNew("path no longer points at veto; refusing to overwrite").
-				Set("path", w.Path, "current_target", current, "expected_veto", vetoPath)
+			if force && w.OriginalTarget != "" && current == w.OriginalTarget {
+				// Symlink still points at the recorded original
+				// target (e.g. unwrap after an EvalSymlinks-failing
+				// reinstall). Treat as recognisable state.
+			} else if force {
+				return errors.WithNew(
+					"path no longer points at veto (resolved target unavailable: %v); "+
+						"pass --force to remove anyway, or restore the original veto path manually").
+					Set("path", w.Path, "current_target", current, "expected_veto", vetoPath)
+			} else {
+				return errors.WithNew("path no longer points at veto; refusing to overwrite").
+					Set("path", w.Path, "current_target", current, "expected_veto", vetoPath)
+			}
 		}
+		// TOCTOU note: there is a small window between the
+		// pointsAtVeto check above and the os.Remove below in which
+		// an attacker could race-swap the symlink target. Not
+		// exploitable for bypass — os.Remove on a symlink unlinks
+		// the symlink inode without following the target, so a
+		// race-swap to /etc/passwd just removes a symlink the
+		// attacker would have to have created in c.path's directory
+		// (which would require write access there to begin with).
+		// The worst case is unwrap fails noisily on the next
+		// boot when the user re-runs install-wrappers; no privilege
+		// boundary is crossed. (PR #1 review.)
 		if err := os.Remove(w.Path); err != nil {
 			return errors.With(err, "remove veto symlink").Set("path", w.Path)
 		}

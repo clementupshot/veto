@@ -14,11 +14,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -359,11 +362,120 @@ func findWrappedOriginal(argv0 string) (string, bool) {
 	return original, true
 }
 
+// verifyWrappedOriginalIntegrity checks the .veto-original at
+// originalPath against the sha256 recorded by `install-wrappers` for
+// the wrapper at wrapperPath. The wrapper state file is loaded via
+// the same defaultCacheDir() resolution that install-wrappers uses
+// so the two halves of the layer-4 contract reference the same
+// persisted record.
+//
+// Failure modes:
+//
+//   - No state entry for wrapperPath: legacy install from before the
+//     sha256 field existed. Log once and proceed — old wrappers stay
+//     callable until the user re-runs install-wrappers. Backwards-
+//     compatibility is intentional: refusing here would brick every
+//     pre-PR install.
+//   - State entry has empty Sha256: same as above (a legacy entry
+//     might exist if the state file pre-dates this PR).
+//   - State entry has a Sha256 and it MATCHES the file: return nil.
+//   - State entry has a Sha256 and it does NOT match: an attacker
+//     overwrote the sibling. Return an error so the caller refuses
+//     the exec rather than running attacker code.
+//
+// TODO(H4): legacy-fallback once the sha256 field has been in place
+// for one release cycle, refuse exec on entries with no recorded
+// hash and prompt the user to re-run install-wrappers.
+func verifyWrappedOriginalIntegrity(wrapperPath, originalPath string) error {
+	expected, ok := lookupWrapperSha(wrapperPath)
+	if !ok {
+		// No state record: nothing to verify against. Warn once
+		// (process-lifetime) so the operator still gets a signal.
+		warnUnverifiedWrapperOnce(wrapperPath)
+		return nil
+	}
+	if expected == "" {
+		warnUnverifiedWrapperOnce(wrapperPath)
+		return nil
+	}
+	actual, err := sha256FileForExec(originalPath)
+	if err != nil {
+		return errors.With(err, "hash .veto-original for integrity check").Set("path", originalPath)
+	}
+	if actual != expected {
+		return errors.WithNew(
+			"integrity violation on .veto-original (expected sha256 mismatch); refusing exec").
+			Set("path", originalPath).
+			Set("expected", expected).
+			Set("got", actual)
+	}
+	return nil
+}
+
+func sha256FileForExec(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// lookupWrapperSha reads the wrapper state file and returns the
+// recorded sha256 for wrapperPath, or ("", false) if no entry exists.
+// Best-effort — any error reading the state file is treated as "no
+// record" so a broken/missing state file doesn't refuse legitimate
+// execs. The integrity check is defence-in-depth on top of the
+// install-time atomic rename + the .veto-original being a sibling
+// of a path the operator typed.
+func lookupWrapperSha(wrapperPath string) (string, bool) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return "", false
+	}
+	state, err := loadWrapperState(cfg)
+	if err != nil {
+		return "", false
+	}
+	for _, w := range state.Wrappers {
+		if w.Path == wrapperPath {
+			return w.Sha256, true
+		}
+	}
+	return "", false
+}
+
+// warnUnverifiedWrapperOnce de-duplicates the "no sha pinned" warning
+// per process lifetime so a daemon doing many execs doesn't spam.
+var (
+	unverifiedWarnedOnce sync.Map
+)
+
+func warnUnverifiedWrapperOnce(wrapperPath string) {
+	if _, loaded := unverifiedWarnedOnce.LoadOrStore(wrapperPath, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"veto: warning: no sha256 pinned for wrapper %q (legacy install); re-run `veto install-wrappers` to enable integrity check\n",
+		wrapperPath)
+}
+
 // findRealBinary returns the path veto should exec to satisfy a
 // gated install. Prefers a wrapped-original sibling (Layer 4), then
 // falls back to a PATH walk that skips any veto-pointing entries.
+//
+// Every sibling-found path passes through verifyWrappedOriginalIntegrity
+// before being handed to the caller, so an attacker who replaced the
+// sibling between install and exec is caught.
 func findRealBinary(name string) (string, error) {
 	if wrapped, ok := findWrappedOriginal(os.Args[0]); ok {
+		if err := verifyWrappedOriginalIntegrity(os.Args[0], wrapped); err != nil {
+			return "", err
+		}
 		return wrapped, nil
 	}
 	self, err := os.Executable()
@@ -403,6 +515,9 @@ func findRealBinary(name string) (string, error) {
 			// where every PATH entry has been wrapped would yield
 			// "not found in PATH" because every candidate gets skipped.
 			if sibling := candidate + ".veto-original"; isExecutableRegularOrSymlink(sibling) {
+				if err := verifyWrappedOriginalIntegrity(candidate, sibling); err != nil {
+					return "", err
+				}
 				return sibling, nil
 			}
 			continue

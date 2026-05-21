@@ -82,6 +82,17 @@ node` or `mise install node@whatever` overwrites the wrapper. Re-run
 `veto install-wrappers` after toolchain upgrades; `veto doctor`
 flags drift.
 
+Layer 4's strength depends on the integrity of the sibling
+`.veto-original` file. Veto pins its sha256 at install time and
+re-verifies on every exec. Without this, a malicious package install
+script could replace `.veto-original` with attacker code and persist
+as a wormable RCE across PM invocations — the script writes once,
+runs every time the operator types `npm install`. The install path
+is also atomic (temp-symlink-then-rename) so a concurrent reader
+never sees ENOENT, and the install refuses partial-state
+(veto symlink at the wrapper path with no sibling) loudly instead of
+silently clobbering the only path back to a working PM.
+
 ## Why this design
 
 Existing shell-function-based protection (e.g. Aikido `safe-chain`)

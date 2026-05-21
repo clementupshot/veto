@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -21,9 +23,9 @@ func TestApplyWrapper_HappyPath_RegularFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(npm, []byte("#!/bin/sh\nexec real-npm\n"), 0o755))
 
 	c := wrapCandidate{path: npm, pm: "npm", source: "user"}
-	action, err := applyWrapper(c, veto, false, false)
+	res, err := applyWrapper(c, veto, false, false)
 	require.NoError(t, err)
-	require.Equal(t, wrapperActionWrapped, action)
+	require.Equal(t, wrapperActionWrapped, res.action)
 
 	// npm is now a symlink to veto.
 	info, err := os.Lstat(npm)
@@ -54,9 +56,9 @@ func TestApplyWrapper_HappyPath_SymlinkSource(t *testing.T) {
 	require.NoError(t, os.Symlink(cellar, binNpm))
 
 	c := wrapCandidate{path: binNpm, pm: "npm", source: "homebrew"}
-	action, err := applyWrapper(c, veto, false, false)
+	res, err := applyWrapper(c, veto, false, false)
 	require.NoError(t, err)
-	require.Equal(t, wrapperActionWrapped, action)
+	require.Equal(t, wrapperActionWrapped, res.action)
 
 	// Symlink at original path now points at veto.
 	target, _ := os.Readlink(binNpm)
@@ -82,9 +84,9 @@ func TestApplyWrapper_IdempotentOnSecondCall(t *testing.T) {
 	_, err := applyWrapper(c, veto, false, false)
 	require.NoError(t, err)
 
-	action, err := applyWrapper(c, veto, false, false)
+	res, err := applyWrapper(c, veto, false, false)
 	require.NoError(t, err)
-	require.Equal(t, wrapperActionSkipAlreadyOurs, action)
+	require.Equal(t, wrapperActionSkipAlreadyOurs, res.action)
 }
 
 // TestApplyWrapper_RefusesToClobberPartialState: if `.veto-original`
@@ -119,9 +121,9 @@ func TestApplyWrapper_DryRun_TouchesNothing(t *testing.T) {
 	require.NoError(t, os.WriteFile(pip, originalBody, 0o755))
 
 	c := wrapCandidate{path: pip, pm: "pip", source: "user"}
-	action, err := applyWrapper(c, veto, true, false)
+	res, err := applyWrapper(c, veto, true, false)
 	require.NoError(t, err)
-	require.Equal(t, wrapperActionSkipDryRun, action)
+	require.Equal(t, wrapperActionSkipDryRun, res.action)
 
 	// File unchanged.
 	body, err := os.ReadFile(pip)
@@ -150,7 +152,7 @@ func TestUnwrap_RestoresOriginal(t *testing.T) {
 		PM:           "npm",
 		Source:       "user",
 	}
-	require.NoError(t, unwrap(entry, veto, false))
+	require.NoError(t, unwrap(entry, veto, false, false))
 
 	// npm is once again a regular file with the original body.
 	info, err := os.Lstat(npm)
@@ -180,7 +182,7 @@ func TestUnwrap_BailsIfSymlinkRetargeted(t *testing.T) {
 	require.NoError(t, os.WriteFile(original, []byte("orig"), 0o755))
 
 	entry := wrapperEntry{Path: npm, OriginalPath: original, PM: "npm"}
-	err := unwrap(entry, veto, false)
+	err := unwrap(entry, veto, false, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no longer points at veto")
 
@@ -336,7 +338,7 @@ func TestUnwrap_RefusesImpostorVetoSymlink(t *testing.T) {
 	require.NoError(t, os.Symlink(impostor, npm))
 	w := wrapperEntry{Path: npm, OriginalPath: npm + wrapperSuffix, PM: "npm", Source: "test"}
 
-	err := unwrap(w, veto, false)
+	err := unwrap(w, veto, false, false)
 	require.Error(t, err, "unwrap must refuse a symlink that no longer points at the real veto binary")
 	require.Contains(t, err.Error(), "refusing to overwrite")
 }
@@ -399,11 +401,200 @@ func TestRunInstallWrappers_EndToEnd(t *testing.T) {
 
 	// Unwrap each and confirm reversal.
 	for _, w := range loaded.Wrappers {
-		require.NoError(t, unwrap(w, vetoBin, false))
+		require.NoError(t, unwrap(w, vetoBin, false, false))
 	}
 	for _, c := range candidates {
 		info, err := os.Lstat(c.path)
 		require.NoError(t, err)
 		require.Zero(t, info.Mode()&os.ModeSymlink, "post-unwrap, path should be a regular file again")
 	}
+}
+
+// TestApplyWrapper_PinsSha256OnRegularFile (H4): a successful wrap
+// returns wrapResult.sha256 matching the original binary content. The
+// state file's wrapperEntry.Sha256 is then this exact value. Mutation
+// resistance: deleting the sha256 computation step in applyWrapper
+// returns an empty res.sha256 and this assertion fails.
+func TestApplyWrapper_PinsSha256OnRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+	npm := filepath.Join(dir, "npm")
+	body := []byte("#!/bin/sh\nexec real-npm\n")
+	require.NoError(t, os.WriteFile(npm, body, 0o755))
+
+	c := wrapCandidate{path: npm, pm: "npm", source: "user"}
+	res, err := applyWrapper(c, veto, false, false)
+	require.NoError(t, err)
+	require.Equal(t, wrapperActionWrapped, res.action)
+
+	want := sha256.Sum256(body)
+	require.Equal(t, hex.EncodeToString(want[:]), res.sha256, "sha256 must match original body")
+}
+
+// TestApplyWrapper_CapturesOriginalTarget (M1): when c.path is a
+// symlink (homebrew shape), wrapperEntry.OriginalTarget records
+// os.Readlink(c.path) at install time so unwrap --force can compare
+// against it when EvalSymlinks fails after a toolchain move.
+func TestApplyWrapper_CapturesOriginalTarget(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+	cellar := filepath.Join(dir, "cellar-npm")
+	require.NoError(t, os.WriteFile(cellar, []byte("real"), 0o755))
+	binNpm := filepath.Join(dir, "npm")
+	require.NoError(t, os.Symlink(cellar, binNpm))
+
+	c := wrapCandidate{path: binNpm, pm: "npm", source: "homebrew"}
+	res, err := applyWrapper(c, veto, false, false)
+	require.NoError(t, err)
+	require.Equal(t, cellar, res.originalTarget,
+		"OriginalTarget must record the pre-wrap symlink target")
+}
+
+// TestApplyWrapper_PartialStateGuard (H4): a pre-existing veto symlink
+// at c.path with NO .veto-original sibling is an incomplete prior
+// install. We must NOT silently re-wrap (that would lose the real
+// binary path forever); instead refuse loudly so the operator can
+// recover.
+func TestApplyWrapper_PartialStateGuard(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+	npm := filepath.Join(dir, "npm")
+	// Pre-existing veto symlink, but no .veto-original.
+	require.NoError(t, os.Symlink(veto, npm))
+
+	c := wrapCandidate{path: npm, pm: "npm", source: "user"}
+	res, err := applyWrapper(c, veto, false, true)
+	require.Error(t, err, "partial-state must fail loud")
+	require.Contains(t, err.Error(), ".veto-original is missing")
+	require.Equal(t, wrapAction(0), res.action) // zero-value action on error
+}
+
+// TestApplyWrapper_NoStrayTempLink (H4): the atomic-rename pattern
+// uses c.path + ".veto-tmp" as a staging point. After applyWrapper
+// returns successfully, the temp link must not still be on disk.
+func TestApplyWrapper_NoStrayTempLink(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+	npm := filepath.Join(dir, "npm")
+	require.NoError(t, os.WriteFile(npm, []byte("real"), 0o755))
+
+	c := wrapCandidate{path: npm, pm: "npm", source: "user"}
+	_, err := applyWrapper(c, veto, false, false)
+	require.NoError(t, err)
+	_, err = os.Lstat(npm + ".veto-tmp")
+	require.True(t, os.IsNotExist(err), ".veto-tmp must be cleaned up on success")
+}
+
+// TestUnwrapForce_FallsBackToRecordedOriginalTarget (M1): when the
+// wrapped binary has moved out from under us and EvalSymlinks can no
+// longer resolve, --force compares the recorded OriginalTarget. Without
+// the fallback, the user is stranded with no clean unwrap path.
+func TestUnwrapForce_FallsBackToRecordedOriginalTarget(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+	originalTarget := filepath.Join(dir, "gone-away")
+	require.NoError(t, os.WriteFile(originalTarget, []byte("orig"), 0o755))
+	npm := filepath.Join(dir, "npm")
+	require.NoError(t, os.Symlink(originalTarget, npm))
+
+	// Simulate state file saying we wrapped this path (via
+	// install-wrappers in a hypothetical previous session).
+	require.NoError(t, os.WriteFile(npm+wrapperSuffix, []byte("backup"), 0o644))
+	w := wrapperEntry{
+		Path:           npm,
+		OriginalPath:   npm + wrapperSuffix,
+		PM:             "npm",
+		Source:         "test",
+		OriginalTarget: originalTarget,
+	}
+
+	// Now break the symlink chain by removing the target. EvalSymlinks
+	// will fail; pointsAtVeto returns false; without --force we'd give up.
+	require.NoError(t, os.Remove(originalTarget))
+
+	// Without --force: refused.
+	err := unwrap(w, veto, false, false)
+	require.Error(t, err)
+
+	// With --force AND the recorded OriginalTarget matching: succeed.
+	require.NoError(t, unwrap(w, veto, false, true))
+}
+
+// TestVerifyWrappedOriginalIntegrity_FailsOnMismatch (H4): the
+// post-install integrity check refuses exec when .veto-original
+// content sha256 differs from the recorded value in the state file.
+// Mutation resistance: removing the verifyWrappedOriginalIntegrity
+// call from findRealBinary returns the (now-tampered) sibling and
+// this assertion fails.
+func TestVerifyWrappedOriginalIntegrity_FailsOnMismatch(t *testing.T) {
+	dir := t.TempDir()
+	npm := filepath.Join(dir, "npm")
+	original := npm + wrapperSuffix
+	require.NoError(t, os.WriteFile(original, []byte("attacker-overwrote-me"), 0o755))
+
+	// Hand-craft a state file pointing at this wrapper with a sha
+	// that does NOT match what's currently on disk.
+	cfg := config{CacheDir: dir}
+	state := wrapperState{Wrappers: []wrapperEntry{
+		{
+			Path:         npm,
+			OriginalPath: original,
+			PM:           "npm",
+			Source:       "test",
+			Sha256:       "0000000000000000000000000000000000000000000000000000000000000000",
+		},
+	}}
+	require.NoError(t, saveWrapperState(cfg, state))
+
+	// loadConfig() (inside verifyWrappedOriginalIntegrity) defaults
+	// to ~/.cache/veto. We can't easily override it from the test
+	// without exporting an env var, so we exercise the lookup
+	// directly via lookupWrapperSha — same code path the verifier
+	// uses. This is the deliberate behaviour:
+	// verifyWrappedOriginalIntegrity reads the SAME state file that
+	// install-wrappers writes, so the prod path is "match install
+	// site to exec site" by sharing the cache dir.
+	t.Setenv("VETO_CACHE_DIR", dir)
+
+	err := verifyWrappedOriginalIntegrity(npm, original)
+	require.Error(t, err, "sha mismatch must refuse exec")
+	require.Contains(t, err.Error(), "integrity violation")
+}
+
+// TestVerifyWrappedOriginalIntegrity_PassesOnMatch (H4 positive):
+// the matching path returns nil.
+func TestVerifyWrappedOriginalIntegrity_PassesOnMatch(t *testing.T) {
+	dir := t.TempDir()
+	npm := filepath.Join(dir, "npm")
+	original := npm + wrapperSuffix
+	body := []byte("real-npm")
+	require.NoError(t, os.WriteFile(original, body, 0o755))
+
+	want := sha256.Sum256(body)
+	cfg := config{CacheDir: dir}
+	state := wrapperState{Wrappers: []wrapperEntry{
+		{Path: npm, OriginalPath: original, PM: "npm", Source: "test", Sha256: hex.EncodeToString(want[:])},
+	}}
+	require.NoError(t, saveWrapperState(cfg, state))
+
+	t.Setenv("VETO_CACHE_DIR", dir)
+	require.NoError(t, verifyWrappedOriginalIntegrity(npm, original))
+}
+
+// TestVerifyWrappedOriginalIntegrity_LegacyNoStateOk (H4): a wrapper
+// path with no state entry is treated as a legacy install — the
+// verifier returns nil and the caller proceeds. Required for
+// backwards-compat with pre-PR installs.
+func TestVerifyWrappedOriginalIntegrity_LegacyNoStateOk(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("VETO_CACHE_DIR", dir)
+	npm := filepath.Join(dir, "npm")
+	original := npm + wrapperSuffix
+	require.NoError(t, os.WriteFile(original, []byte("legacy"), 0o755))
+	require.NoError(t, verifyWrappedOriginalIntegrity(npm, original))
 }

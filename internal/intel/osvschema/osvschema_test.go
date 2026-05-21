@@ -104,13 +104,15 @@ func TestReportsSkipsUnknownEcosystem(t *testing.T) {
 	require.Empty(t, reports)
 }
 
-func TestReportsBoundedRangeNotAllVersions(t *testing.T) {
-	// "introduced: 0, fixed: 2.0.0" means versions <2.0.0 are bad, NOT all versions.
-	// We currently don't emit per-version reports for ranges (only for explicit
-	// versions lists); a bounded range with no explicit versions should produce
-	// no reports — refining range expansion is future work.
+func TestReportsBoundedRangeEmitsAnyVersionReport(t *testing.T) {
+	// "introduced: 0, fixed: 2.0.0" means versions <2.0.0 are bad. The store
+	// doesn't model ranges, so we conservatively emit a name-only ("any
+	// version") report — better to over-block a clean pin than to silently
+	// allow a flagged unpinned install.
 	adv, err := osvschema.Parse([]byte(advisoryRangeWithFix))
 	require.NoError(t, err)
 	reports := osvschema.Reports(adv, "osv")
-	require.Empty(t, reports)
+	require.Len(t, reports, 1)
+	require.Empty(t, reports[0].Version, "bounded ranges should still emit any-version report for conservative blocking")
+	require.Equal(t, "later-good", reports[0].Name)
 }

@@ -128,10 +128,13 @@ func Reports(adv Advisory, sourceID string) []intel.MalwareReport {
 			emitted++
 		}
 
-		// If no explicit versions, look for an "introduced: 0" event meaning
-		// "all versions are flagged" — emit a report with empty Version so
-		// unversioned lookups match.
-		if emitted == 0 && rangesCoverAllVersions(aff.Ranges) {
+		// If no explicit versions list, look for any "introduced" event in
+		// any range and emit a name-only report. We over-block on purpose:
+		// `pip install foo==3.0.0` will refuse even if 3.0.0 is post-fix,
+		// because the store does exact-version matching and we don't model
+		// ranges. This matches the project's "security over convenience"
+		// stance; range-aware lookup is future work.
+		if emitted == 0 && hasIntroducedEvent(aff.Ranges) {
 			out = append(out, intel.MalwareReport{
 				PackageRef:  intel.PackageRef{Ecosystem: eco, Name: aff.Package.Name},
 				SourceID:    sourceID,
@@ -144,24 +147,15 @@ func Reports(adv Advisory, sourceID string) []intel.MalwareReport {
 	return out
 }
 
-// rangesCoverAllVersions reports whether any range has an "introduced: 0"
-// event with no corresponding fix — the OSV convention for "every version
-// is affected." We err on the side of flagging: if there's any unbounded
-// introduction, treat the package as universally bad.
-func rangesCoverAllVersions(ranges []Range) bool {
+// hasIntroducedEvent reports whether any of the ranges names an introduction
+// point. Bounded ranges (with a fix) still produce a hit so unversioned
+// installs of any version in the family are refused.
+func hasIntroducedEvent(ranges []Range) bool {
 	for _, r := range ranges {
-		introducedAtZero := false
-		hasFix := false
 		for _, e := range r.Events {
-			if e.Introduced == "0" {
-				introducedAtZero = true
+			if e.Introduced != "" {
+				return true
 			}
-			if e.Fixed != "" || e.LastAffected != "" {
-				hasFix = true
-			}
-		}
-		if introducedAtZero && !hasFix {
-			return true
 		}
 	}
 	return false

@@ -36,6 +36,18 @@ import (
 const (
 	defaultBaseURL = "https://osv-vulnerabilities.storage.googleapis.com"
 	sourceID       = "osv"
+
+	// maxFeedBytes caps the size of the per-ecosystem zip we download.
+	// OSV's all.zip payloads currently sit around 30–60 MB across the
+	// covered ecosystems; the 256 MiB ceiling leaves plenty of room for
+	// growth while keeping a MITM'd or compromised upstream from OOMing
+	// the daemon by streaming a multi-GB body.
+	maxFeedBytes = 256 << 20
+
+	// maxAdvisoryBytes bounds each per-advisory JSON we read out of the
+	// zip. Real advisories are typically a few KB; 5 MiB is generous.
+	// A zip with a single huge entry can't exhaust memory under this cap.
+	maxAdvisoryBytes = 5 << 20
 )
 
 // Options configures the OSV source.
@@ -169,10 +181,21 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 			return nil, errors.With(err, "create temp zip")
 		}
 		tmpPath := tmp.Name()
-		if _, err := io.Copy(tmp, resp.Body); err != nil {
+		// LimitReader+1 so we can detect oversized payloads — a server
+		// that streams maxFeedBytes+1 bytes is over the cap, and we
+		// refuse the fetch rather than write a truncated zip to disk.
+		written, err := io.Copy(tmp, io.LimitReader(resp.Body, maxFeedBytes+1))
+		if err != nil {
 			tmp.Close()
 			os.Remove(tmpPath)
 			return nil, errors.With(err, "stream zip")
+		}
+		if written > maxFeedBytes {
+			tmp.Close()
+			os.Remove(tmpPath)
+			return nil, errors.WithNew("osv zip exceeds size limit").
+				Set("limit_bytes", maxFeedBytes).
+				Set("url", url)
 		}
 		if err := tmp.Close(); err != nil {
 			os.Remove(tmpPath)
@@ -221,10 +244,18 @@ func parseZip(path string, logger zerolog.Logger) ([]intel.MalwareReport, error)
 			logger.Debug().Err(err).Str("entry", f.Name).Msg("skip unreadable")
 			continue
 		}
-		payload, err := io.ReadAll(rc)
+		// Per-advisory cap defends against a zip with one pathologically
+		// large entry. Truncated reads are silently skipped — the next
+		// advisory is independent.
+		payload, err := io.ReadAll(io.LimitReader(rc, maxAdvisoryBytes+1))
 		rc.Close()
 		if err != nil {
 			logger.Debug().Err(err).Str("entry", f.Name).Msg("skip unreadable")
+			continue
+		}
+		if len(payload) > maxAdvisoryBytes {
+			logger.Warn().Str("entry", f.Name).Int("limit_bytes", maxAdvisoryBytes).
+				Msg("osv advisory exceeds size limit; skipping")
 			continue
 		}
 		adv, err := osvschema.Parse(payload)

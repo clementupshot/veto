@@ -5,9 +5,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/yarn"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/yarn"
 )
 
 func TestParseInstalls(t *testing.T) {

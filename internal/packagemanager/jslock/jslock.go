@@ -6,7 +6,7 @@
 // versions and writes them — along with every transitive — into the
 // lockfile. `npm ci`, `pnpm install`, and `yarn install` deterministically
 // install what's in the lockfile. Gating against the lockfile is the only
-// way bouncer can catch a flagged transitive dep without running the
+// way veto can catch a flagged transitive dep without running the
 // resolver itself.
 //
 // Coverage:
@@ -32,11 +32,11 @@ import (
 	"os"
 	"strings"
 
-	bouncererrors "github.com/brynbellomy/go-utils/errors"
+	vetoerrors "github.com/brynbellomy/go-utils/errors"
 	"gopkg.in/yaml.v3"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
 )
 
 // Expander handles npm/pnpm/yarn lockfile kinds. Stateless and safe for
@@ -69,7 +69,7 @@ func readFile(path string) ([]byte, bool, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, false, nil
 		}
-		return nil, false, bouncererrors.With(err, "read lockfile").Set("path", path)
+		return nil, false, vetoerrors.With(err, "read lockfile").Set("path", path)
 	}
 	return data, true, nil
 }
@@ -103,7 +103,7 @@ func expandPackageLock(path string) ([]packagemanager.Install, error) {
 	}
 	var lock packageLockJSON
 	if err := json.Unmarshal(data, &lock); err != nil {
-		return nil, bouncererrors.With(err, "parse package-lock.json").Set("path", path)
+		return nil, vetoerrors.With(err, "parse package-lock.json").Set("path", path)
 	}
 
 	// v2/v3: walk the packages map.
@@ -201,7 +201,7 @@ func expandPnpmLock(path string) ([]packagemanager.Install, error) {
 	}
 	var lock pnpmLock
 	if err := yaml.Unmarshal(data, &lock); err != nil {
-		return nil, bouncererrors.With(err, "parse pnpm-lock.yaml").Set("path", path)
+		return nil, vetoerrors.With(err, "parse pnpm-lock.yaml").Set("path", path)
 	}
 
 	// Modern schemas (lockfileVersion 5+) populate `packages` with the
@@ -332,7 +332,7 @@ func expandYarnLock(path string) ([]packagemanager.Install, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, bouncererrors.With(err, "scan yarn.lock").Set("path", path)
+		return nil, vetoerrors.With(err, "scan yarn.lock").Set("path", path)
 	}
 	return out, nil
 }

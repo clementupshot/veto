@@ -29,11 +29,11 @@ import (
 
 	"github.com/brynbellomy/go-utils/errors"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel"
 )
 
 // Advisory is the parsed shape of one OSV document. We only model the fields
-// bouncer needs; unknown fields are ignored.
+// veto needs; unknown fields are ignored.
 type Advisory struct {
 	ID        string    `json:"id"`
 	Summary   string    `json:"summary"`
@@ -90,7 +90,7 @@ func IsMalware(adv Advisory) bool {
 }
 
 // Reports converts an advisory into MalwareReports under the given source ID.
-// Returns nil when the advisory does not target any ecosystem bouncer
+// Returns nil when the advisory does not target any ecosystem veto
 // understands; the caller can filter these.
 func Reports(adv Advisory, sourceID string) []intel.MalwareReport {
 	if !IsMalware(adv) {
@@ -162,7 +162,7 @@ func hasIntroducedEvent(ranges []Range) bool {
 }
 
 // normalizeEcosystem maps OSV's ecosystem strings into the intel taxonomy.
-// Returns (eco, false) when bouncer does not understand the ecosystem yet.
+// Returns (eco, false) when veto does not understand the ecosystem yet.
 func normalizeEcosystem(osv string) (intel.Ecosystem, bool) {
 	switch strings.ToLower(osv) {
 	case "npm":

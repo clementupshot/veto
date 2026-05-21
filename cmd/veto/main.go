@@ -1,12 +1,12 @@
-// Command bouncer is a command-level malware scanner for package-manager
+// Command veto is a command-level malware scanner for package-manager
 // invocations.
 //
 // Usage:
 //
-//	bouncer <pm> <pm-args...>     gate an install command, then exec the real PM
-//	bouncer sync                  refresh the intel store from all sources
-//	bouncer status                show source health and store size
-//	bouncer help                  print this message
+//	veto <pm> <pm-args...>     gate an install command, then exec the real PM
+//	veto sync                  refresh the intel store from all sources
+//	veto status                show source health and store size
+//	veto help                  print this message
 //
 // The "<pm> <pm-args...>" form is the same shape safe-chain uses, so shims
 // can route invocations transparently.
@@ -26,28 +26,28 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 
-	"github.com/brynbellomy/package-bouncer/internal/daemon"
-	"github.com/brynbellomy/package-bouncer/internal/gate"
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/intel/sources/aikido"
-	"github.com/brynbellomy/package-bouncer/internal/intel/sources/openssf"
-	"github.com/brynbellomy/package-bouncer/internal/intel/sources/osv"
-	"github.com/brynbellomy/package-bouncer/internal/intel/sources/pypa"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/bun"
-	pmexec "github.com/brynbellomy/package-bouncer/internal/packagemanager/exec"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jslock"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jsmanifest"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/npm"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pdm"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pip"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pnpm"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/poetry"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pylock"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pymanifest"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pyreq"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/uv"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/yarn"
+	"github.com/brynbellomy/veto/internal/daemon"
+	"github.com/brynbellomy/veto/internal/gate"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel/sources/aikido"
+	"github.com/brynbellomy/veto/internal/intel/sources/openssf"
+	"github.com/brynbellomy/veto/internal/intel/sources/osv"
+	"github.com/brynbellomy/veto/internal/intel/sources/pypa"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/bun"
+	pmexec "github.com/brynbellomy/veto/internal/packagemanager/exec"
+	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
+	"github.com/brynbellomy/veto/internal/packagemanager/jsmanifest"
+	"github.com/brynbellomy/veto/internal/packagemanager/npm"
+	"github.com/brynbellomy/veto/internal/packagemanager/pdm"
+	"github.com/brynbellomy/veto/internal/packagemanager/pip"
+	"github.com/brynbellomy/veto/internal/packagemanager/pnpm"
+	"github.com/brynbellomy/veto/internal/packagemanager/poetry"
+	"github.com/brynbellomy/veto/internal/packagemanager/pylock"
+	"github.com/brynbellomy/veto/internal/packagemanager/pymanifest"
+	"github.com/brynbellomy/veto/internal/packagemanager/pyreq"
+	"github.com/brynbellomy/veto/internal/packagemanager/uv"
+	"github.com/brynbellomy/veto/internal/packagemanager/yarn"
 )
 
 const (
@@ -65,7 +65,7 @@ const (
 	// intel store as broken and refuse to gate. Aikido alone publishes
 	// >120k npm entries today; OpenSSF and OSV add hundreds of thousands
 	// more. A value under this floor means either every source is empty,
-	// a CDN returned [] for every feed, or the user pointed BOUNCER_SOURCES
+	// a CDN returned [] for every feed, or the user pointed VETO_SOURCES
 	// at a non-source name and got the NopSource fallback. None of these
 	// states are safe to gate against.
 	minHealthyReportCount = 1000
@@ -74,8 +74,8 @@ const (
 func main() {
 	args := os.Args[1:]
 	// Shim dispatch: when invoked as a symlink whose basename matches a
-	// known package manager (e.g. ~/.local/bin/npm → bouncer), prepend the
-	// PM name so `npm install foo` behaves like `bouncer npm install foo`.
+	// known package manager (e.g. ~/.local/bin/npm → veto), prepend the
+	// PM name so `npm install foo` behaves like `veto npm install foo`.
 	// This is the integration path for Codex and any other agent/CI that
 	// doesn't expose a per-tool hook protocol.
 	if self := filepath.Base(os.Args[0]); isShimName(self) {
@@ -136,7 +136,7 @@ func run(args []string) int {
 }
 
 // isShimName reports whether basename matches one of the package-manager
-// binaries bouncer shadows via PATH shims. Kept in main.go so shim dispatch
+// binaries veto shadows via PATH shims. Kept in main.go so shim dispatch
 // stays fast and dependency-free (no config or store touched on the hot path).
 func isShimName(basename string) bool {
 	switch basename {
@@ -148,7 +148,7 @@ func isShimName(basename string) bool {
 	return false
 }
 
-// runGate handles the `bouncer <pm> <args...>` path. When the bouncer
+// runGate handles the `veto <pm> <args...>` path. When the veto
 // daemon is reachable on its Unix socket, the request is forwarded to it
 // — that's the kernel-enforcement path inside a sandbox-exec'd agent.
 // Otherwise we fall back to running the gate in-process and exec'ing the
@@ -165,7 +165,7 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 // runGateInProcess is the legacy in-process gate path. Used when the
 // daemon socket isn't reachable (no launchd install, or development
 // without the daemon running). Same gate logic, same intel store, just
-// invoked in the bouncer CLI process directly.
+// invoked in the veto CLI process directly.
 func runGateInProcess(logger zerolog.Logger, cfg config, args []string) int {
 	pmName, pmArgs := args[0], args[1:]
 	pms := buildPackageManagers()
@@ -196,7 +196,7 @@ func runGateInProcess(logger zerolog.Logger, cfg config, args []string) int {
 		// Don't fail open: if we have zero intel, we can't gate. Refuse with
 		// a clear message rather than letting an install through unchecked.
 		logger.Error().Err(err).Msg("intel refresh failed — refusing to gate without data")
-		fmt.Fprintln(os.Stderr, "bouncer: INTERNAL ERROR — intel refresh failed; install aborted fail-closed.")
+		fmt.Fprintln(os.Stderr, "veto: INTERNAL ERROR — intel refresh failed; install aborted fail-closed.")
 		return exitInternal
 	}
 
@@ -209,19 +209,19 @@ func runGateInProcess(logger zerolog.Logger, cfg config, args []string) int {
 			Int("reports", reportCount).
 			Int("floor", minHealthyReportCount).
 			Msg("intel store below sanity floor — refusing to gate")
-		fmt.Fprintf(os.Stderr, "bouncer: INTERNAL ERROR — intel store has only %d reports (expected at least %d); install aborted fail-closed.\n", reportCount, minHealthyReportCount)
-		fmt.Fprintln(os.Stderr, "Check that your sources are configured correctly and reachable: `bouncer status` and `bouncer sync`.")
+		fmt.Fprintf(os.Stderr, "veto: INTERNAL ERROR — intel store has only %d reports (expected at least %d); install aborted fail-closed.\n", reportCount, minHealthyReportCount)
+		fmt.Fprintln(os.Stderr, "Check that your sources are configured correctly and reachable: `veto status` and `veto sync`.")
 		return exitInternal
 	}
 
 	policy := gate.DefaultPolicy()
 	policy.ManifestExpander = newCompoundExpander()
-	// BOUNCER_ALLOW_OPAQUE=1 opts URL/git/tarball/github-shorthand specs
+	// VETO_ALLOW_OPAQUE=1 opts URL/git/tarball/github-shorthand specs
 	// through the gate. The default refuses them — see
 	// gate.DefaultPolicy docs for why.
 	if cfg.AllowOpaqueRemote {
 		policy.AllowOpaqueRemote = true
-		logger.Warn().Msg("BOUNCER_ALLOW_OPAQUE=1 set; opaque remote specs (URL/git/tarball) will NOT be refused")
+		logger.Warn().Msg("VETO_ALLOW_OPAQUE=1 set; opaque remote specs (URL/git/tarball) will NOT be refused")
 	}
 	g := gate.New(store, policy).WithLogger(logger)
 	decision := g.Evaluate(installs, manifestRefs...)
@@ -253,7 +253,7 @@ func runSync(logger zerolog.Logger, cfg config) int {
 		logger.Error().Err(err).Msg("refresh")
 		return exitInternal
 	}
-	fmt.Printf("bouncer: synced sources %v\n", store.SourceIDs())
+	fmt.Printf("veto: synced sources %v\n", store.SourceIDs())
 	return exitOK
 }
 
@@ -263,14 +263,14 @@ func runStatus(logger zerolog.Logger, cfg config) int {
 		logger.Error().Err(err).Msg("build intel store")
 		return exitInternal
 	}
-	fmt.Printf("bouncer: configured sources: %v\n", store.SourceIDs())
-	fmt.Printf("bouncer: cache dir: %s\n", cfg.CacheDir)
+	fmt.Printf("veto: configured sources: %v\n", store.SourceIDs())
+	fmt.Printf("veto: cache dir: %s\n", cfg.CacheDir)
 	return exitOK
 }
 
 // printRefusal writes a human-readable explanation of a refusal to w.
 func printRefusal(w io.Writer, decision gate.Decision) {
-	fmt.Fprintln(w, "bouncer: install refused — malware intelligence flagged the following:")
+	fmt.Fprintln(w, "veto: install refused — malware intelligence flagged the following:")
 	for _, v := range decision.Flagged() {
 		fmt.Fprintf(w, "  - %s@%s (ecosystem: %s)\n", v.Ref.Name, displayVersion(v.Ref.Version), v.Ref.Ecosystem)
 		for _, r := range v.Reports {
@@ -281,16 +281,16 @@ func printRefusal(w io.Writer, decision gate.Decision) {
 			fmt.Fprintf(w, "      [%s] %s\n", r.SourceID, reason)
 		}
 	}
-	fmt.Fprintln(w, "\nTo override (you really shouldn't), set BOUNCER_BYPASS=1 and re-invoke the package manager directly.")
+	fmt.Fprintln(w, "\nTo override (you really shouldn't), set VETO_BYPASS=1 and re-invoke the package manager directly.")
 }
 
 // printAbort writes a loud, distinct error when the gate could not make a
 // confident decision (e.g., a manifest file failed to parse). Distinguishing
 // this from a malware-driven refusal matters: a colleague seeing "refused"
-// might assume a package was flagged, but Abort means bouncer's own
+// might assume a package was flagged, but Abort means veto's own
 // machinery couldn't reach a verdict and refused to take the risk.
 func printAbort(w io.Writer, decision gate.Decision) {
-	fmt.Fprintln(w, "bouncer: INTERNAL ERROR — install aborted fail-closed.")
+	fmt.Fprintln(w, "veto: INTERNAL ERROR — install aborted fail-closed.")
 	fmt.Fprintln(w, "  The gate could not make a confident safety decision and refused to run the package manager.")
 	if len(decision.Errors) > 0 {
 		fmt.Fprintln(w, "  Underlying errors:")
@@ -298,7 +298,7 @@ func printAbort(w io.Writer, decision gate.Decision) {
 			fmt.Fprintf(w, "    - %v\n", e)
 		}
 	}
-	fmt.Fprintln(w, "\nThis is not a malware block — it's a bouncer-side failure. Investigate before retrying.")
+	fmt.Fprintln(w, "\nThis is not a malware block — it's a veto-side failure. Investigate before retrying.")
 }
 
 func displayVersion(v string) string {
@@ -313,13 +313,13 @@ func displayVersion(v string) string {
 //
 // Resolution preference order:
 //
-//  1. Sibling `<argv[0]>.bouncer-original` — set by `bouncer
+//  1. Sibling `<argv[0]>.veto-original` — set by `veto
 //     install-wrappers`, which atomically moves a real PM binary aside
-//     and replaces the original path with a bouncer symlink. This is
+//     and replaces the original path with a veto symlink. This is
 //     Layer 4: it catches absolute-path invocations
 //     (`/opt/homebrew/bin/npm install …`) that bypass PATH lookup
 //     entirely.
-//  2. PATH lookup, skipping any candidates whose target IS bouncer
+//  2. PATH lookup, skipping any candidates whose target IS veto
 //     (avoids the shim chain re-entering itself).
 //
 // The sibling check happens first so an attacker can't bypass Layer 4
@@ -327,20 +327,20 @@ func displayVersion(v string) string {
 func execReal(name string, args []string) int {
 	realPath, err := findRealBinary(name)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer: cannot find real %s: %v\n", name, err)
+		fmt.Fprintf(os.Stderr, "veto: cannot find real %s: %v\n", name, err)
 		return exitInternal
 	}
 	if err := syscall.Exec(realPath, append([]string{name}, args...), os.Environ()); err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer: exec %s: %v\n", realPath, err)
+		fmt.Fprintf(os.Stderr, "veto: exec %s: %v\n", realPath, err)
 		return exitInternal
 	}
 	// syscall.Exec doesn't return on success.
 	return exitInternal
 }
 
-// findWrappedOriginal returns the path to a `.bouncer-original` sibling
-// of argv[0] when bouncer was invoked through a real-binary wrapper, or
-// ("", false) otherwise. Layer 4 (`bouncer install-wrappers`) plants
+// findWrappedOriginal returns the path to a `.veto-original` sibling
+// of argv[0] when veto was invoked through a real-binary wrapper, or
+// ("", false) otherwise. Layer 4 (`veto install-wrappers`) plants
 // these sibling files; the resolver here unwraps them.
 //
 // argv[0] must contain a path separator — a bare-name shim invocation
@@ -356,7 +356,7 @@ func findWrappedOriginal(argv0 string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	original := abs + ".bouncer-original"
+	original := abs + ".veto-original"
 	info, err := os.Stat(original)
 	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
 		return "", false
@@ -364,9 +364,9 @@ func findWrappedOriginal(argv0 string) (string, bool) {
 	return original, true
 }
 
-// findRealBinary returns the path bouncer should exec to satisfy a
+// findRealBinary returns the path veto should exec to satisfy a
 // gated install. Prefers a wrapped-original sibling (Layer 4), then
-// falls back to a PATH walk that skips any bouncer-pointing entries.
+// falls back to a PATH walk that skips any veto-pointing entries.
 func findRealBinary(name string) (string, error) {
 	if wrapped, ok := findWrappedOriginal(os.Args[0]); ok {
 		return wrapped, nil
@@ -401,13 +401,13 @@ func findRealBinary(name string) (string, error) {
 			resolved = candidate
 		}
 		if resolved == selfReal {
-			// This PATH entry IS bouncer (either a Layer 2 shim or a
-			// Layer 4 wrapper). If a `.bouncer-original` sibling exists,
+			// This PATH entry IS veto (either a Layer 2 shim or a
+			// Layer 4 wrapper). If a `.veto-original` sibling exists,
 			// that's the wrapped real binary — use it instead of
 			// continuing the PATH walk. Without this check, a system
 			// where every PATH entry has been wrapped would yield
 			// "not found in PATH" because every candidate gets skipped.
-			if sibling := candidate + ".bouncer-original"; isExecutableRegularOrSymlink(sibling) {
+			if sibling := candidate + ".veto-original"; isExecutableRegularOrSymlink(sibling) {
 				return sibling, nil
 			}
 			continue
@@ -419,7 +419,7 @@ func findRealBinary(name string) (string, error) {
 
 // isExecutableRegularOrSymlink returns true if `p` exists, is not a
 // directory, and resolves to an executable file (resolving symlinks).
-// Used by findRealBinary's `.bouncer-original` sibling lookup —
+// Used by findRealBinary's `.veto-original` sibling lookup —
 // homebrew wrappers leave a symlink-into-Cellar as the original, so
 // we must follow symlinks here, not just stat.
 func isExecutableRegularOrSymlink(p string) bool {
@@ -436,12 +436,12 @@ func isExecutableRegularOrSymlink(p string) bool {
 type config struct {
 	CacheDir          string
 	Sources           []string // enabled source IDs
-	AllowOpaqueRemote bool     // BOUNCER_ALLOW_OPAQUE=1 opts URL/git/tarball specs through
+	AllowOpaqueRemote bool     // VETO_ALLOW_OPAQUE=1 opts URL/git/tarball specs through
 }
 
 func loadConfig() (config, error) {
 	v := viper.New()
-	v.SetEnvPrefix("BOUNCER")
+	v.SetEnvPrefix("VETO")
 	v.AutomaticEnv()
 	v.SetDefault("cache_dir", defaultCacheDir())
 	v.SetDefault("sources", []string{"aikido", "openssf", "osv", "pypa"})
@@ -464,13 +464,13 @@ func loadConfig() (config, error) {
 
 func defaultCacheDir() string {
 	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
-		return filepath.Join(x, "package-bouncer")
+		return filepath.Join(x, "veto")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "package-bouncer")
+		return filepath.Join(os.TempDir(), "veto")
 	}
-	return filepath.Join(home, ".cache", "package-bouncer")
+	return filepath.Join(home, ".cache", "veto")
 }
 
 // buildStore constructs the intel store from the configured sources. Unknown
@@ -591,7 +591,7 @@ func buildPackageManagers() map[string]packagemanager.PackageManager {
 
 func newLogger() zerolog.Logger {
 	level := zerolog.InfoLevel
-	if strings.EqualFold(os.Getenv("BOUNCER_LOG"), "debug") {
+	if strings.EqualFold(os.Getenv("VETO_LOG"), "debug") {
 		level = zerolog.DebugLevel
 	}
 	return zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}).
@@ -602,60 +602,60 @@ func newLogger() zerolog.Logger {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintf(w, `bouncer — command-level malware scanner for package managers
+	fmt.Fprintf(w, `veto — command-level malware scanner for package managers
 
 Usage:
-  bouncer <pm> <pm-args...>    gate a package-manager invocation, then exec it
-  bouncer sync                 refresh malware intel from all configured sources
-  bouncer status               print configured sources and cache location
-  bouncer doctor               verify defense layers + intel state (run after install)
-  bouncer help                 this message
+  veto <pm> <pm-args...>    gate a package-manager invocation, then exec it
+  veto sync                 refresh malware intel from all configured sources
+  veto status               print configured sources and cache location
+  veto doctor               verify defense layers + intel state (run after install)
+  veto help                 this message
 
 Layer 1 — Claude Code hook (Bash tool interception):
-  bouncer install-claude-hook [--project] [--settings PATH] [--print]
-                               wire bouncer into ~/.claude/settings.json
-  bouncer uninstall-claude-hook [--settings PATH]
-                               remove the bouncer hook entry (preserves siblings)
-  bouncer hook claude-code     read PreToolUse JSON from stdin, write a deny
+  veto install-claude-hook [--project] [--settings PATH] [--print]
+                               wire veto into ~/.claude/settings.json
+  veto uninstall-claude-hook [--settings PATH]
+                               remove the veto hook entry (preserves siblings)
+  veto hook claude-code     read PreToolUse JSON from stdin, write a deny
                                decision to stdout if the command reaches a PM
 
 Layer 2 — PATH shims (any agent shell, Codex, CI):
-  bouncer install-shims [--dir DIR] [--force]
-                               symlinks ~/.local/bin/{npm,pip,…} → bouncer
-  bouncer uninstall-shims [--dir DIR]
-                               remove bouncer-managed symlinks
-  bouncer install-codex        install-shims + a ~/.codex/config.toml scan
+  veto install-shims [--dir DIR] [--force]
+                               symlinks ~/.local/bin/{npm,pip,…} → veto
+  veto uninstall-shims [--dir DIR]
+                               remove veto-managed symlinks
+  veto install-codex        install-shims + a ~/.codex/config.toml scan
                                for env-policy gotchas
 
 Layer 3 — native execve interposer (catches direct child-process spawns):
-  bouncer install-preload --lib PATH [--shell-rc PATH|auto] [--install-to DIR] [--print]
-                               install the libbouncer_interpose.{dylib,so}
+  veto install-preload --lib PATH [--shell-rc PATH|auto] [--install-to DIR] [--print]
+                               install the libveto_interpose.{dylib,so}
                                and export DYLD_INSERT_LIBRARIES / LD_PRELOAD +
-                               BOUNCER_PATH from your shell rc. Build the
+                               VETO_PATH from your shell rc. Build the
                                artifact first with `+"`make interposer`"+`.
-  bouncer uninstall-preload [--shell-rc PATH|auto] [--install-to DIR]
+  veto uninstall-preload [--shell-rc PATH|auto] [--install-to DIR]
                                strip the managed shell-rc block and remove
                                the installed library
 
 Layer 4 — real-binary wrappers (catches absolute-path invocations):
-  bouncer install-wrappers [--dry-run] [--force] [--dir DIR] [--only PM]
+  veto install-wrappers [--dry-run] [--force] [--dir DIR] [--only PM]
                                atomically replace /opt/homebrew/bin/<pm>,
-                               mise install dirs, etc. with bouncer symlinks.
+                               mise install dirs, etc. with veto symlinks.
                                Catches `+"`subprocess.run([abs_path,…])`"+` even
                                when DYLD_INSERT_LIBRARIES is stripped.
-  bouncer uninstall-wrappers   reverse every wrapper recorded in state
+  veto uninstall-wrappers   reverse every wrapper recorded in state
 
 Supported package managers:
   npm, pnpm, yarn, bun, pip, pip3, uv, poetry, pdm,
   npx, pnpx, bunx, uvx, pipx
 
 Environment:
-  BOUNCER_CACHE_DIR     override cache location (default: $XDG_CACHE_HOME/package-bouncer)
-  BOUNCER_SOURCES       comma-separated source IDs (default: aikido,openssf,osv,pypa)
-  BOUNCER_LOG           set to "debug" for verbose logging
-  BOUNCER_BYPASS        prepend `+"`BOUNCER_BYPASS=1 `"+` to skip the gate for one invocation
-  BOUNCER_ALLOW_OPAQUE  set to 1 to opt URL/git/tarball/github-shorthand specs
+  VETO_CACHE_DIR     override cache location (default: $XDG_CACHE_HOME/veto)
+  VETO_SOURCES       comma-separated source IDs (default: aikido,openssf,osv,pypa)
+  VETO_LOG           set to "debug" for verbose logging
+  VETO_BYPASS        prepend `+"`VETO_BYPASS=1 `"+` to skip the gate for one invocation
+  VETO_ALLOW_OPAQUE  set to 1 to opt URL/git/tarball/github-shorthand specs
                         through; refused by default (see README)
-  BOUNCER_PATH          set by install-preload; consumed by the interposer
+  VETO_PATH          set by install-preload; consumed by the interposer
 `)
 }

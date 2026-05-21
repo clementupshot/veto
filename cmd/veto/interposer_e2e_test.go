@@ -7,15 +7,15 @@
 //  2. Build a tiny "spawner" helper that calls syscall.Exec(target, args)
 //     — the spawner's posix_spawn / execve calls are what the interposer
 //     hooks.
-//  3. Drop a fake bouncer into a temp dir. It just dumps argv to a log
+//  3. Drop a fake veto into a temp dir. It just dumps argv to a log
 //     file and exits.
 //  4. Drop a fake `npm` next to it. The interposer should see "the
 //     program being exec'd is named npm with verb=install" and route the
-//     call through fake-bouncer instead of executing fake-npm.
+//     call through fake-veto instead of executing fake-npm.
 //  5. Run the spawner with DYLD_INSERT_LIBRARIES (macOS) / LD_PRELOAD
-//     (Linux) pointing at the interposer, BOUNCER_PATH pointing at the
-//     fake bouncer.
-//  6. Assert the fake bouncer received argv == [bouncer, npm, install, foo].
+//     (Linux) pointing at the interposer, VETO_PATH pointing at the
+//     fake veto.
+//  6. Assert the fake veto received argv == [veto, npm, install, foo].
 //
 // This catches the failure modes that unit tests cannot: argv-allocation
 // bugs, NULL termination off-by-ones, dyld linkage issues, and the
@@ -44,12 +44,12 @@ func TestInterposerEndToEnd_RewritesNpmInstall(t *testing.T) {
 	dir := t.TempDir()
 	argLog := filepath.Join(dir, "argv.log")
 
-	// Fake bouncer: writes argv (one arg per line) to argLog.
-	fakeBouncer := filepath.Join(dir, "bouncer")
-	bouncerScript := "#!/bin/sh\n" +
+	// Fake veto: writes argv (one arg per line) to argLog.
+	fakeVeto := filepath.Join(dir, "veto")
+	vetoScript := "#!/bin/sh\n" +
 		"for a in \"$@\"; do printf '%s\\n' \"$a\"; done > " + argLog + "\n" +
 		"exit 0\n"
-	require.NoError(t, os.WriteFile(fakeBouncer, []byte(bouncerScript), 0o755))
+	require.NoError(t, os.WriteFile(fakeVeto, []byte(vetoScript), 0o755))
 
 	// Fake npm: should NEVER run; sentinel exit code so a false-negative
 	// (interposer fails to intercept) produces a clearly distinct failure.
@@ -67,19 +67,19 @@ func TestInterposerEndToEnd_RewritesNpmInstall(t *testing.T) {
 
 	// Spawn the helper, asking it to exec fakeNpm with install+foo.
 	cmd := exec.Command(spawnerBin, fakeNpm, "install", "foo")
-	cmd.Env = withPreloadEnv(libPath, fakeBouncer)
+	cmd.Env = withPreloadEnv(libPath, fakeVeto)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	require.NoError(t, err, "spawner exit error; stderr=%s", stderr.String())
 
 	// If the interposer didn't fire, fakeNpm would have run and exited 77.
-	// We're here, so something exec'd successfully (we expect fakeBouncer).
+	// We're here, so something exec'd successfully (we expect fakeVeto).
 	data, err := os.ReadFile(argLog)
-	require.NoError(t, err, "fakeBouncer did not write argv.log — interposer may not have rewritten")
+	require.NoError(t, err, "fakeVeto did not write argv.log — interposer may not have rewritten")
 	lines := splitLines(string(data))
-	// fakeBouncer's "$@" excludes argv[0] ("bouncer"). The interposer
-	// rewrites to [bouncer, npm, install, foo]; the script sees npm,
+	// fakeVeto's "$@" excludes argv[0] ("veto"). The interposer
+	// rewrites to [veto, npm, install, foo]; the script sees npm,
 	// install, foo.
 	require.Equal(t, []string{"npm", "install", "foo"}, lines)
 }
@@ -97,16 +97,16 @@ func TestInterposerEndToEnd_PassesThroughNonPM(t *testing.T) {
 	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
 	require.NoError(t, os.WriteFile(target, []byte(script), 0o755))
 
-	// fake bouncer that would log if mistakenly invoked.
-	fakeBouncer := filepath.Join(dir, "bouncer")
-	require.NoError(t, os.WriteFile(fakeBouncer, []byte("#!/bin/sh\nexit 99\n"), 0o755))
+	// fake veto that would log if mistakenly invoked.
+	fakeVeto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(fakeVeto, []byte("#!/bin/sh\nexit 99\n"), 0o755))
 
 	spawnerSrc := filepath.Join("testdata", "interpose_spawner", "main.go")
 	spawnerBin := filepath.Join(dir, "spawner")
 	require.NoError(t, exec.Command("go", "build", "-o", spawnerBin, spawnerSrc).Run())
 
 	cmd := exec.Command(spawnerBin, target)
-	cmd.Env = withPreloadEnv(libPath, fakeBouncer)
+	cmd.Env = withPreloadEnv(libPath, fakeVeto)
 	require.NoError(t, cmd.Run())
 	_, err := os.Stat(marker)
 	require.NoError(t, err, "target program did not run — interposer rewrote a non-PM call (false positive)")
@@ -126,15 +126,15 @@ func TestInterposerEndToEnd_AllowsNpmRunDev(t *testing.T) {
 	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
 	require.NoError(t, os.WriteFile(fakeNpm, []byte(script), 0o755))
 
-	fakeBouncer := filepath.Join(dir, "bouncer")
-	require.NoError(t, os.WriteFile(fakeBouncer, []byte("#!/bin/sh\nexit 99\n"), 0o755))
+	fakeVeto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(fakeVeto, []byte("#!/bin/sh\nexit 99\n"), 0o755))
 
 	spawnerSrc := filepath.Join("testdata", "interpose_spawner", "main.go")
 	spawnerBin := filepath.Join(dir, "spawner")
 	require.NoError(t, exec.Command("go", "build", "-o", spawnerBin, spawnerSrc).Run())
 
 	cmd := exec.Command(spawnerBin, fakeNpm, "run", "dev")
-	cmd.Env = withPreloadEnv(libPath, fakeBouncer)
+	cmd.Env = withPreloadEnv(libPath, fakeVeto)
 	require.NoError(t, cmd.Run())
 	_, err := os.Stat(marker)
 	require.NoError(t, err, "fake npm did not run — `npm run dev` was incorrectly rewritten")
@@ -146,11 +146,11 @@ func TestInterposerEndToEnd_AllowsNpmRunDev(t *testing.T) {
 // can be wired up either way.
 func interposerLibPath(t *testing.T) string {
 	t.Helper()
-	name := "libbouncer_interpose.dylib"
+	name := "libveto_interpose.dylib"
 	if runtime.GOOS != "darwin" {
-		name = "libbouncer_interpose.so"
+		name = "libveto_interpose.so"
 	}
-	// Tests run with cwd = the package dir (cmd/bouncer). The library
+	// Tests run with cwd = the package dir (cmd/veto). The library
 	// lives in the repo root, two levels up.
 	candidates := []string{
 		filepath.Join("..", "..", name),
@@ -169,15 +169,15 @@ func interposerLibPath(t *testing.T) string {
 // withPreloadEnv returns os.Environ() augmented with the preload env
 // vars. Preserves the current PATH so the Go toolchain (for the build
 // step above) still resolves correctly.
-func withPreloadEnv(libPath, bouncerPath string) []string {
+func withPreloadEnv(libPath, vetoPath string) []string {
 	env := os.Environ()
 	envVar := "DYLD_INSERT_LIBRARIES"
 	if runtime.GOOS != "darwin" {
 		envVar = "LD_PRELOAD"
 	}
 	env = append(env, envVar+"="+libPath)
-	env = append(env, "BOUNCER_PATH="+bouncerPath)
-	// Optional: BOUNCER_INTERPOSE_LOG=1 emits a stderr marker each time the
+	env = append(env, "VETO_PATH="+vetoPath)
+	// Optional: VETO_INTERPOSE_LOG=1 emits a stderr marker each time the
 	// interposer rewrites. Useful when debugging a failing test locally.
 	return env
 }

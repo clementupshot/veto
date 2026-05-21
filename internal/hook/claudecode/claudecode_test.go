@@ -36,7 +36,7 @@ func TestAnalyze(t *testing.T) {
 		{"uvx is risky", "uvx ruff check .", "uvx"},
 		{"pipx run is risky", "pipx run black .", "pipx"},
 
-		{"bouncer prefix already guarded", "bouncer npm install foo", ""},
+		{"veto prefix already guarded", "veto npm install foo", ""},
 		{"absolute path PM", "/opt/homebrew/bin/npm install foo", "npm"},
 
 		{"timeout wrapper", "timeout 30 npm install foo", "npm"},
@@ -64,7 +64,7 @@ func TestAnalyze(t *testing.T) {
 
 		{"env var assignment", "FOO=bar npm install foo", "npm"},
 		{"two env var assignments", "FOO=bar BAZ=qux pip install requests", "pip"},
-		{"explicit bypass", "BOUNCER_BYPASS=1 npm install foo", ""},
+		{"explicit bypass", "VETO_BYPASS=1 npm install foo", ""},
 
 		{"redirect operator", "npm install foo > /tmp/log 2>&1", "npm"},
 		{"redirect operator with append", "pip install foo >> /tmp/log", "pip"},
@@ -117,7 +117,7 @@ func TestStripWrappersComplex(t *testing.T) {
 
 // TestTokensSurfacedForRefusalMessage confirms the Tokens field carries
 // the leaf-command (post-wrapper-stripping) so the refusal message tells
-// the agent precisely what to re-issue with a `bouncer` prefix.
+// the agent precisely what to re-issue with a `veto` prefix.
 func TestTokensSurfacedForRefusalMessage(t *testing.T) {
 	finding, ok := Analyze("timeout 30 npm install --save-dev lodash")
 	require.True(t, ok)

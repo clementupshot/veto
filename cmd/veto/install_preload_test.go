@@ -87,12 +87,12 @@ func TestRemoveShellRCBlock_NoMatchIsNoOp(t *testing.T) {
 }
 
 // TestRenderPreloadEnvBlock_HasBothExports: the rendered block must
-// export both BOUNCER_PATH and the platform-appropriate preload var.
+// export both VETO_PATH and the platform-appropriate preload var.
 func TestRenderPreloadEnvBlock_HasBothExports(t *testing.T) {
-	block := renderPreloadEnvBlock("/path/to/lib.dylib", "/path/to/bouncer")
+	block := renderPreloadEnvBlock("/path/to/lib.dylib", "/path/to/veto")
 	require.Contains(t, block, preloadMarkerStart)
 	require.Contains(t, block, preloadMarkerEnd)
-	require.Contains(t, block, "/path/to/bouncer")
+	require.Contains(t, block, "/path/to/veto")
 	require.Contains(t, block, "/path/to/lib.dylib")
 	// macOS-specific in this test env (CI may differ); test both keys
 	// to keep the assertion portable.

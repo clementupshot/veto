@@ -7,8 +7,8 @@ package gate
 import (
 	"github.com/rs/zerolog"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
 )
 
 // Outcome is the gate's verdict for a complete install command.
@@ -19,17 +19,17 @@ const (
 	// real package manager.
 	OutcomeAllow Outcome = "allow"
 
-	// OutcomeRefuse: at least one Install matched malware intel. The bouncer
+	// OutcomeRefuse: at least one Install matched malware intel. The veto
 	// must NOT exec the real package manager.
 	OutcomeRefuse Outcome = "refuse"
 
 	// OutcomePassThrough: the command did not describe an install (parser
-	// returned nil). The bouncer execs the real binary unchanged.
+	// returned nil). The veto execs the real binary unchanged.
 	OutcomePassThrough Outcome = "passthrough"
 
 	// OutcomeAbort: an internal failure prevented the gate from making a
 	// confident decision — typically a manifest file the gate was supposed to
-	// read raised an I/O error. The bouncer must NOT exec the real package
+	// read raised an I/O error. The veto must NOT exec the real package
 	// manager; the agent sees a distinct error from malware-driven refusals
 	// so the failure isn't mistaken for a normal block.
 	OutcomeAbort Outcome = "abort"
@@ -96,10 +96,10 @@ type Policy struct {
 	// false (the default), they are refused — because upstream malware
 	// feeds CAN flag these by URL or commit hash, and silently passing
 	// them through would be a fail-OPEN. The CLI surfaces this as
-	// BOUNCER_ALLOW_OPAQUE=1 for opt-in.
+	// VETO_ALLOW_OPAQUE=1 for opt-in.
 	//
 	// Refusal is reported through a synthetic intel.Verdict with
-	// SourceID="bouncer-policy" so the existing refusal-printing code
+	// SourceID="veto-policy" so the existing refusal-printing code
 	// renders it the same as a malware-driven refusal.
 	AllowOpaqueRemote bool
 
@@ -158,7 +158,7 @@ func (g *Gate) WithLogger(logger zerolog.Logger) *Gate {
 // argument (parser returned no installs) yields OutcomePassThrough.
 // An empty (non-nil) installs argument (parser saw an install verb with no
 // explicit specs, e.g. `npm install` resolving from package.json) yields
-// OutcomeAllow today — refer to package-bouncer's known-limitations doc.
+// OutcomeAllow today — refer to veto's known-limitations doc.
 //
 // manifestRefs, when non-empty, are passed through Policy.ManifestExpander
 // to discover transitive Installs (pip's `-r requirements.txt`, npm's
@@ -217,7 +217,7 @@ func (g *Gate) Evaluate(installs []packagemanager.Install, manifestRefs ...packa
 			if !g.policy.AllowOpaqueRemote {
 				decision.Verdicts = append(decision.Verdicts, policyRefusalVerdict(ins,
 					"opaque-spec install refused: URL/git/tarball specs bypass the package "+
-						"registry and can carry payloads. Set BOUNCER_ALLOW_OPAQUE=1 to override "+
+						"registry and can carry payloads. Set VETO_ALLOW_OPAQUE=1 to override "+
 						"after independently verifying the source."))
 				decision.Outcome = OutcomeRefuse
 				continue
@@ -245,7 +245,7 @@ func (g *Gate) Evaluate(installs []packagemanager.Install, manifestRefs ...packa
 }
 
 // policyRefusalVerdict synthesizes a Verdict that the gate's printer can
-// render identically to a malware-flag refusal. SourceID "bouncer-policy"
+// render identically to a malware-flag refusal. SourceID "veto-policy"
 // is the only non-upstream identifier the printer encounters; reserving
 // the name here keeps it from colliding with a real intel source.
 func policyRefusalVerdict(ins packagemanager.Install, reason string) intel.Verdict {
@@ -254,7 +254,7 @@ func policyRefusalVerdict(ins packagemanager.Install, reason string) intel.Verdi
 		Reports: []intel.MalwareReport{
 			{
 				PackageRef: ins.Ref,
-				SourceID:   "bouncer-policy",
+				SourceID:   "veto-policy",
 				Reason:     reason,
 			},
 		},

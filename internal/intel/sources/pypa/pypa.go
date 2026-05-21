@@ -28,12 +28,12 @@ import (
 	"strings"
 	"time"
 
-	bouncererrors "github.com/brynbellomy/go-utils/errors"
+	vetoerrors "github.com/brynbellomy/go-utils/errors"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/intel/osvschema"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel/osvschema"
 )
 
 const (
@@ -55,7 +55,7 @@ type Options struct {
 	URL string
 
 	// CacheDir is where the fetched tarball + etag persist between runs.
-	// Required; typically ~/.cache/package-bouncer/pypa.
+	// Required; typically ~/.cache/veto/pypa.
 	CacheDir string
 
 	// HTTPClient defaults to a 2-minute-timeout client. The tarball is
@@ -80,10 +80,10 @@ var _ intel.Source = (*Source)(nil)
 // New builds a PyPA source. CacheDir is required.
 func New(opts Options) (*Source, error) {
 	if opts.CacheDir == "" {
-		return nil, bouncererrors.New("pypa: CacheDir is required")
+		return nil, vetoerrors.New("pypa: CacheDir is required")
 	}
 	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
-		return nil, bouncererrors.With(err, "pypa: create cache dir").Set("path", opts.CacheDir)
+		return nil, vetoerrors.With(err, "pypa: create cache dir").Set("path", opts.CacheDir)
 	}
 	url := opts.URL
 	if url == "" {
@@ -115,7 +115,7 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 	etagPath := filepath.Join(s.cache, "advisory-database.etag")
 	payload, err := s.fetchWithCache(ctx, tarballPath, etagPath)
 	if err != nil {
-		return nil, bouncererrors.With(err, "pypa fetch")
+		return nil, vetoerrors.With(err, "pypa fetch")
 	}
 	return parseTarball(payload, s.logger)
 }
@@ -130,7 +130,7 @@ func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath strin
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
 	if err != nil {
-		return nil, bouncererrors.With(err, "build request")
+		return nil, vetoerrors.With(err, "build request")
 	}
 	if len(prevEtag) > 0 {
 		req.Header.Set("If-None-Match", string(prevEtag))
@@ -141,7 +141,7 @@ func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath strin
 			s.logger.Warn().Err(err).Str("url", s.url).Msg("upstream unreachable, using cached tarball")
 			return cached, nil
 		}
-		return nil, bouncererrors.With(err, "http request")
+		return nil, vetoerrors.With(err, "http request")
 	}
 	defer resp.Body.Close()
 
@@ -157,15 +157,15 @@ func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath strin
 	case http.StatusOK:
 		// fall through
 	default:
-		return nil, bouncererrors.WithNew("unexpected status").Set("status", resp.StatusCode, "url", s.url)
+		return nil, vetoerrors.WithNew("unexpected status").Set("status", resp.StatusCode, "url", s.url)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, bouncererrors.With(err, "read body")
+		return nil, vetoerrors.With(err, "read body")
 	}
 	if err := writeAtomic(payloadPath, body); err != nil {
-		return nil, bouncererrors.With(err, "cache payload")
+		return nil, vetoerrors.With(err, "cache payload")
 	}
 	if etag := resp.Header.Get("ETag"); etag != "" {
 		if err := writeAtomic(etagPath, []byte(etag)); err != nil {
@@ -190,7 +190,7 @@ func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath strin
 func parseTarball(payload []byte, logger zerolog.Logger) ([]intel.MalwareReport, error) {
 	gz, err := gzip.NewReader(strings.NewReader(string(payload)))
 	if err != nil {
-		return nil, bouncererrors.With(err, "decompress tarball")
+		return nil, vetoerrors.With(err, "decompress tarball")
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
@@ -202,7 +202,7 @@ func parseTarball(payload []byte, logger zerolog.Logger) ([]intel.MalwareReport,
 			break
 		}
 		if err != nil {
-			return nil, bouncererrors.With(err, "read tar header")
+			return nil, vetoerrors.With(err, "read tar header")
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue
@@ -254,7 +254,7 @@ func isVulnYAML(name string) bool {
 func parseYAMLAdvisory(body []byte) (osvschema.Advisory, error) {
 	var adv osvschema.Advisory
 	if err := yaml.Unmarshal(body, &adv); err != nil {
-		return osvschema.Advisory{}, bouncererrors.With(err, "yaml unmarshal")
+		return osvschema.Advisory{}, vetoerrors.With(err, "yaml unmarshal")
 	}
 	return adv, nil
 }

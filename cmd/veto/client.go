@@ -9,10 +9,10 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/brynbellomy/package-bouncer/internal/daemon"
+	"github.com/brynbellomy/veto/internal/daemon"
 )
 
-// daemonClient is the client-mode entry point: contact the bouncer daemon
+// daemonClient is the client-mode entry point: contact the veto daemon
 // over its Unix socket, send a Request that names the PM and its args,
 // pass our own stdio fds via SCM_RIGHTS, and exit with whatever code the
 // daemon reports.
@@ -34,8 +34,8 @@ func daemonClient(logger zerolog.Logger, socketPath string, pmName string, pmArg
 		// reject with EPERM, and the user would get a confusing "exec
 		// failed" error. Better to refuse loudly.
 		logger.Error().Err(err).Str("socket", socketPath).Msg("connect to daemon")
-		fmt.Fprintf(os.Stderr, "bouncer: cannot reach daemon at %s: %v\n", socketPath, err)
-		fmt.Fprintln(os.Stderr, "If you have not installed the daemon yet, run `bouncer install-daemon`.")
+		fmt.Fprintf(os.Stderr, "veto: cannot reach daemon at %s: %v\n", socketPath, err)
+		fmt.Fprintln(os.Stderr, "If you have not installed the daemon yet, run `veto install-daemon`.")
 		return exitInternal
 	}
 	defer conn.Close()
@@ -44,7 +44,7 @@ func daemonClient(logger zerolog.Logger, socketPath string, pmName string, pmArg
 		// net.Dial("unix", ...) always returns *net.UnixConn; the
 		// type-assert is a guard against a future refactor reaching
 		// here with the wrong network type.
-		fmt.Fprintf(os.Stderr, "bouncer: internal: expected *net.UnixConn from net.Dial(unix), got %T\n", conn)
+		fmt.Fprintf(os.Stderr, "veto: internal: expected *net.UnixConn from net.Dial(unix), got %T\n", conn)
 		return exitInternal
 	}
 
@@ -67,14 +67,14 @@ func daemonClient(logger zerolog.Logger, socketPath string, pmName string, pmArg
 	}
 	if err := daemon.SendRequest(uconn, req, fds); err != nil {
 		logger.Error().Err(err).Msg("send request")
-		fmt.Fprintf(os.Stderr, "bouncer: send request to daemon: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto: send request to daemon: %v\n", err)
 		return exitInternal
 	}
 
 	resp, err := daemon.RecvResponse(uconn)
 	if err != nil {
 		logger.Error().Err(err).Msg("recv response")
-		fmt.Fprintf(os.Stderr, "bouncer: recv response from daemon: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto: recv response from daemon: %v\n", err)
 		return exitInternal
 	}
 
@@ -85,17 +85,17 @@ func daemonClient(logger zerolog.Logger, socketPath string, pmName string, pmArg
 		printRefusalFromResponse(os.Stderr, resp)
 		return exitRefused
 	case daemon.StatusAborted:
-		fmt.Fprintln(os.Stderr, "bouncer: INTERNAL ERROR — install aborted fail-closed.")
+		fmt.Fprintln(os.Stderr, "veto: INTERNAL ERROR — install aborted fail-closed.")
 		if resp.Message != "" {
 			fmt.Fprintln(os.Stderr, "  "+resp.Message)
 		}
-		fmt.Fprintln(os.Stderr, "\nThis is not a malware block — it's a bouncer-side failure. Investigate before retrying.")
+		fmt.Fprintln(os.Stderr, "\nThis is not a malware block — it's a veto-side failure. Investigate before retrying.")
 		return exitInternal
 	case daemon.StatusError:
-		fmt.Fprintf(os.Stderr, "bouncer: daemon error: %s\n", resp.Message)
+		fmt.Fprintf(os.Stderr, "veto: daemon error: %s\n", resp.Message)
 		return exitInternal
 	default:
-		fmt.Fprintf(os.Stderr, "bouncer: unknown daemon status: %s\n", resp.Status)
+		fmt.Fprintf(os.Stderr, "veto: unknown daemon status: %s\n", resp.Status)
 		return exitInternal
 	}
 }
@@ -104,7 +104,7 @@ func daemonClient(logger zerolog.Logger, socketPath string, pmName string, pmArg
 // same shape the old in-process refusal used, so the user-visible UX is
 // identical regardless of which path produced the verdict.
 func printRefusalFromResponse(w *os.File, resp daemon.Response) {
-	fmt.Fprintln(w, "bouncer: install refused — malware intelligence flagged the following:")
+	fmt.Fprintln(w, "veto: install refused — malware intelligence flagged the following:")
 	// Group by (name, version) so multiple sources on the same package
 	// render as nested lines under one heading, matching the in-process
 	// formatter's behavior.
@@ -132,7 +132,7 @@ func printRefusalFromResponse(w *os.File, resp daemon.Response) {
 			fmt.Fprintf(w, "      [%s] %s\n", r.SourceID, reason)
 		}
 	}
-	fmt.Fprintln(w, "\nTo override (you really shouldn't), prepend BOUNCER_BYPASS=1 to the command.")
+	fmt.Fprintln(w, "\nTo override (you really shouldn't), prepend VETO_BYPASS=1 to the command.")
 }
 
 // daemonSocketExists reports whether a Unix socket exists at path AND is

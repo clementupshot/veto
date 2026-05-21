@@ -6,11 +6,11 @@ Layers 2 + 3 + 4 — see [`../../docs/onboarding.md`](../../docs/onboarding.md)
 for the full per-layer walkthrough.
 
 ```sh
-bouncer install-shims                # Layer 2: ~/.local/bin/{npm,pip,...} → bouncer
+veto install-shims                # Layer 2: ~/.local/bin/{npm,pip,...} → veto
 make interposer                      # build native execve interposer
-bouncer install-preload --lib $(pwd)/libbouncer_interpose.dylib --shell-rc auto
+veto install-preload --lib $(pwd)/libveto_interpose.dylib --shell-rc auto
                                      # Layer 3: DYLD_INSERT_LIBRARIES / LD_PRELOAD
-bouncer install-wrappers             # Layer 4: wrap real binaries at install paths
+veto install-wrappers             # Layer 4: wrap real binaries at install paths
 ```
 
 Why Layer 4 matters specifically for Sirene-style runners: when a

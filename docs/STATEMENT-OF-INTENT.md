@@ -1,4 +1,4 @@
-# package-bouncer — statement of intent
+# veto — statement of intent
 
 > **Status (2026-05-21, post-audit): superseded as the active architecture.**
 >
@@ -14,8 +14,8 @@
 > This document is retained for reference — the audit history and
 > primitives comparison are still useful context — but it does NOT
 > describe what's installed by `make install` today. The
-> `sandbox-exec` daemon code (`internal/daemon/`, `cmd/bouncer/{client,daemon}.go`)
-> is still in the tree as a dormant experimental path; `bouncer daemon`
+> `sandbox-exec` daemon code (`internal/daemon/`, `cmd/veto/{client,daemon}.go`)
+> is still in the tree as a dormant experimental path; `veto daemon`
 > exists as a subcommand but is not part of the recommended install
 > flow.
 
@@ -28,7 +28,7 @@
 
 ## 1. Purpose
 
-`package-bouncer` is a single-developer self-protection tool that interposes between an autonomous coding agent (Claude Code, Codex, etc.) and the package managers it invokes (`npm`, `pip`, `uv`, `bun`, …). Every install command is parsed, the named packages are looked up against aggregated malware intelligence (Aikido, OpenSSF malicious-packages, OSV), and the install is refused if any source flags any package.
+`veto` is a single-developer self-protection tool that interposes between an autonomous coding agent (Claude Code, Codex, etc.) and the package managers it invokes (`npm`, `pip`, `uv`, `bun`, …). Every install command is parsed, the named packages are looked up against aggregated malware intelligence (Aikido, OpenSSF malicious-packages, OSV), and the install is refused if any source flags any package.
 
 It exists because:
 - Coding agents in "auto mode" are unpredictable. They emit `bash -c '…'`, full-path invocations, `subprocess.run(shell=True)`, novel shell constructs. Any defense that relies on parsing the shell command is a treadmill of edge cases.
@@ -59,16 +59,16 @@ This document describes the current design (kernel-enforcement via `sandbox-exec
 
 ### 2.3 What we are NOT defending against
 
-- A user typing `BOUNCER_BYPASS=1 npm install evil` themselves. The escape hatch exists; honoring it is a UX decision, not a security failure.
-- An attacker with physical access or pre-existing root on the workstation. They can unload the daemon, edit the sandbox profile, replace the bouncer binary.
+- A user typing `VETO_BYPASS=1 npm install evil` themselves. The escape hatch exists; honoring it is a UX decision, not a security failure.
+- An attacker with physical access or pre-existing root on the workstation. They can unload the daemon, edit the sandbox profile, replace the veto binary.
 - A sandbox-escape vulnerability in macOS's sandbox kernel extension. That's Apple's threat surface, not ours.
 - Network-layer attacks against the intel feeds beyond TLS (no signature/checksum verification on Aikido or OpenSSF or OSV today — see §6).
 - Malware whose payload is not in any of the configured intel sources. We index three sources covering ~620k reports; this is wide but not exhaustive.
-- Transitive dependencies whose names don't appear in the install command. A clean-named package whose `setup.py` fetches an unflagged-but-malicious second-level dep is out of scope; bouncer sees install requests, not resolved dependency graphs.
+- Transitive dependencies whose names don't appear in the install command. A clean-named package whose `setup.py` fetches an unflagged-but-malicious second-level dep is out of scope; veto sees install requests, not resolved dependency graphs.
 
 ### 2.4 Threat model assertion
 
-> If the user runs their coding agent via `bouncer run-agent <agent>`, no package manager — invoked by any code path, by any shell construct, by any wrapper, by any absolute or relative path — can execute without first having its arguments parsed and gated by the bouncer daemon.
+> If the user runs their coding agent via `veto run-agent <agent>`, no package manager — invoked by any code path, by any shell construct, by any wrapper, by any absolute or relative path — can execute without first having its arguments parsed and gated by the veto daemon.
 
 This is the property the design is intended to enforce and the property we need the security team to attempt to break.
 
@@ -78,23 +78,23 @@ This is the property the design is intended to enforce and the property we need 
 
 ### 3.1 Components
 
-1. **The agent process tree** — Claude Code, Codex, or any other agent, plus every subprocess it spawns (bash, python, node, etc.). Launched via `bouncer run-agent <name>`, which wraps the launch in `sandbox-exec -f <profile>` so the entire process tree inherits the sandbox.
+1. **The agent process tree** — Claude Code, Codex, or any other agent, plus every subprocess it spawns (bash, python, node, etc.). Launched via `veto run-agent <name>`, which wraps the launch in `sandbox-exec -f <profile>` so the entire process tree inherits the sandbox.
 
 2. **The sandbox profile** — a generated TinyScheme file (Apple's sandbox profile language) that:
    - Allows `default` (every other syscall and resource).
    - Denies `process-exec` for every covered PM binary path enumerated under `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/share/mise/installs/.../bin`, every common Node version manager dir, etc.
-   - Allows `process-exec` for the bouncer binary.
-   - Allows `network-outbound` for AF_UNIX sockets to the bouncer daemon's path (so the bouncer CLI inside the sandbox can talk to the out-of-sandbox daemon).
+   - Allows `process-exec` for the veto binary.
+   - Allows `network-outbound` for AF_UNIX sockets to the veto daemon's path (so the veto CLI inside the sandbox can talk to the out-of-sandbox daemon).
 
-3. **The bouncer CLI** — same binary as the daemon, different subcommand. When invoked inside the sandbox as `bouncer npm install foo` (either directly or via PATH shim), it:
-   - Resolves the daemon socket path (`$BOUNCER_DAEMON_SOCKET` or `~/.local/state/bouncer/bouncer.sock`).
+3. **The veto CLI** — same binary as the daemon, different subcommand. When invoked inside the sandbox as `veto npm install foo` (either directly or via PATH shim), it:
+   - Resolves the daemon socket path (`$VETO_DAEMON_SOCKET` or `~/.local/state/veto/veto.sock`).
    - Connects via `net.Dial("unix", …)`.
    - Sends a `Request` (JSON length-prefixed) containing the PM name, args, cwd, env. Attaches the calling process's stdin/stdout/stderr fds via SCM_RIGHTS.
    - Waits for a `Response` and exits with the daemon's verdict (PM exit code, refusal, internal error).
 
-4. **The bouncer daemon** — same binary, loaded by launchd as a per-user agent. Runs outside the sandbox. Owns:
+4. **The veto daemon** — same binary, loaded by launchd as a per-user agent. Runs outside the sandbox. Owns:
    - The intel store (in-memory deduplicated index built from Aikido + OpenSSF + OSV, refreshed every 30 min in the background).
-   - The Unix socket listener at `~/.local/state/bouncer/bouncer.sock`, parent dir 0700, socket 0600.
+   - The Unix socket listener at `~/.local/state/veto/veto.sock`, parent dir 0700, socket 0600.
    - The gate logic (parse argv → look up each named package → allow/refuse).
    - The actual exec of the real PM, on behalf of the sandboxed client, using `os.StartProcess` with the client's dup'd fds.
 
@@ -107,7 +107,7 @@ This is the property the design is intended to enforce and the property we need 
 │  outside the sandbox (full user privilege)                           │
 │  ┌────────────────────────────┐         ┌─────────────────────────┐  │
 │  │ launchd (user agent)       │         │ Apple sandbox kernel    │  │
-│  │  └─ bouncer daemon         │         │ (enforces process-exec  │  │
+│  │  └─ veto daemon         │         │ (enforces process-exec  │  │
 │  │      ├─ intel store        │         │  deny rules below)      │  │
 │  │      ├─ socket listener    │         └─────────────────────────┘  │
 │  │      └─ posix_spawn of PMs │                    │                 │
@@ -122,7 +122,7 @@ This is the property the design is intended to enforce and the property we need 
 │   ┌──────────┴──────────┐    ┌─────────────────────┐                 │
 │   │ agent (Claude/Codex)│    │ subprocess: python, │                 │
 │   │  └─ bash shells     │◄──►│ node, ruby, …       │                 │
-│   │     └─ bouncer CLI  │    │  └─ exec attempts:  │                 │
+│   │     └─ veto CLI  │    │  └─ exec attempts:  │                 │
 │   │        (allowed)    │    │     bash -c "..."   │                 │
 │   └─────────────────────┘    │     /full/path/npm  │                 │
 │                              │     subprocess.run  │                 │
@@ -131,7 +131,7 @@ This is the property the design is intended to enforce and the property we need 
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Trust boundary 1** (sandbox kernel ↔ agent process tree): enforced by macOS, kernel-level. The agent and everything it spawns inherits the deny rules. The only way out is to exec `bouncer` (which the profile allows).
+**Trust boundary 1** (sandbox kernel ↔ agent process tree): enforced by macOS, kernel-level. The agent and everything it spawns inherits the deny rules. The only way out is to exec `veto` (which the profile allows).
 
 **Trust boundary 2** (sandboxed CLI ↔ daemon, via AF_UNIX socket): the daemon parses the request, runs the gate, and either refuses or execs the real PM on the client's behalf. The daemon owns the only path from inside the sandbox to executing a real package manager.
 
@@ -141,8 +141,8 @@ This is the property the design is intended to enforce and the property we need 
 
 1. Agent emits `npm install foo` (in any form — bare, full path, via bash -c, etc.).
 2. Sandbox kernel sees `execve(/opt/homebrew/bin/npm, …)`. Denied per profile. Returns EPERM.
-3. Agent's only path forward is to invoke `bouncer npm install foo` (which the profile allows). Possibly via a PATH shim (`~/.local/bin/npm` → bouncer), so the literal `npm install foo` in the agent's shell still works if PATH is configured.
-4. bouncer CLI connects to daemon socket, sends Request{pm:"npm", args:[…], cwd, env}, sends stdin/stdout/stderr fds via SCM_RIGHTS.
+3. Agent's only path forward is to invoke `veto npm install foo` (which the profile allows). Possibly via a PATH shim (`~/.local/bin/npm` → veto), so the literal `npm install foo` in the agent's shell still works if PATH is configured.
+4. veto CLI connects to daemon socket, sends Request{pm:"npm", args:[…], cwd, env}, sends stdin/stdout/stderr fds via SCM_RIGHTS.
 5. Daemon receives, runs the parser (existing battle-tested code: scoped packages, PEP 508, npm aliases, etc.), looks up each named package against the intel index, returns Allow / Refuse / Abort.
 6. On Allow: daemon `os.StartProcess(/opt/homebrew/bin/npm, …)` with the client's stdio fds dup'd onto the child. The PM runs in the daemon's address space (not sandboxed); writes directly to the user's terminal via the passed fds.
 7. Daemon `Wait`s for the child, sends exit code back to client.
@@ -161,7 +161,7 @@ The previous design relied on three software interception points (Claude Code ho
 - The Claude Code hook's shell-command parser missed `sudo bash -c '…'`, `eval`, `setsid`, `numactl`, and several other wrapper compositions. Every miss = full Layer 1 bypass.
 - The PATH shims could not catch full-path invocations (`/opt/homebrew/bin/npm install …`), which LLMs DO emit sometimes.
 - The `DYLD_INSERT_LIBRARIES` interposer:
-  - Had a ship-blocking infinite recursion when bouncer execs the real PM (the audit's SHIP-1 finding).
+  - Had a ship-blocking infinite recursion when veto execs the real PM (the audit's SHIP-1 finding).
   - Used async-signal-unsafe `calloc` post-fork — deadlock risk under threaded Python.
   - Fails open on `system()`/`popen()` on macOS because `/bin/sh` is SIP-protected and strips `DYLD_INSERT_LIBRARIES`.
   - Cannot hook `execl`/`execlp`/`fexecve` on Linux without per-symbol coverage.
@@ -176,16 +176,16 @@ These are not implementation bugs that can be fixed — they are fundamental pro
 The sandboxed CLI cannot exec the real PM (the kernel denies it). Something outside the sandbox has to do that exec. Three options were considered:
 
 - **Daemon process** (chosen): a long-running per-user agent loaded via launchd. The CLI talks to it over a Unix socket. Stdio passed via SCM_RIGHTS so no proxy overhead. Single attack surface: one socket, one request type.
-- **setuid helper**: `bouncer` itself runs setuid and re-execs the real PM. Rejected because (a) we don't need root; (b) setuid expands the attack surface (PATH, env, arg parsing all need scrutiny); (c) doesn't solve the sandbox-side `execve` deny — the kernel denies based on path, not on UID.
+- **setuid helper**: `veto` itself runs setuid and re-execs the real PM. Rejected because (a) we don't need root; (b) setuid expands the attack surface (PATH, env, arg parsing all need scrutiny); (c) doesn't solve the sandbox-side `execve` deny — the kernel denies based on path, not on UID.
 - **`open`-based delegation**: have the sandboxed CLI use `open` (Apple's URL handler) to ask a registered .app to do the install. Rejected because `open`'s contract doesn't propagate exit codes or stdio.
 
 The daemon design is the same pattern Docker, containerd, and gVisor use for the same reason: enforcement primitive is at a privilege the application can't reach.
 
 ### 4.3 Why fail-closed everywhere
 
-The threat is supply-chain worms. The cost of a false-positive is "the user has to type `BOUNCER_BYPASS=1` once." The cost of a false-negative is credential compromise + lateral propagation. The asymmetry is enormous. Every doubt resolves toward refusing.
+The threat is supply-chain worms. The cost of a false-positive is "the user has to type `VETO_BYPASS=1` once." The cost of a false-negative is credential compromise + lateral propagation. The asymmetry is enormous. Every doubt resolves toward refusing.
 
-Concretely: the daemon refuses to start if the intel store is unreachable on initial refresh, refuses to gate if the report count is below 1000 (sanity floor for "every source returned empty"), refuses on manifest-parse errors, refuses on socket-protocol errors. The bouncer CLI inside the sandbox does not fall back to "let the install through" under any condition.
+Concretely: the daemon refuses to start if the intel store is unreachable on initial refresh, refuses to gate if the report count is below 1000 (sanity floor for "every source returned empty"), refuses on manifest-parse errors, refuses on socket-protocol errors. The veto CLI inside the sandbox does not fall back to "let the install through" under any condition.
 
 ### 4.4 Why three aggregated intel sources
 
@@ -195,7 +195,7 @@ Source signature/checksum verification is NOT implemented — see §6.
 
 ### 4.5 Why same binary for CLI and daemon
 
-Build simplicity (one Makefile target, one notarization target eventually), shared internal packages (parsers, gate, intel store) without import gymnastics, and one binary the launchd plist + sandbox profile both refer to. The subcommand selects mode: `bouncer daemon` for the launchd path, `bouncer run-agent` for the launcher, `bouncer <pm> …` for the CLI client.
+Build simplicity (one Makefile target, one notarization target eventually), shared internal packages (parsers, gate, intel store) without import gymnastics, and one binary the launchd plist + sandbox profile both refer to. The subcommand selects mode: `veto daemon` for the launchd path, `veto run-agent` for the launcher, `veto <pm> …` for the CLI client.
 
 ---
 
@@ -204,17 +204,17 @@ Build simplicity (one Makefile target, one notarization target eventually), shar
 ### 5.1 Done (Phase 1)
 
 - Daemon protocol package (`internal/daemon/`): Request/Response types, socket path resolution, two-step wire format (sendmsg for header+fds, write for payload — works around macOS's mbuf-cluster cap on sendmsg-with-ancillary).
-- Daemon server: `bouncer daemon` subcommand, accept loop, gate integration, env sanitization, fd dup, spawn-and-wait, exit-code passthrough.
+- Daemon server: `veto daemon` subcommand, accept loop, gate integration, env sanitization, fd dup, spawn-and-wait, exit-code passthrough.
 - Background intel refresh (30-minute cadence).
-- `BOUNCER_BYPASS=1` honored loudly (INFO log).
+- `VETO_BYPASS=1` honored loudly (INFO log).
 - Client mode: `runGate` routes to daemon if socket reachable, falls back to in-process gate otherwise (daemon-less courtesy mode for users who haven't set up launchd).
 - 9 new tests + 234 existing tests, all green.
 
 ### 5.2 Pending (Phase 2 — kernel enforcement; needs review before implementation)
 
-- Sandbox profile generator (enumerate PM paths, emit `(deny process-exec (literal …))` for each, allow bouncer binary).
-- `bouncer run-agent <name>` subcommand.
-- `bouncer install-daemon` (launchd plist at `~/Library/LaunchAgents/com.bouncer.daemon.plist`).
+- Sandbox profile generator (enumerate PM paths, emit `(deny process-exec (literal …))` for each, allow veto binary).
+- `veto run-agent <name>` subcommand.
+- `veto install-daemon` (launchd plist at `~/Library/LaunchAgents/com.veto.daemon.plist`).
 - End-to-end test: sandbox-exec'd shell tries every bypass the audit found (sudo bash -c, eval, setsid, full-path, subprocess.run) → EPERM at kernel, daemon never sees it.
 
 ### 5.3 Pending (Phase 3 — cleanup)
@@ -242,9 +242,9 @@ Audit-identified issues that survive the refactor and still need fixing:
 | L2 | Stale-cache fail-open: after one successful sync, an upstream becoming unreachable doesn't degrade gate confidence. Cache could be months old. | HIGH | Phase 4 will add per-source `last_refresh_at` + max-age policy. |
 | L3 | `sandbox-exec` is Apple-deprecated. Removal would require migration to Endpoint Security framework (paid Apple Dev ID + entitlement). | MEDIUM | 13-year history of "deprecated but functional"; Chromium/Firefox/Apple-App-Sandbox depend on the underlying kernel infra. Bet is 3+ years of warning before any real removal. |
 | L4 | A sandbox-escape vulnerability in the macOS sandbox kernel extension defeats every defense at once. | LOW (Apple-managed) | Out of our threat surface. |
-| L5 | Transitive dependencies: clean-named package whose `setup.py` fetches an unflagged-named malicious dep is not gated. | MEDIUM | Documented out-of-scope. Mitigation is in pinned-lockfile policy, not bouncer. |
+| L5 | Transitive dependencies: clean-named package whose `setup.py` fetches an unflagged-named malicious dep is not gated. | MEDIUM | Documented out-of-scope. Mitigation is in pinned-lockfile policy, not veto. |
 | L6 | URL/path/git installs (`pip install https://…`, `npm install ./local`) bypass the intel lookup because the install target has no canonical package name to look up. | MEDIUM | Phase 4 decision: refuse, or document explicitly as bypass. |
-| L7 | The bouncer binary itself is what the sandbox allows. If the bouncer binary is compromised (replaced, patched), the gate is bypassed. | MEDIUM | Mitigation: binary lives in a path the agent cannot write to (e.g. `/usr/local/bin/bouncer`, owned by root or by the user with no agent-writable path leading to it). Document this requirement explicitly. |
+| L7 | The veto binary itself is what the sandbox allows. If the veto binary is compromised (replaced, patched), the gate is bypassed. | MEDIUM | Mitigation: binary lives in a path the agent cannot write to (e.g. `/usr/local/bin/veto`, owned by root or by the user with no agent-writable path leading to it). Document this requirement explicitly. |
 | L8 | The daemon's socket file permissions (0600) and parent dir (0700) are the only thing preventing other local users from connecting. On a single-user workstation this is sufficient; on shared hosts it requires additional thought. | LOW (single-user threat model) | Documented assumption. |
 
 ---
@@ -255,7 +255,7 @@ Audit-identified issues that survive the refactor and still need fixing:
 
 From §2.4:
 
-> If the user runs their coding agent via `bouncer run-agent <agent>`, no package manager — invoked by any code path, by any shell construct, by any wrapper, by any absolute or relative path — can execute without first having its arguments parsed and gated by the bouncer daemon.
+> If the user runs their coding agent via `veto run-agent <agent>`, no package manager — invoked by any code path, by any shell construct, by any wrapper, by any absolute or relative path — can execute without first having its arguments parsed and gated by the veto daemon.
 
 We want the security team to attempt to falsify this by enumerating attacks of the form: "an agent in the sandboxed subtree runs X, and as a result the real PM executes without the daemon gating it." Specifically:
 
@@ -269,7 +269,7 @@ We want the security team to attempt to falsify this by enumerating attacks of t
 The daemon is the only thing standing between a hostile in-sandbox client and exec'ing a real PM. Specifically:
 
 - The request parser (`internal/daemon/conn.go`): malformed JSON, oversized payloads, attached-fds-count mismatches, control message truncation. Are there shapes that crash the daemon vs. fail gracefully?
-- The argv-passing path (`spawnAndWait` in `cmd/bouncer/daemon.go`): the client controls `Args`, `Cwd`, `Env`. We sanitize env to strip `BOUNCER_*` and replace `PATH`. Are there other env vars that, if controlled by the client, change the PM's behavior in dangerous ways? (`LD_PRELOAD`? `DYLD_*`? `NODE_OPTIONS`? `PIP_INDEX_URL`?)
+- The argv-passing path (`spawnAndWait` in `cmd/veto/daemon.go`): the client controls `Args`, `Cwd`, `Env`. We sanitize env to strip `VETO_*` and replace `PATH`. Are there other env vars that, if controlled by the client, change the PM's behavior in dangerous ways? (`LD_PRELOAD`? `DYLD_*`? `NODE_OPTIONS`? `PIP_INDEX_URL`?)
 - The PM resolution path (`findRealBinary`): walks `PATH` to find the first executable matching the PM name. Daemon's `PATH` is what the launchd plist sets. Is that path resistant to a hostile client manipulating it indirectly?
 
 ### 7.3 Daemon lifecycle
@@ -288,15 +288,15 @@ The daemon is the only thing standing between a hostile in-sandbox client and ex
 
 ## 8. Open questions for the security team
 
-1. **Sandbox profile completeness**: we enumerate PM paths under known prefixes. Is this enumeration future-proof? A user installing `npm` via a method we don't know about (a personal homebrew tap, a Nix profile, a Docker-shared bin dir) could land it at an unenumerated path. We're considering: (a) build the deny list dynamically per `bouncer doctor` run by walking PATH for known PM names; (b) deny by basename via `(regex …)` in the profile rather than literal paths; (c) accept the enumeration approach and document the limit. Preference?
+1. **Sandbox profile completeness**: we enumerate PM paths under known prefixes. Is this enumeration future-proof? A user installing `npm` via a method we don't know about (a personal homebrew tap, a Nix profile, a Docker-shared bin dir) could land it at an unenumerated path. We're considering: (a) build the deny list dynamically per `veto doctor` run by walking PATH for known PM names; (b) deny by basename via `(regex …)` in the profile rather than literal paths; (c) accept the enumeration approach and document the limit. Preference?
 
 2. **SIP-bypass concern**: `sandbox-exec` policies override SIP for the sandboxed subtree (the profile denies even SIP-protected binaries inside the sandbox). Reviewers please confirm this is the actual macOS behavior, not just our reading of the docs.
 
-3. **Launchd plist trust**: the daemon is loaded as a per-user launchd agent. The plist lives at `~/Library/LaunchAgents/com.bouncer.daemon.plist`. If the agent can write to that path (which it can — `~/Library` is user-writable), can it replace the plist with one that points at a hostile binary, then trigger a reload? We believe not — launchd reloads happen on `launchctl bootstrap` or user login, neither of which the agent can trigger from inside the sandbox. Please confirm.
+3. **Launchd plist trust**: the daemon is loaded as a per-user launchd agent. The plist lives at `~/Library/LaunchAgents/com.veto.daemon.plist`. If the agent can write to that path (which it can — `~/Library` is user-writable), can it replace the plist with one that points at a hostile binary, then trigger a reload? We believe not — launchd reloads happen on `launchctl bootstrap` or user login, neither of which the agent can trigger from inside the sandbox. Please confirm.
 
 4. **Socket-path race**: between `os.Remove(stale_socket)` and `net.Listen("unix", path)` in daemon startup, can a local attacker race in to bind first? The parent dir is 0700 so only us-the-user can write — but our own (sandboxed) agent could. Is this a real concern given the threat model, or theoretical?
 
-5. **`BOUNCER_BYPASS` UX**: the documented escape hatch. A user prepends `BOUNCER_BYPASS=1 npm install foo` and the gate is skipped. Is this UX appropriate? Alternatives: require explicit YAML approval in `~/.config/bouncer/allowlist`, require two-keystroke confirmation, etc. The current implementation logs every bypass at INFO level to the daemon's log file.
+5. **`VETO_BYPASS` UX**: the documented escape hatch. A user prepends `VETO_BYPASS=1 npm install foo` and the gate is skipped. Is this UX appropriate? Alternatives: require explicit YAML approval in `~/.config/veto/allowlist`, require two-keystroke confirmation, etc. The current implementation logs every bypass at INFO level to the daemon's log file.
 
 ---
 
@@ -320,7 +320,7 @@ The daemon is the only thing standing between a hostile in-sandbox client and ex
 - **Intel source**: an upstream feed of known-malicious package names (Aikido, OpenSSF malicious-packages, OSV).
 - **Gate**: the decision logic that takes parsed installs + intel and returns Allow / Refuse / Abort.
 - **Sandbox** (lowercase): the `sandbox-exec`'d subtree containing the agent and everything it spawns.
-- **Daemon**: the out-of-sandbox `bouncer daemon` process loaded by launchd.
-- **Shim**: a symlink at `~/.local/bin/<pm>` pointing at the bouncer binary, so `npm install foo` typed in any shell with `~/.local/bin` on PATH transparently routes through bouncer.
+- **Daemon**: the out-of-sandbox `veto daemon` process loaded by launchd.
+- **Shim**: a symlink at `~/.local/bin/<pm>` pointing at the veto binary, so `npm install foo` typed in any shell with `~/.local/bin` on PATH transparently routes through veto.
 - **SIP**: Apple's System Integrity Protection. Strips `DYLD_INSERT_LIBRARIES` from `/usr/bin/*`, `/bin/*`, `/sbin/*`, system frameworks. Not relevant in the new architecture except as a reason the old `DYLD_INSERT_LIBRARIES` approach was unfixable.
 - **SCM_RIGHTS**: Unix socket control message for passing file descriptors between processes. Used to hand the client's stdio fds to the daemon so the spawned PM writes directly to the user's terminal.

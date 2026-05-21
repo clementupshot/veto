@@ -10,11 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestHasBouncerClaudeHook covers the matrix of settings.json shapes the
-// doctor must understand: a new-style "bouncer hook claude-code" entry,
-// a legacy python-shebang entry, a non-bouncer-Bash hook (rtk-rewrite,
+// TestHasVetoClaudeHook covers the matrix of settings.json shapes the
+// doctor must understand: a new-style "veto hook claude-code" entry,
+// a legacy python-shebang entry, a non-veto-Bash hook (rtk-rewrite,
 // etc.), and a completely unconfigured file.
-func TestHasBouncerClaudeHook(t *testing.T) {
+func TestHasVetoClaudeHook(t *testing.T) {
 	cases := []struct {
 		name     string
 		settings map[string]any
@@ -26,7 +26,7 @@ func TestHasBouncerClaudeHook(t *testing.T) {
 			want:     false,
 		},
 		{
-			name: "Bash chain present but no bouncer entry",
+			name: "Bash chain present but no veto entry",
 			settings: map[string]any{
 				"hooks": map[string]any{
 					"PreToolUse": []any{
@@ -49,7 +49,7 @@ func TestHasBouncerClaudeHook(t *testing.T) {
 						map[string]any{
 							"matcher": "Bash",
 							"hooks": []any{
-								map[string]any{"type": "command", "command": "/Users/x/.local/bin/bouncer hook claude-code"},
+								map[string]any{"type": "command", "command": "/Users/x/.local/bin/veto hook claude-code"},
 							},
 						},
 					},
@@ -65,7 +65,7 @@ func TestHasBouncerClaudeHook(t *testing.T) {
 						map[string]any{
 							"matcher": "Bash",
 							"hooks": []any{
-								map[string]any{"type": "command", "command": "/Users/x/.claude/hooks/bouncer-hook.py"},
+								map[string]any{"type": "command", "command": "/Users/x/.claude/hooks/veto-hook.py"},
 							},
 						},
 					},
@@ -74,14 +74,14 @@ func TestHasBouncerClaudeHook(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "bouncer hook present in a non-Bash matcher does NOT count",
+			name: "veto hook present in a non-Bash matcher does NOT count",
 			settings: map[string]any{
 				"hooks": map[string]any{
 					"PreToolUse": []any{
 						map[string]any{
 							"matcher": "Edit",
 							"hooks": []any{
-								map[string]any{"type": "command", "command": "/x/bouncer hook claude-code"},
+								map[string]any{"type": "command", "command": "/x/veto hook claude-code"},
 							},
 						},
 					},
@@ -92,7 +92,7 @@ func TestHasBouncerClaudeHook(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, hasBouncerClaudeHook(c.settings))
+			require.Equal(t, c.want, hasVetoClaudeHook(c.settings))
 		})
 	}
 }
@@ -123,8 +123,8 @@ func TestPrintResults_ColorMarkers(t *testing.T) {
 
 // TestEarlierRealBinary covers the "shim shadowed by mise/homebrew"
 // detection: a real `npm` earlier in PATH than our shim dir must be
-// flagged. A `bouncer`-pointing symlink earlier in PATH is NOT a
-// conflict (the user has bouncer installed in a non-default place).
+// flagged. A `veto`-pointing symlink earlier in PATH is NOT a
+// conflict (the user has veto installed in a non-default place).
 func TestEarlierRealBinary(t *testing.T) {
 	dir := t.TempDir()
 	mise := filepath.Join(dir, "mise-shims")
@@ -182,16 +182,16 @@ func TestDetectVersionManager(t *testing.T) {
 func TestPrintVersionManagerFooters_DedupesPerManager(t *testing.T) {
 	var buf bytes.Buffer
 	results := []checkResult{
-		{status: statusFail, label: "shim:npm", detail: "mise install at /x shadows the bouncer shim"},
-		{status: statusFail, label: "shim:pnpm", detail: "mise install at /y shadows the bouncer shim"},
-		{status: statusFail, label: "shim:yarn", detail: "mise install at /z shadows the bouncer shim"},
+		{status: statusFail, label: "shim:npm", detail: "mise install at /x shadows the veto shim"},
+		{status: statusFail, label: "shim:pnpm", detail: "mise install at /y shadows the veto shim"},
+		{status: statusFail, label: "shim:yarn", detail: "mise install at /z shadows the veto shim"},
 	}
 	printVersionManagerFooters(&buf, results)
 	out := buf.String()
 	require.Equal(t, 1, strings.Count(out, "mise PATH-ordering recipe"),
 		"a multi-mise-shadow doctor run must print the footer exactly once")
 	require.Contains(t, out, "mise activate zsh")
-	require.Contains(t, out, "_bouncer_pin_path", "chpwd-hook workaround must be in the recipe")
+	require.Contains(t, out, "_veto_pin_path", "chpwd-hook workaround must be in the recipe")
 }
 
 // TestPrintVersionManagerFooters_OnlyOnFail: a PASS result that happens
@@ -211,7 +211,7 @@ func TestPrintVersionManagerFooters_OnlyOnFail(t *testing.T) {
 func TestPrintVersionManagerFooters_OnlyForRecognizedManagers(t *testing.T) {
 	var buf bytes.Buffer
 	results := []checkResult{
-		{status: statusFail, label: "shim:npm", detail: "rbenv install at /x shadows the bouncer shim"},
+		{status: statusFail, label: "shim:npm", detail: "rbenv install at /x shadows the veto shim"},
 	}
 	printVersionManagerFooters(&buf, results)
 	require.Empty(t, buf.String(), "no footer for unrecognised version managers — fall through to generic advice")

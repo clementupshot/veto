@@ -10,9 +10,9 @@ package jsspec
 import (
 	"strings"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/argv"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/argv"
 )
 
 // Parse turns a single command-line spec into an Install for the npm
@@ -30,7 +30,7 @@ import (
 //
 // LocalPath specs are unverifiable (no name in the intel store); the gate
 // passes them through by default. OpaqueRemote specs fetch code outside
-// the registry and are refused by default — set BOUNCER_ALLOW_OPAQUE=1 to
+// the registry and are refused by default — set VETO_ALLOW_OPAQUE=1 to
 // opt in. See gate.Policy.
 func Parse(spec string) packagemanager.Install {
 	if isLocalPathSpec(spec) {

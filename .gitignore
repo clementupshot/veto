@@ -1,4 +1,4 @@
-/bouncer
+/veto
 /dist/
 /coverage.out
 /coverage.html
@@ -15,5 +15,5 @@
 .envrc.local
 
 # Native interposer build artifacts (built via `make interposer`)
-libbouncer_interpose.dylib
-libbouncer_interpose.so
+libveto_interpose.dylib
+libveto_interpose.so

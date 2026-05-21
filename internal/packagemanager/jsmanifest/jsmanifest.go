@@ -21,10 +21,10 @@ import (
 	"os"
 	"strings"
 
-	bouncererrors "github.com/brynbellomy/go-utils/errors"
+	vetoerrors "github.com/brynbellomy/go-utils/errors"
 
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jsspec"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/jsspec"
 )
 
 // Expander reads package.json files and emits the Install records the gate
@@ -63,12 +63,12 @@ func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Inst
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, bouncererrors.With(err, "reading package.json").Set("path", ref.Path)
+		return nil, vetoerrors.With(err, "reading package.json").Set("path", ref.Path)
 	}
 
 	var pkg packageJSON
 	if err := json.Unmarshal(data, &pkg); err != nil {
-		return nil, bouncererrors.With(err, "parse package.json").Set("path", ref.Path)
+		return nil, vetoerrors.With(err, "parse package.json").Set("path", ref.Path)
 	}
 
 	// Pre-size for the realistic upper bound: one entry per name across all

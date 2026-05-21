@@ -7,7 +7,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel"
 )
 
 // fakeSource is a hand-written stub used only inside this test file. We use a

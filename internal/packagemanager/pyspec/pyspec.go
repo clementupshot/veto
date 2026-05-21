@@ -13,20 +13,20 @@
 //     every flagged version)
 //   - extras (single or comma list): "pkg[ext1,ext2]==1.0" → extras stripped
 //   - environment markers: "pkg==1.0; python_version >= '3.8'" → marker
-//     ignored, package emitted (over-include conditional deps; the bouncer
+//     ignored, package emitted (over-include conditional deps; the veto
 //     is a safety check, not a resolver)
 //
 // Local filesystem paths are flagged LocalPath=true; remote URLs and git
 // refs are flagged OpaqueRemote=true. The gate's policy decides whether
 // to pass each through (LocalPath default true) or refuse
-// (OpaqueRemote default false; set BOUNCER_ALLOW_OPAQUE=1 to opt in).
+// (OpaqueRemote default false; set VETO_ALLOW_OPAQUE=1 to opt in).
 package pyspec
 
 import (
 	"strings"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
 )
 
 // operators is the set of PEP 440 version comparison operators we recognize,
@@ -91,7 +91,7 @@ func isLocalPathSpec(spec string) bool {
 
 // isOpaqueRemoteSpec reports whether spec is a remote URL or git
 // reference. These pull code from outside PyPI and are refused by
-// default; BOUNCER_ALLOW_OPAQUE=1 opts each one through.
+// default; VETO_ALLOW_OPAQUE=1 opts each one through.
 func isOpaqueRemoteSpec(spec string) bool {
 	for _, p := range []string{"git+", "http://", "https://"} {
 		if strings.HasPrefix(spec, p) {

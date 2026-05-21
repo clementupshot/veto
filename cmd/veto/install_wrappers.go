@@ -10,19 +10,19 @@
 // Layer 4 closes the absolute-path hole without depending on env vars
 // at all: for each known PM at a known install dir, we
 //
-//   1. atomically move the real binary to `<bin>.bouncer-original`, and
-//   2. replace `<bin>` with a symlink to the bouncer binary.
+//   1. atomically move the real binary to `<bin>.veto-original`, and
+//   2. replace `<bin>` with a symlink to the veto binary.
 //
 // Any caller naming the original absolute path — bare-name, full-path,
 // `subprocess.run` with no env, `os.execvp` from inside an LSP — hits
-// bouncer. The gate runs, then execReal's resolver (in main.go) finds
-// the `.bouncer-original` sibling and exec's it.
+// veto. The gate runs, then execReal's resolver (in main.go) finds
+// the `.veto-original` sibling and exec's it.
 //
 // Tradeoffs documented for users:
 //
 //   - Brew / mise / asdf upgrades will overwrite our symlink. Re-run
-//     `bouncer install-wrappers` after upgrading toolchain versions.
-//     `bouncer doctor` flags unwrapped install dirs so a stale state
+//     `veto install-wrappers` after upgrading toolchain versions.
+//     `veto doctor` flags unwrapped install dirs so a stale state
 //     is visible, not silent.
 //   - SIP-protected binaries (`/usr/bin/pip3`) can't be wrapped — the
 //     dirs are read-only even to root. Layer 3 hits the same wall.
@@ -43,14 +43,14 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// wrapperSuffix is the rename target. `.bouncer-original` is verbose on
+// wrapperSuffix is the rename target. `.veto-original` is verbose on
 // purpose — a colleague who finds it during debugging needs to see
 // what made it instead of guessing.
-const wrapperSuffix = ".bouncer-original"
+const wrapperSuffix = ".veto-original"
 
-// stateFileName is the JSON registry of every wrapper bouncer has
+// stateFileName is the JSON registry of every wrapper veto has
 // installed. Kept alongside the intel cache so a single
-// BOUNCER_CACHE_DIR override moves both. uninstall-wrappers replays
+// VETO_CACHE_DIR override moves both. uninstall-wrappers replays
 // this list in reverse; install-wrappers adds to it idempotently.
 const stateFileName = "wrappers.json"
 
@@ -65,7 +65,7 @@ type wrapperState struct {
 // information to fully reverse the operation without re-discovering the
 // system.
 type wrapperEntry struct {
-	// Path is the absolute path where the bouncer symlink lives.
+	// Path is the absolute path where the veto symlink lives.
 	Path string `json:"path"`
 	// OriginalPath is Path + wrapperSuffix — the moved-aside real
 	// binary. Kept explicit so a future suffix rename doesn't strand
@@ -88,7 +88,7 @@ var wrappedManagers = []string{
 	"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm",
 }
 
-// runInstallWrappers implements `bouncer install-wrappers [--dry-run] [--force]`.
+// runInstallWrappers implements `veto install-wrappers [--dry-run] [--force]`.
 //
 // Default behavior: discover candidate dirs (homebrew, mise installs,
 // asdf installs, user-specified --dir flags), find every PM in our
@@ -102,13 +102,13 @@ var wrappedManagers = []string{
 func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 	opts, err := parseWrapperFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer install-wrappers: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto install-wrappers: %v\n", err)
 		return exitUsage
 	}
 
-	bouncerPath, err := resolveBouncerBinary()
+	vetoPath, err := resolveVetoBinary()
 	if err != nil {
-		logger.Error().Err(err).Msg("locate bouncer binary")
+		logger.Error().Err(err).Msg("locate veto binary")
 		return exitInternal
 	}
 
@@ -125,13 +125,13 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 	// from a prior install-wrappers run. Distinguish by consulting state.
 	if len(candidates) == 0 {
 		if existing := len(state.Wrappers); existing > 0 {
-			fmt.Printf("bouncer install-wrappers: %d wrapper%s already installed — nothing new to wrap.\n",
+			fmt.Printf("veto install-wrappers: %d wrapper%s already installed — nothing new to wrap.\n",
 				existing, pluralS(existing))
 			fmt.Println("Re-run after `brew upgrade` / `mise install` / `asdf install` to re-wrap binaries that toolchain")
-			fmt.Println("upgrades replaced. `bouncer doctor` will flag any wrapper that drifted.")
+			fmt.Println("upgrades replaced. `veto doctor` will flag any wrapper that drifted.")
 			return exitOK
 		}
-		fmt.Fprintln(os.Stderr, "bouncer install-wrappers: no candidate PM binaries found in known dirs.")
+		fmt.Fprintln(os.Stderr, "veto install-wrappers: no candidate PM binaries found in known dirs.")
 		fmt.Fprintln(os.Stderr, "Checked: /opt/homebrew/bin, /usr/local/bin, ~/.local/share/mise/installs/*/*/bin,")
 		fmt.Fprintln(os.Stderr, "         ~/.asdf/installs/*/*/bin, ~/.bun/bin.")
 		fmt.Fprintln(os.Stderr, "Pass --dir to add more discovery roots, or skip Layer 4 if no PMs are installed locally.")
@@ -140,7 +140,7 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 
 	stats := wrapperStats{}
 	for _, c := range candidates {
-		switch action, err := applyWrapper(c, bouncerPath, opts.dryRun, opts.force); {
+		switch action, err := applyWrapper(c, vetoPath, opts.dryRun, opts.force); {
 		case err != nil:
 			stats.failed++
 			fmt.Fprintf(os.Stderr, "  %-10s  FAIL  %s — %v\n", c.pm, c.path, err)
@@ -185,7 +185,7 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 func runUninstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 	opts, err := parseWrapperFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer uninstall-wrappers: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto uninstall-wrappers: %v\n", err)
 		return exitUsage
 	}
 
@@ -195,7 +195,7 @@ func runUninstallWrappers(logger zerolog.Logger, cfg config, args []string) int 
 		return exitInternal
 	}
 	if len(state.Wrappers) == 0 {
-		fmt.Println("bouncer uninstall-wrappers: no wrappers recorded; nothing to do.")
+		fmt.Println("veto uninstall-wrappers: no wrappers recorded; nothing to do.")
 		return exitOK
 	}
 
@@ -305,7 +305,7 @@ type wrapCandidate struct {
 // discoverWrapCandidates walks the well-known install-dir patterns
 // looking for files whose basename matches one of wrappedManagers. We
 // only return files that exist and are executable, and we only return
-// real files (not already bouncer symlinks).
+// real files (not already veto symlinks).
 func discoverWrapCandidates(opts wrapperFlags) ([]wrapCandidate, error) {
 	candidates := []wrapCandidate{}
 	pmFilter := func(name string) bool {
@@ -422,7 +422,7 @@ func globMiseBinDirs(root string) []string {
 // isWrappableTarget reports whether the path is something we should
 // wrap: it exists, is not a directory, is executable, and is not
 // already a symlink we own (any symlink whose target name contains
-// "bouncer" is treated as ours).
+// "veto" is treated as ours).
 func isWrappableTarget(p string) bool {
 	info, err := os.Lstat(p)
 	if err != nil {
@@ -432,14 +432,14 @@ func isWrappableTarget(p string) bool {
 		return false
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		// Existing symlink. If it points at bouncer, it's already ours
+		// Existing symlink. If it points at veto, it's already ours
 		// and we skip. Otherwise it's a real-binary alias (homebrew's
 		// canonical layout) and is wrappable.
 		target, err := os.Readlink(p)
 		if err != nil {
 			return false
 		}
-		if strings.Contains(target, "bouncer") {
+		if strings.Contains(target, "veto") {
 			return false
 		}
 		// Verify the symlink resolves to something we can exec.
@@ -460,31 +460,31 @@ func isWrappableTarget(p string) bool {
 // applyWrapper does the rename + symlink dance for one candidate.
 // Idempotent against already-installed wrappers (returns
 // wrapperActionSkipAlreadyOurs); refuses to clobber an existing
-// non-bouncer file unless --force was passed.
+// non-veto file unless --force was passed.
 //
 // Atomicity: we rename the original BEFORE creating the symlink. If
 // the symlink-create step fails we've still left the system in a
-// recoverable state: the user can move .bouncer-original back manually,
+// recoverable state: the user can move .veto-original back manually,
 // or re-run install-wrappers to retry.
-func applyWrapper(c wrapCandidate, bouncerPath string, dryRun, force bool) (wrapAction, error) {
+func applyWrapper(c wrapCandidate, vetoPath string, dryRun, force bool) (wrapAction, error) {
 	original := c.path + wrapperSuffix
 
-	// Already wrapped? `c.path` is a bouncer symlink AND
-	// `<c.path>.bouncer-original` exists. That's a no-op.
+	// Already wrapped? `c.path` is a veto symlink AND
+	// `<c.path>.veto-original` exists. That's a no-op.
 	if existing, err := os.Lstat(c.path); err == nil && existing.Mode()&os.ModeSymlink != 0 {
-		if target, err := os.Readlink(c.path); err == nil && strings.Contains(target, "bouncer") {
+		if target, err := os.Readlink(c.path); err == nil && strings.Contains(target, "veto") {
 			if _, err := os.Lstat(original); err == nil {
 				return wrapperActionSkipAlreadyOurs, nil
 			}
 		}
 	}
 
-	// Refuse to clobber if `.bouncer-original` already exists and we
+	// Refuse to clobber if `.veto-original` already exists and we
 	// didn't ask for --force. This protects against the partial-state
 	// case where a previous wrap moved the original but failed to
 	// install the symlink.
 	if _, err := os.Lstat(original); err == nil && !force {
-		return wrapperActionWrapped, errors.WithNew(".bouncer-original already exists; pass --force to overwrite").
+		return wrapperActionWrapped, errors.WithNew(".veto-original already exists; pass --force to overwrite").
 			Set("path", original)
 	}
 
@@ -497,28 +497,28 @@ func applyWrapper(c wrapCandidate, bouncerPath string, dryRun, force bool) (wrap
 		return wrapperActionWrapped, errors.With(err, "rename real binary aside").Set("from", c.path, "to", original)
 	}
 	// 2) Install the symlink at the original path.
-	if err := os.Symlink(bouncerPath, c.path); err != nil {
+	if err := os.Symlink(vetoPath, c.path); err != nil {
 		// Best-effort rollback so we don't strand the user with a
 		// PM that's invisible.
 		_ = os.Rename(original, c.path)
-		return wrapperActionWrapped, errors.With(err, "create bouncer symlink").Set("path", c.path)
+		return wrapperActionWrapped, errors.With(err, "create veto symlink").Set("path", c.path)
 	}
 	return wrapperActionWrapped, nil
 }
 
 // unwrap reverses one wrapper entry. Symmetric with applyWrapper: it
-// removes the bouncer symlink at Path, then renames the
-// `.bouncer-original` sibling back to Path. Errors short-circuit;
+// removes the veto symlink at Path, then renames the
+// `.veto-original` sibling back to Path. Errors short-circuit;
 // dry-run skips the actual filesystem operations.
 func unwrap(w wrapperEntry, dryRun bool) error {
 	if dryRun {
 		return nil
 	}
-	// Confirm Path is still a bouncer symlink before touching it.
+	// Confirm Path is still a veto symlink before touching it.
 	info, err := os.Lstat(w.Path)
 	if err != nil {
 		// Path is gone (maybe an upgrade reinstalled it). If the
-		// `.bouncer-original` is also gone we have nothing to do; if
+		// `.veto-original` is also gone we have nothing to do; if
 		// it exists we leave it for the user.
 		if os.IsNotExist(err) {
 			return nil
@@ -530,14 +530,14 @@ func unwrap(w wrapperEntry, dryRun bool) error {
 		if err != nil {
 			return errors.With(err, "readlink")
 		}
-		if !strings.Contains(target, "bouncer") {
+		if !strings.Contains(target, "veto") {
 			// Someone else (brew upgrade?) replaced our symlink. Don't
 			// clobber their work — bail out and let the user decide.
-			return errors.WithNew("path no longer points at bouncer; refusing to overwrite").
+			return errors.WithNew("path no longer points at veto; refusing to overwrite").
 				Set("path", w.Path, "current_target", target)
 		}
 		if err := os.Remove(w.Path); err != nil {
-			return errors.With(err, "remove bouncer symlink").Set("path", w.Path)
+			return errors.With(err, "remove veto symlink").Set("path", w.Path)
 		}
 	}
 	if _, err := os.Lstat(w.OriginalPath); err == nil {

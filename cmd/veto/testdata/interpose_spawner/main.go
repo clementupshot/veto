@@ -2,8 +2,8 @@
 //
 // It exec's the program named by os.Args[1] with the remaining args.
 // When run with DYLD_INSERT_LIBRARIES (or LD_PRELOAD on Linux) pointing at
-// the bouncer interposer dylib, the exec call should be intercepted and
-// rewritten to invoke BOUNCER_PATH with the original target as argv[1].
+// the veto interposer dylib, the exec call should be intercepted and
+// rewritten to invoke VETO_PATH with the original target as argv[1].
 //
 // Kept dependency-free so `go run` works without a module context.
 package main

@@ -1,4 +1,4 @@
-// bouncer_interpose: native execve/posix_spawn interposer.
+// veto_interpose: native execve/posix_spawn interposer.
 //
 // Closes the "direct child-process invocation" fail-OPEN that the Claude
 // hook and PATH shims can't cover. When the calling process has this
@@ -6,26 +6,26 @@
 // on Linux), every execve/posix_spawn that names a known package manager
 // — even by absolute path — is rewritten to invoke
 //
-//     <bouncer_path> <pm-name> <pm-args...>
+//     <veto_path> <pm-name> <pm-args...>
 //
 // before reaching the kernel.
 //
 // Decision rules mirror the Claude hook so the three defense layers stay
-// behaviorally consistent: bouncer/bypass prefix → no rewrite; non-PM
+// behaviorally consistent: veto/bypass prefix → no rewrite; non-PM
 // basename → no rewrite; PM basename with non-dangerous verb → no
-// rewrite. Anything else gets routed through bouncer for the actual
+// rewrite. Anything else gets routed through veto for the actual
 // malware lookup.
 //
 // Build:
-//   macOS:  clang -O2 -dynamiclib -fno-common ... -o libbouncer_interpose.dylib
-//   Linux:  gcc   -O2 -shared -fPIC ...        -o libbouncer_interpose.so
+//   macOS:  clang -O2 -dynamiclib -fno-common ... -o libveto_interpose.dylib
+//   Linux:  gcc   -O2 -shared -fPIC ...        -o libveto_interpose.so
 //
 // Wire-up:
-//   macOS:  export DYLD_INSERT_LIBRARIES=/path/to/libbouncer_interpose.dylib
-//   Linux:  export LD_PRELOAD=/path/to/libbouncer_interpose.so
-//   Both:   export BOUNCER_PATH=/abs/path/to/bouncer   (resolved at install-preload time)
+//   macOS:  export DYLD_INSERT_LIBRARIES=/path/to/libveto_interpose.dylib
+//   Linux:  export LD_PRELOAD=/path/to/libveto_interpose.so
+//   Both:   export VETO_PATH=/abs/path/to/veto   (resolved at install-preload time)
 //
-// Escape hatch: BOUNCER_BYPASS=1 in the env of the *child* — checked at
+// Escape hatch: VETO_BYPASS=1 in the env of the *child* — checked at
 // spawn time, so an agent can opt one process out without disabling the
 // whole interposer.
 //
@@ -38,7 +38,7 @@
 //   - statically-linked binaries that don't go through libc's exec
 //     wrappers.
 // These mirror the README's "command-layer scanner, not kernel-level
-// interposer" caveats — `bouncer install-preload` prints them.
+// interposer" caveats — `veto install-preload` prints them.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,11 +51,11 @@
   // Tell the macOS dyld interposer machinery to swap our function for the
   // real one in every loaded image's call sites. No DYLD_FORCE_FLAT_NAMESPACE
   // required with this section-based mechanism.
-  #define BOUNCER_INTERPOSE(_replacement, _replacee) \
+  #define VETO_INTERPOSE(_replacement, _replacee) \
     __attribute__((used)) static struct { \
       const void *replacement; \
       const void *replacee; \
-    } _bouncer_interpose_##_replacee \
+    } _veto_interpose_##_replacee \
       __attribute__((section("__DATA,__interpose"))) = { \
         (const void *)(unsigned long)&_replacement, \
         (const void *)(unsigned long)&_replacee \
@@ -122,20 +122,20 @@ static const char *basename_of(const char *path) {
 // risky invocation, otherwise NULL. The returned pointer is owned by argv
 // or by static storage — callers must not free it.
 static const char *is_risky(const char *path, char *const argv[]) {
-  // BOUNCER_BYPASS env var honored at child-spawn time. We can only see
-  // the parent's env here, but a Claude-Code-like `BOUNCER_BYPASS=1 npm
+  // VETO_BYPASS env var honored at child-spawn time. We can only see
+  // the parent's env here, but a Claude-Code-like `VETO_BYPASS=1 npm
   // install foo` is implemented as a child-env var the parent sets — for
   // libc execve, that goes through the env argument we don't have on
   // this function signature, so we fall through to the rewrite logic and
-  // let bouncer itself notice the bypass via its env at startup.
-  if (getenv("BOUNCER_BYPASS")) return NULL;
+  // let veto itself notice the bypass via its env at startup.
+  if (getenv("VETO_BYPASS")) return NULL;
 
   if (!path || !argv || !argv[0]) return NULL;
   const char *bn = basename_of(path);
   if (!bn || !*bn) return NULL;
 
-  // Already through bouncer? Don't recurse.
-  if (!strcmp(bn, "bouncer")) return NULL;
+  // Already through veto? Don't recurse.
+  if (!strcmp(bn, "veto")) return NULL;
 
   if (!in_list(bn, PM_NAMES)) return NULL;
 
@@ -161,16 +161,16 @@ static const char *is_risky(const char *path, char *const argv[]) {
 }
 
 // rewrite_argv returns a newly-allocated argv array of the form
-//    [bouncer_path, pm_name, original_args...]
+//    [veto_path, pm_name, original_args...]
 // The caller is responsible for freeing the outer array; the inner string
-// pointers are aliases of the originals or of bouncer_path / pm_name.
-static char **rewrite_argv(const char *bouncer_path, const char *pm_name, char *const argv[]) {
+// pointers are aliases of the originals or of veto_path / pm_name.
+static char **rewrite_argv(const char *veto_path, const char *pm_name, char *const argv[]) {
   int n = 0;
   while (argv[n]) n++;
-  // +2 slots for bouncer_path and pm_name, +1 for NULL terminator.
+  // +2 slots for veto_path and pm_name, +1 for NULL terminator.
   char **out = (char **)calloc(n + 3, sizeof(char *));
   if (!out) return NULL;
-  out[0] = (char *)bouncer_path;
+  out[0] = (char *)veto_path;
   out[1] = (char *)pm_name;
   // Skip the original argv[0] — it was the PM. Copy argv[1..] across.
   for (int i = 1; i < n; i++) {
@@ -181,11 +181,11 @@ static char **rewrite_argv(const char *bouncer_path, const char *pm_name, char *
 }
 
 // log_route prints a one-line marker so colleagues debugging "why did
-// my command turn into `bouncer foo`?" have a trail. Off unless
-// BOUNCER_INTERPOSE_LOG=1; the hot path stays silent in production.
+// my command turn into `veto foo`?" have a trail. Off unless
+// VETO_INTERPOSE_LOG=1; the hot path stays silent in production.
 static void log_route(const char *pm, const char *path) {
-  if (!getenv("BOUNCER_INTERPOSE_LOG")) return;
-  fprintf(stderr, "bouncer-interpose: routed %s (path=%s) through bouncer\n", pm, path);
+  if (!getenv("VETO_INTERPOSE_LOG")) return;
+  fprintf(stderr, "veto-interpose: routed %s (path=%s) through veto\n", pm, path);
 }
 
 #ifdef __APPLE__
@@ -199,10 +199,10 @@ extern int posix_spawn(pid_t *, const char *, const posix_spawn_file_actions_t *
 extern int posix_spawnp(pid_t *, const char *, const posix_spawn_file_actions_t *,
                         const posix_spawnattr_t *, char *const[], char *const[]);
 
-static int bouncer_execve(const char *path, char *const argv[], char *const envp[]) {
+static int veto_execve(const char *path, char *const argv[], char *const envp[]) {
   const char *pm = is_risky(path, argv);
   if (!pm) return execve(path, argv, envp);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return execve(path, argv, envp); // not installed — fail open at this layer (Claude hook / shims should catch)
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return execve(path, argv, envp);
@@ -212,10 +212,10 @@ static int bouncer_execve(const char *path, char *const argv[], char *const envp
   return rc;
 }
 
-static int bouncer_execvp(const char *file, char *const argv[]) {
+static int veto_execvp(const char *file, char *const argv[]) {
   const char *pm = is_risky(file, argv);
   if (!pm) return execvp(file, argv);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return execvp(file, argv);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return execvp(file, argv);
@@ -225,10 +225,10 @@ static int bouncer_execvp(const char *file, char *const argv[]) {
   return rc;
 }
 
-static int bouncer_execv(const char *path, char *const argv[]) {
+static int veto_execv(const char *path, char *const argv[]) {
   const char *pm = is_risky(path, argv);
   if (!pm) return execv(path, argv);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return execv(path, argv);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return execv(path, argv);
@@ -238,13 +238,13 @@ static int bouncer_execv(const char *path, char *const argv[]) {
   return rc;
 }
 
-static int bouncer_posix_spawn(pid_t *pid, const char *path,
+static int veto_posix_spawn(pid_t *pid, const char *path,
                                const posix_spawn_file_actions_t *fa,
                                const posix_spawnattr_t *attr,
                                char *const argv[], char *const envp[]) {
   const char *pm = is_risky(path, argv);
   if (!pm) return posix_spawn(pid, path, fa, attr, argv, envp);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return posix_spawn(pid, path, fa, attr, argv, envp);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return posix_spawn(pid, path, fa, attr, argv, envp);
@@ -254,29 +254,29 @@ static int bouncer_posix_spawn(pid_t *pid, const char *path,
   return rc;
 }
 
-static int bouncer_posix_spawnp(pid_t *pid, const char *file,
+static int veto_posix_spawnp(pid_t *pid, const char *file,
                                 const posix_spawn_file_actions_t *fa,
                                 const posix_spawnattr_t *attr,
                                 char *const argv[], char *const envp[]) {
   const char *pm = is_risky(file, argv);
   if (!pm) return posix_spawnp(pid, file, fa, attr, argv, envp);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return posix_spawnp(pid, file, fa, attr, argv, envp);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return posix_spawnp(pid, file, fa, attr, argv, envp);
   log_route(pm, file);
-  // Re-route to absolute bouncer path via posix_spawn (not posix_spawnp)
+  // Re-route to absolute veto path via posix_spawn (not posix_spawnp)
   // so we don't pay a PATH lookup we already resolved.
   int rc = posix_spawn(pid, bp, fa, attr, new_argv, envp);
   free(new_argv);
   return rc;
 }
 
-BOUNCER_INTERPOSE(bouncer_execve,        execve);
-BOUNCER_INTERPOSE(bouncer_execvp,        execvp);
-BOUNCER_INTERPOSE(bouncer_execv,         execv);
-BOUNCER_INTERPOSE(bouncer_posix_spawn,   posix_spawn);
-BOUNCER_INTERPOSE(bouncer_posix_spawnp,  posix_spawnp);
+VETO_INTERPOSE(veto_execve,        execve);
+VETO_INTERPOSE(veto_execvp,        execvp);
+VETO_INTERPOSE(veto_execv,         execv);
+VETO_INTERPOSE(veto_posix_spawn,   posix_spawn);
+VETO_INTERPOSE(veto_posix_spawnp,  posix_spawnp);
 
 #else // Linux / glibc: LD_PRELOAD symbol-shadowing pattern.
 
@@ -297,7 +297,7 @@ static execv_fn       real_execv;
 static posix_spawn_fn real_posix_spawn;
 static posix_spawn_fn real_posix_spawnp;
 
-static void __attribute__((constructor)) bouncer_init(void) {
+static void __attribute__((constructor)) veto_init(void) {
   real_execve       = (execve_fn)      dlsym(RTLD_NEXT, "execve");
   real_execvp       = (execvp_fn)      dlsym(RTLD_NEXT, "execvp");
   real_execv        = (execv_fn)       dlsym(RTLD_NEXT, "execv");
@@ -308,7 +308,7 @@ static void __attribute__((constructor)) bouncer_init(void) {
 int execve(const char *path, char *const argv[], char *const envp[]) {
   const char *pm = is_risky(path, argv);
   if (!pm) return real_execve(path, argv, envp);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return real_execve(path, argv, envp);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return real_execve(path, argv, envp);
@@ -321,7 +321,7 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
 int execvp(const char *file, char *const argv[]) {
   const char *pm = is_risky(file, argv);
   if (!pm) return real_execvp(file, argv);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return real_execvp(file, argv);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return real_execvp(file, argv);
@@ -334,7 +334,7 @@ int execvp(const char *file, char *const argv[]) {
 int execv(const char *path, char *const argv[]) {
   const char *pm = is_risky(path, argv);
   if (!pm) return real_execv(path, argv);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return real_execv(path, argv);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return real_execv(path, argv);
@@ -350,7 +350,7 @@ int posix_spawn(pid_t *pid, const char *path,
                 char *const argv[], char *const envp[]) {
   const char *pm = is_risky(path, argv);
   if (!pm) return real_posix_spawn(pid, path, fa, attr, argv, envp);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return real_posix_spawn(pid, path, fa, attr, argv, envp);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return real_posix_spawn(pid, path, fa, attr, argv, envp);
@@ -366,7 +366,7 @@ int posix_spawnp(pid_t *pid, const char *file,
                  char *const argv[], char *const envp[]) {
   const char *pm = is_risky(file, argv);
   if (!pm) return real_posix_spawnp(pid, file, fa, attr, argv, envp);
-  const char *bp = getenv("BOUNCER_PATH");
+  const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return real_posix_spawnp(pid, file, fa, attr, argv, envp);
   char **new_argv = rewrite_argv(bp, pm, argv);
   if (!new_argv) return real_posix_spawnp(pid, file, fa, attr, argv, envp);

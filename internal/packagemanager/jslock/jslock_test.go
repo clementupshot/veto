@@ -7,9 +7,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jslock"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
 )
 
 // TestExpandPackageLockV3 covers the modern (lockfileVersion 3) schema —

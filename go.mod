@@ -1,4 +1,4 @@
-module github.com/brynbellomy/package-bouncer
+module github.com/brynbellomy/veto
 
 go 1.26.2
 

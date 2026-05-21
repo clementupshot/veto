@@ -4,16 +4,16 @@
 // doesn't expose a per-tool hook protocol (Codex CLI, Sirene, generic CI
 // runners, ad-hoc terminals). The mechanism:
 //
-//   1. `bouncer install-shims [--dir DIR]` creates a symlink for each
+//   1. `veto install-shims [--dir DIR]` creates a symlink for each
 //      supported package manager binary inside DIR (default ~/.local/bin):
-//          DIR/npm   → /absolute/path/to/bouncer
-//          DIR/pnpm  → /absolute/path/to/bouncer
+//          DIR/npm   → /absolute/path/to/veto
+//          DIR/pnpm  → /absolute/path/to/veto
 //          ...
 //   2. When the user runs `npm install foo`, the shell resolves `npm` to
-//      DIR/npm, which is the bouncer binary. bouncer's main() detects the
+//      DIR/npm, which is the veto binary. veto's main() detects the
 //      shim invocation via `filepath.Base(os.Args[0]) == "npm"` and
 //      prepends "npm" to args, so the rest of the code sees the same
-//      shape as `bouncer npm install foo`.
+//      shape as `veto npm install foo`.
 //
 // For this to work, DIR must come BEFORE the directories holding the real
 // npm/pnpm/... binaries in $PATH. install-shims prints a warning if the
@@ -40,13 +40,13 @@ var shimmedManagers = []string{
 	"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm",
 }
 
-// runInstallShims implements `bouncer install-shims [--dir DIR] [--force]`.
+// runInstallShims implements `veto install-shims [--dir DIR] [--force]`.
 //
 // Idempotency:
-//   - If DIR/<pm> doesn't exist: create a symlink to the bouncer binary.
-//   - If DIR/<pm> is already a symlink pointing at the same bouncer binary:
+//   - If DIR/<pm> doesn't exist: create a symlink to the veto binary.
+//   - If DIR/<pm> is already a symlink pointing at the same veto binary:
 //     leave it (silent no-op).
-//   - If DIR/<pm> is a symlink to a DIFFERENT path (an older bouncer, a
+//   - If DIR/<pm> is a symlink to a DIFFERENT path (an older veto, a
 //     mise shim, anything): update only if --force is set. Otherwise refuse
 //     so users don't accidentally shadow tooling they meant to keep.
 //   - If DIR/<pm> is a regular file (e.g. a real npm binary): refuse unless
@@ -55,13 +55,13 @@ var shimmedManagers = []string{
 func runInstallShims(logger zerolog.Logger, args []string) int {
 	dir, force, err := parseShimFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto: %v\n", err)
 		return exitUsage
 	}
 
-	bouncerPath, err := resolveBouncerBinary()
+	vetoPath, err := resolveVetoBinary()
 	if err != nil {
-		logger.Error().Err(err).Msg("locate bouncer binary")
+		logger.Error().Err(err).Msg("locate veto binary")
 		return exitInternal
 	}
 
@@ -73,7 +73,7 @@ func runInstallShims(logger zerolog.Logger, args []string) int {
 	var hadFailure, hadAction bool
 	for _, name := range shimmedManagers {
 		target := filepath.Join(dir, name)
-		action, err := ensureShim(target, bouncerPath, force)
+		action, err := ensureShim(target, vetoPath, force)
 		switch {
 		case err != nil:
 			hadFailure = true
@@ -91,47 +91,47 @@ func runInstallShims(logger zerolog.Logger, args []string) int {
 		printPathOrderingHint(os.Stdout, dir)
 	}
 	if hadFailure {
-		fmt.Fprintln(os.Stderr, "\nbouncer: one or more shims failed; re-run with --force to overwrite existing files, or move them out of the way first.")
+		fmt.Fprintln(os.Stderr, "\nveto: one or more shims failed; re-run with --force to overwrite existing files, or move them out of the way first.")
 		return exitInternal
 	}
 	return exitOK
 }
 
-// runUninstallShims removes bouncer-managed symlinks from DIR. It leaves
-// untouched anything that isn't a symlink pointing at the bouncer binary
+// runUninstallShims removes veto-managed symlinks from DIR. It leaves
+// untouched anything that isn't a symlink pointing at the veto binary
 // — symmetric with install-shims's refusal to clobber.
 func runUninstallShims(logger zerolog.Logger, args []string) int {
 	dir, _, err := parseShimFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto: %v\n", err)
 		return exitUsage
 	}
-	bouncerPath, err := resolveBouncerBinary()
+	vetoPath, err := resolveVetoBinary()
 	if err != nil {
-		logger.Error().Err(err).Msg("locate bouncer binary")
+		logger.Error().Err(err).Msg("locate veto binary")
 		return exitInternal
 	}
 
 	for _, name := range shimmedManagers {
 		target := filepath.Join(dir, name)
-		removed, err := removeShim(target, bouncerPath)
+		removed, err := removeShim(target, vetoPath)
 		switch {
 		case err != nil:
 			fmt.Fprintf(os.Stderr, "  %-8s  FAILED  %v\n", name, err)
 		case removed:
 			fmt.Fprintf(os.Stdout, "  %-8s  ok      removed\n", name)
 		default:
-			fmt.Fprintf(os.Stdout, "  %-8s  skip    not a bouncer shim\n", name)
+			fmt.Fprintf(os.Stdout, "  %-8s  skip    not a veto shim\n", name)
 		}
 	}
 	return exitOK
 }
 
-// ensureShim creates or updates a symlink at target pointing to bouncerPath.
+// ensureShim creates or updates a symlink at target pointing to vetoPath.
 // Returns a short human-readable description of what happened (e.g. "created",
 // "updated"), or "" if no change was needed. Returns an error when target
-// exists, is not a bouncer shim, and force is false.
-func ensureShim(target, bouncerPath string, force bool) (string, error) {
+// exists, is not a veto shim, and force is false.
+func ensureShim(target, vetoPath string, force bool) (string, error) {
 	info, err := os.Lstat(target)
 	if err != nil && !os.IsNotExist(err) {
 		return "", errors.With(err, "lstat").Set("path", target)
@@ -145,7 +145,7 @@ func ensureShim(target, bouncerPath string, force bool) (string, error) {
 			if lerr != nil {
 				return "", errors.With(lerr, "readlink").Set("path", target)
 			}
-			if existing == bouncerPath {
+			if existing == vetoPath {
 				return "", nil // already correct
 			}
 			if !force {
@@ -164,18 +164,18 @@ func ensureShim(target, bouncerPath string, force bool) (string, error) {
 		}
 	}
 
-	if err := os.Symlink(bouncerPath, target); err != nil {
+	if err := os.Symlink(vetoPath, target); err != nil {
 		return "", errors.With(err, "create symlink").Set("path", target)
 	}
 	if info != nil {
-		return "updated -> " + bouncerPath, nil
+		return "updated -> " + vetoPath, nil
 	}
-	return "created -> " + bouncerPath, nil
+	return "created -> " + vetoPath, nil
 }
 
-// removeShim deletes target if it's a symlink to bouncerPath. Returns
+// removeShim deletes target if it's a symlink to vetoPath. Returns
 // (true, nil) on removal, (false, nil) if target doesn't exist or isn't ours.
-func removeShim(target, bouncerPath string) (bool, error) {
+func removeShim(target, vetoPath string) (bool, error) {
 	info, err := os.Lstat(target)
 	if os.IsNotExist(err) {
 		return false, nil
@@ -190,7 +190,7 @@ func removeShim(target, bouncerPath string) (bool, error) {
 	if err != nil {
 		return false, errors.With(err, "readlink").Set("path", target)
 	}
-	if existing != bouncerPath {
+	if existing != vetoPath {
 		return false, nil
 	}
 	if err := os.Remove(target); err != nil {
@@ -199,10 +199,10 @@ func removeShim(target, bouncerPath string) (bool, error) {
 	return true, nil
 }
 
-// resolveBouncerBinary returns the canonical absolute path to the running
-// bouncer binary. We follow any symlinks so the shim targets the real file,
+// resolveVetoBinary returns the canonical absolute path to the running
+// veto binary. We follow any symlinks so the shim targets the real file,
 // not the symlink that launched us.
-func resolveBouncerBinary() (string, error) {
+func resolveVetoBinary() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", errors.With(err, "os.Executable")
@@ -256,7 +256,7 @@ func parseShimFlags(args []string) (string, bool, error) {
 func defaultShimDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "bouncer-bin")
+		return filepath.Join(os.TempDir(), "veto-bin")
 	}
 	return filepath.Join(home, ".local", "bin")
 }

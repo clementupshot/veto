@@ -1,16 +1,16 @@
 .PHONY: build test vet tidy clean install install-preload codegen-deps generate-mocks interposer
 
-BIN := bouncer
-PKG := ./cmd/bouncer
+BIN := veto
+PKG := ./cmd/veto
 
-INTERPOSER_SRC := internal/interposer/bouncer_interpose.c
+INTERPOSER_SRC := internal/interposer/veto_interpose.c
 
 # Per-OS shared library output. The .dylib/.so name is referenced from
 # install-preload.go — keep both sides in sync.
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S),Darwin)
-	INTERPOSER_OUT := libbouncer_interpose.dylib
+	INTERPOSER_OUT := libveto_interpose.dylib
 	# On Apple Silicon, system shells like /bin/sh and /bin/bash are
 	# built for arm64e (Apple's pointer-auth ABI variant). When the
 	# spawner exec's such a shell, dyld in the child process tries to
@@ -22,7 +22,7 @@ ifeq ($(UNAME_S),Darwin)
 		INTERPOSER_CFLAGS := -O2 -Wall -Wextra -fno-common -dynamiclib
 	endif
 else
-	INTERPOSER_OUT := libbouncer_interpose.so
+	INTERPOSER_OUT := libveto_interpose.so
 	INTERPOSER_CFLAGS := -O2 -Wall -Wextra -fPIC -shared
 endif
 
@@ -46,8 +46,8 @@ install: build
 
 # `make interposer` builds the native shared library that intercepts
 # execve/posix_spawn for direct-child-process coverage. See
-# internal/interposer/bouncer_interpose.c for the design rationale and
-# `bouncer install-preload` for installation.
+# internal/interposer/veto_interpose.c for the design rationale and
+# `veto install-preload` for installation.
 interposer: $(INTERPOSER_OUT)
 
 $(INTERPOSER_OUT): $(INTERPOSER_SRC)

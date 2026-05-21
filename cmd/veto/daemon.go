@@ -13,9 +13,9 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/brynbellomy/package-bouncer/internal/daemon"
-	"github.com/brynbellomy/package-bouncer/internal/gate"
-	"github.com/brynbellomy/package-bouncer/internal/intel"
+	"github.com/brynbellomy/veto/internal/daemon"
+	"github.com/brynbellomy/veto/internal/gate"
+	"github.com/brynbellomy/veto/internal/intel"
 )
 
 // daemonRefreshInterval is how often the daemon refreshes the intel store
@@ -24,10 +24,10 @@ import (
 // without hammering upstream.
 const daemonRefreshInterval = 30 * time.Minute
 
-// runDaemon implements the `bouncer daemon` subcommand. It is the
+// runDaemon implements the `veto daemon` subcommand. It is the
 // out-of-sandbox process loaded by launchd that owns the intel store and
 // performs the actual exec of real package managers on behalf of
-// sandbox-confined bouncer-client invocations.
+// sandbox-confined veto-client invocations.
 func runDaemon(logger zerolog.Logger, cfg config, args []string) int {
 	socketPath, err := daemon.SocketPath()
 	if err != nil {
@@ -157,11 +157,11 @@ func handleDaemonConn(logger zerolog.Logger, store intel.Store, conn *net.UnixCo
 
 	logger.Info().Str("pm", req.PM).Strs("args", req.Args).Str("cwd", req.Cwd).Msg("request")
 
-	// BOUNCER_BYPASS=1 in the request env is the documented per-call
+	// VETO_BYPASS=1 in the request env is the documented per-call
 	// escape hatch. Honored loudly: logged at INFO so it shows up in
 	// the daemon's launchd log alongside the install it skipped.
-	if envHas(req.Env, "BOUNCER_BYPASS", "1") {
-		logger.Info().Str("pm", req.PM).Msg("BOUNCER_BYPASS=1 — skipping gate")
+	if envHas(req.Env, "VETO_BYPASS", "1") {
+		logger.Info().Str("pm", req.PM).Msg("VETO_BYPASS=1 — skipping gate")
 		execPMAndReply(logger, conn, req, fds)
 		return
 	}
@@ -236,8 +236,8 @@ func execPMAndReply(logger zerolog.Logger, conn *net.UnixConn, req daemon.Reques
 
 // spawnAndWait forks a child process running the real PM with the
 // client's stdio fds dup'd onto 0/1/2, in the client's cwd, with the
-// client's env (minus BOUNCER_* control vars that would confuse the PM
-// or trigger surprise re-invocations of bouncer). Returns the child's
+// client's env (minus VETO_* control vars that would confuse the PM
+// or trigger surprise re-invocations of veto). Returns the child's
 // exit code, or -1 + error on spawn failure.
 func spawnAndWait(realPath string, req daemon.Request, fds [daemon.FDCount]int) (int, error) {
 	// Wrap the raw int fds in *os.File so os.StartProcess can dup2 them
@@ -284,8 +284,8 @@ func spawnAndWait(realPath string, req daemon.Request, fds [daemon.FDCount]int) 
 	return state.ExitCode(), nil
 }
 
-// sanitizeEnv removes BOUNCER_* control vars and PATH manipulations that
-// would let the spawned PM accidentally re-invoke bouncer (the SHIP-1
+// sanitizeEnv removes VETO_* control vars and PATH manipulations that
+// would let the spawned PM accidentally re-invoke veto (the SHIP-1
 // recursion the audit caught). The client's PATH is replaced with the
 // daemon's PATH, which is what the daemon used to resolve `realPath`
 // anyway — keeping them consistent avoids surprises in the PM's own
@@ -295,9 +295,9 @@ func sanitizeEnv(env []string) []string {
 	for _, kv := range env {
 		name, _, _ := strings.Cut(kv, "=")
 		switch {
-		case strings.HasPrefix(name, "BOUNCER_"):
-			// Drop all BOUNCER_* — the PM has no business seeing them,
-			// and BOUNCER_BYPASS in particular has already been honored
+		case strings.HasPrefix(name, "VETO_"):
+			// Drop all VETO_* — the PM has no business seeing them,
+			// and VETO_BYPASS in particular has already been honored
 			// by the daemon before this point.
 			continue
 		case name == "PATH":

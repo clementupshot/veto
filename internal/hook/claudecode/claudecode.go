@@ -3,7 +3,7 @@
 // It detects package-manager install commands inside a Bash tool call —
 // including invocations wrapped in `timeout`, `xargs`, `env`, `sudo`,
 // `bash -c "..."`, and chained with shell separators — and decides whether
-// to deny the tool call and ask the agent to re-issue with a `bouncer`
+// to deny the tool call and ask the agent to re-issue with a `veto`
 // prefix.
 //
 // Why a Go port: the Python original is wired via a shebang. If `python3`
@@ -14,7 +14,7 @@
 //
 // The analyzer is structured as pure functions so it can be tested without
 // hitting stdin/stdout. The transport layer (JSON in, JSON out) lives in
-// the cmd/bouncer subcommand.
+// the cmd/veto subcommand.
 package claudecode
 
 import (
@@ -31,7 +31,7 @@ type Finding struct {
 }
 
 // shimmedPMs is the set of package-manager binary names the hook intercepts.
-// Kept in sync with cmd/bouncer/shims.go::shimmedManagers.
+// Kept in sync with cmd/veto/shims.go::shimmedManagers.
 var shimmedPMs = map[string]struct{}{
 	"npm": {}, "npx": {}, "yarn": {}, "pnpm": {}, "pnpx": {},
 	"rush": {}, "rushx": {}, "bun": {}, "bunx": {},
@@ -96,7 +96,7 @@ func Analyze(cmd string) (Finding, bool) {
 		// Unparseable — defer to the shell, same as the Python version.
 		return Finding{}, false
 	}
-	if top[0] == "BOUNCER_BYPASS=1" {
+	if top[0] == "VETO_BYPASS=1" {
 		return Finding{}, false
 	}
 
@@ -445,7 +445,7 @@ func stripWrappers(tokens []string) []string {
 // isRisky returns the PM name if tokens describe a risky invocation,
 // otherwise ("", false). The decision rules match the Python original:
 //
-//   - already prefixed with `bouncer` → not risky (already guarded)
+//   - already prefixed with `veto` → not risky (already guarded)
 //   - exec-style PM (npx/bunx/...) with any non-help argv → risky
 //   - regular PM whose first non-flag argv is a dangerous verb → risky
 func isRisky(tokens []string) (string, bool) {
@@ -453,7 +453,7 @@ func isRisky(tokens []string) (string, bool) {
 		return "", false
 	}
 	b := base(tokens[0])
-	if b == "bouncer" {
+	if b == "veto" {
 		return "", false
 	}
 	if _, ok := shimmedPMs[b]; !ok {

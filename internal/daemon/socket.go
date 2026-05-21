@@ -11,14 +11,14 @@ import (
 // Useful for running multiple daemons during development, or for placing
 // the socket in a sandbox-readable path when the default location isn't
 // reachable from inside the agent sandbox.
-const SocketEnvVar = "BOUNCER_DAEMON_SOCKET"
+const SocketEnvVar = "VETO_DAEMON_SOCKET"
 
 // SocketPath returns the absolute path of the daemon's Unix socket.
 //
 // Resolution order:
-//  1. $BOUNCER_DAEMON_SOCKET if set (testing / custom layouts).
-//  2. $XDG_RUNTIME_DIR/bouncer/bouncer.sock if set (Linux convention).
-//  3. ~/.local/state/bouncer/bouncer.sock (macOS — XDG_STATE_HOME).
+//  1. $VETO_DAEMON_SOCKET if set (testing / custom layouts).
+//  2. $XDG_RUNTIME_DIR/veto/veto.sock if set (Linux convention).
+//  3. ~/.local/state/veto/veto.sock (macOS — XDG_STATE_HOME).
 //
 // macOS imposes a 104-char limit on Unix socket paths in struct sockaddr_un;
 // $HOME on macOS is typically short enough that ~/.local/state/... fits with
@@ -31,13 +31,13 @@ func SocketPath() (string, error) {
 		return p, nil
 	}
 	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
-		return filepath.Join(x, "bouncer", "bouncer.sock"), nil
+		return filepath.Join(x, "veto", "veto.sock"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", errors.With(err, "resolve home dir")
 	}
-	return filepath.Join(home, ".local", "state", "bouncer", "bouncer.sock"), nil
+	return filepath.Join(home, ".local", "state", "veto", "veto.sock"), nil
 }
 
 // EnsureSocketDir creates the parent directory of the socket with

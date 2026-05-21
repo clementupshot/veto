@@ -1,6 +1,6 @@
 # Onboarding
 
-Bouncer protects you from upstream supply-chain attacks by intercepting
+Veto protects you from upstream supply-chain attacks by intercepting
 package-manager invocations and refusing any that name a flagged package.
 It is built for humans and agent shells alike: every layer below is
 designed to fail closed when the gate can't reach a confident decision.
@@ -8,7 +8,7 @@ designed to fail closed when the gate can't reach a confident decision.
 This doc walks a fresh install through the FOUR defense layers, what
 each layer covers, and how to verify the gate is actually in front of
 your installs. Skim the table, install all four (they compose), and
-read the verification checklist before relying on bouncer in any agent
+read the verification checklist before relying on veto in any agent
 session.
 
 ## What gets caught at each layer
@@ -54,7 +54,7 @@ real binaries at their absolute install paths.
 
 The last row is a documented limitation. macOS strips
 `DYLD_INSERT_LIBRARIES` from SIP-protected binaries; no user-space
-interposer can change that. Bouncer is a command-layer scanner, not a
+interposer can change that. Veto is a command-layer scanner, not a
 kernel-level interposer.
 
 ---
@@ -70,45 +70,45 @@ kernel-level interposer.
 ### One-shot install
 
 ```sh
-git clone https://github.com/brynbellomy/package-bouncer.git
-cd package-bouncer
-make install              # builds bouncer, installs to ~/.local/bin
-make interposer           # builds libbouncer_interpose.{dylib,so}
-bouncer sync              # first-time intel pull (~10s)
+git clone https://github.com/brynbellomy/veto.git
+cd veto
+make install              # builds veto, installs to ~/.local/bin
+make interposer           # builds libveto_interpose.{dylib,so}
+veto sync              # first-time intel pull (~10s)
 ```
 
-Confirm bouncer is on PATH:
+Confirm veto is on PATH:
 
 ```sh
-which bouncer             # → ~/.local/bin/bouncer (or wherever you installed)
-bouncer status            # lists configured sources
+which veto             # → ~/.local/bin/veto (or wherever you installed)
+veto status            # lists configured sources
 ```
 
-If `which bouncer` shows nothing, fix your PATH before continuing — every
+If `which veto` shows nothing, fix your PATH before continuing — every
 layer below assumes the binary is reachable.
 
 ---
 
 ## Layer 1 — Claude Code hook
 
-Wires `bouncer hook claude-code` into Claude Code's `PreToolUse` chain
+Wires `veto hook claude-code` into Claude Code's `PreToolUse` chain
 for the `Bash` tool. The hook denies any unguarded package-manager
-invocation and tells the agent the exact `bouncer …` corrected command
+invocation and tells the agent the exact `veto …` corrected command
 to re-issue.
 
 ### Install
 
 ```sh
-bouncer install-claude-hook            # edits ~/.claude/settings.json
+veto install-claude-hook            # edits ~/.claude/settings.json
 # or
-bouncer install-claude-hook --project  # edits ./.claude/settings.json
+veto install-claude-hook --project  # edits ./.claude/settings.json
 ```
 
 Idempotent. Re-running upgrades the command path if you reinstalled
-bouncer to a different location. To preview the change without writing:
+veto to a different location. To preview the change without writing:
 
 ```sh
-bouncer install-claude-hook --print
+veto install-claude-hook --print
 ```
 
 ### How it works
@@ -125,14 +125,14 @@ payload describing the command. The hook:
    `pip3`, `uv`, `poetry`, `pdm`, `pipx`, `npx`, `pnpx`, `bunx`, `uvx`,
    `rush`, `rushx`) with a dangerous verb (`install`, `add`, `update`,
    etc.), the hook denies the call and surfaces the corrected
-   `bouncer <pm> <args>` invocation in the deny reason.
-3. The agent re-issues the corrected command; bouncer's CLI does the
+   `veto <pm> <args>` invocation in the deny reason.
+3. The agent re-issues the corrected command; veto's CLI does the
    actual malware lookup and exits non-zero if anything matches.
 
 ### Fail-closed semantics
 
 - Hook script panics → emits a hard "INTERNAL ERROR" deny envelope.
-- Bouncer binary missing on PATH → deny with "DO NOT retry" message so
+- Veto binary missing on PATH → deny with "DO NOT retry" message so
   you notice the mis-install instead of believing the gate is running.
 - Malformed JSON input → defer to Claude Code (we can't tell what the
   tool is; gating it isn't safe either way).
@@ -140,7 +140,7 @@ payload describing the command. The hook:
 ### Uninstall
 
 ```sh
-bouncer uninstall-claude-hook
+veto uninstall-claude-hook
 ```
 
 Removes our entry from the `PreToolUse[Bash]` chain. Other hooks in the
@@ -151,19 +151,19 @@ same chain (rtk-rewrite, status lines, etc.) are preserved.
 ## Layer 2 — PATH shims
 
 The shim subsystem creates symlinks in `~/.local/bin` for every covered
-PM, each pointing at the bouncer binary. Bouncer detects shim
+PM, each pointing at the veto binary. Veto detects shim
 invocations by `os.Args[0]` basename and routes through the gate.
 
 ### Install
 
 ```sh
-bouncer install-shims                                # default: ~/.local/bin
-bouncer install-shims --dir /custom/dir              # alternate dir
-bouncer install-shims --force                        # overwrite non-bouncer files
+veto install-shims                                # default: ~/.local/bin
+veto install-shims --dir /custom/dir              # alternate dir
+veto install-shims --force                        # overwrite non-veto files
 ```
 
 `install-shims` refuses to overwrite anything that isn't already a
-bouncer-managed symlink unless `--force` is passed — replacing real
+veto-managed symlink unless `--force` is passed — replacing real
 binaries silently is exactly the kind of surprise a security tool must
 not cause.
 
@@ -186,7 +186,7 @@ Codex CLI does not expose a per-tool hook protocol (as of 0.130). For
 Codex coverage, run:
 
 ```sh
-bouncer install-codex
+veto install-codex
 ```
 
 This is `install-shims` plus a scan of `~/.codex/config.toml` —
@@ -199,16 +199,16 @@ is set, the user PATH is stripped and the shims won't be reached;
 
 Same shim approach. Sirene's workflow runtime inherits the parent's
 PATH and exec's steps as subprocesses, so the shims engage
-transparently. Run `bouncer install-shims` and ensure `~/.local/bin` is
+transparently. Run `veto install-shims` and ensure `~/.local/bin` is
 on PATH for the shell that launches Sirene.
 
 ### Uninstall
 
 ```sh
-bouncer uninstall-shims
+veto uninstall-shims
 ```
 
-Only removes symlinks that point at the bouncer binary — your real PMs
+Only removes symlinks that point at the veto binary — your real PMs
 and unrelated symlinks are left alone.
 
 ---
@@ -220,7 +220,7 @@ The interposer is a tiny C shared library that hooks `execve`,
 process has the library loaded (via `DYLD_INSERT_LIBRARIES` on macOS or
 `LD_PRELOAD` on Linux), the hook intercepts every package-manager
 invocation — including those by absolute path that bypass PATH lookup
-entirely — and rewrites argv to invoke bouncer instead.
+entirely — and rewrites argv to invoke veto instead.
 
 This closes the "direct child-process invocation" hole the README's
 threat model used to call out:
@@ -233,9 +233,9 @@ subprocess.run(["/opt/homebrew/bin/npm", "install", "evil"], shell=False)
 ### Build and install
 
 ```sh
-make interposer                   # produces libbouncer_interpose.{dylib,so}
-bouncer install-preload \         # copies the lib + writes the shell-rc block
-  --lib ./libbouncer_interpose.dylib \
+make interposer                   # produces libveto_interpose.{dylib,so}
+veto install-preload \         # copies the lib + writes the shell-rc block
+  --lib ./libveto_interpose.dylib \
   --shell-rc auto                 # or: --shell-rc ~/.zshrc, or --print
 ```
 
@@ -245,10 +245,10 @@ The managed block is bracketed with markers so subsequent installs
 upgrade in place:
 
 ```
-# >>> package-bouncer preload (managed) >>>
-export DYLD_INSERT_LIBRARIES="/Users/.../libbouncer_interpose.dylib"
-export BOUNCER_PATH="/Users/.../bouncer"
-# <<< package-bouncer preload (managed) <<<
+# >>> veto preload (managed) >>>
+export DYLD_INSERT_LIBRARIES="/Users/.../libveto_interpose.dylib"
+export VETO_PATH="/Users/.../veto"
+# <<< veto preload (managed) <<<
 ```
 
 Open a fresh shell (or `source ~/.zshrc`) for the env vars to take
@@ -259,7 +259,7 @@ effect.
 `DYLD_INSERT_LIBRARIES` is stripped by dyld for SIP-protected binaries
 (`/usr/bin/*`, `/usr/sbin/*`, `/System/...`). If an agent shells out to
 one of those binaries to fetch packages, the interposer won't load.
-This is a macOS-level constraint, not a bouncer bug — user-installed
+This is a macOS-level constraint, not a veto bug — user-installed
 binaries (homebrew, mise, asdf, nvm) are all covered.
 
 The interposer is built as a fat dylib (`arm64` + `arm64e`) so it loads
@@ -268,7 +268,7 @@ into both regular Go binaries and `arm64e` shells like `/bin/bash`.
 ### Uninstall
 
 ```sh
-bouncer uninstall-preload --shell-rc auto
+veto uninstall-preload --shell-rc auto
 ```
 
 Strips the managed block from the shell rc and removes the installed
@@ -280,7 +280,7 @@ library file.
 
 The strongest single layer. Layers 2–3 protect "things that go through
 the shell" and "things that load libc with our preload env." Layer 4
-protects the *bytes at the absolute path* — bouncer literally
+protects the *bytes at the absolute path* — veto literally
 substitutes itself for `/opt/homebrew/bin/npm`, the mise install dirs,
 and so on. No env-var dependency, no PATH-order dependency, no process
 cooperation needed.
@@ -288,22 +288,22 @@ cooperation needed.
 ### Install
 
 ```sh
-bouncer install-wrappers              # discover + wrap homebrew + mise + asdf + .bun
-bouncer install-wrappers --dry-run    # show what would change without writing
-bouncer install-wrappers --only npm   # restrict to one PM
-bouncer install-wrappers --dir /path  # add an extra discovery root
+veto install-wrappers              # discover + wrap homebrew + mise + asdf + .bun
+veto install-wrappers --dry-run    # show what would change without writing
+veto install-wrappers --only npm   # restrict to one PM
+veto install-wrappers --dir /path  # add an extra discovery root
 ```
 
 For each known install dir (`/opt/homebrew/bin`, `~/.local/share/mise/installs/*/*/bin`,
 `~/.asdf/installs/*/*/bin`, `~/.bun/bin`, plus any `--dir` you pass),
-bouncer:
+veto:
 
-1. atomically renames `<dir>/<pm>` to `<dir>/<pm>.bouncer-original`
-2. installs a symlink at `<dir>/<pm>` pointing at the bouncer binary
+1. atomically renames `<dir>/<pm>` to `<dir>/<pm>.veto-original`
+2. installs a symlink at `<dir>/<pm>` pointing at the veto binary
 
 When a caller execs `/opt/homebrew/bin/npm install foo`, the kernel
-runs the bouncer symlink. Bouncer's basename dispatch routes through
-the gate. If allowed, `findRealBinary` finds the `.bouncer-original`
+runs the veto symlink. Veto's basename dispatch routes through
+the gate. If allowed, `findRealBinary` finds the `.veto-original`
 sibling and exec's it.
 
 ### What this catches that Layer 3 doesn't
@@ -319,18 +319,18 @@ subprocess.run(
 
 The interposer (Layer 3) doesn't fire because the dylib isn't loaded
 into this child process. Layer 4 doesn't care — the file at
-`/opt/homebrew/bin/npm` *is* bouncer.
+`/opt/homebrew/bin/npm` *is* veto.
 
 ### Tradeoffs
 
 - **Brew/mise/asdf upgrades wipe the wrappers.** Every `brew upgrade
   node` and `mise install node@whatever` rewrites the file at the
-  wrapper site. Re-run `bouncer install-wrappers` after any
-  toolchain upgrade. `bouncer doctor` flags drift.
+  wrapper site. Re-run `veto install-wrappers` after any
+  toolchain upgrade. `veto doctor` flags drift.
 - **State is durable.** Wrapper installations are recorded in
-  `~/.cache/package-bouncer/wrappers.json`. `bouncer uninstall-wrappers`
+  `~/.cache/veto/wrappers.json`. `veto uninstall-wrappers`
   replays every entry in reverse: remove the symlink, rename
-  `.bouncer-original` back to `<pm>`.
+  `.veto-original` back to `<pm>`.
 - **SIP-protected dirs are unreachable.** Just like Layer 3,
   `/usr/bin/pip3` cannot be wrapped — the directory is read-only
   even to root.
@@ -338,26 +338,26 @@ into this child process. Layer 4 doesn't care — the file at
 ### Uninstall
 
 ```sh
-bouncer uninstall-wrappers
+veto uninstall-wrappers
 ```
 
 ---
 
 ## Verifying your install
 
-Before relying on bouncer in any agent session, run this checklist in a
+Before relying on veto in any agent session, run this checklist in a
 fresh terminal:
 
 ```sh
-# 1. Bouncer itself is on PATH.
-which bouncer
+# 1. Veto itself is on PATH.
+which veto
 
 # 2. Shims are in front of real PMs.
 which npm                                   # should resolve to ~/.local/bin/npm
 
 # 3. Intel store is healthy.
-bouncer status                              # lists three sources, no errors
-bouncer sync                                # forces a refresh
+veto status                              # lists three sources, no errors
+veto sync                                # forces a refresh
 
 # 4. The hook is wired in Claude Code.
 grep -q 'hook claude-code' ~/.claude/settings.json && echo "claude hook OK"
@@ -365,11 +365,11 @@ grep -q 'hook claude-code' ~/.claude/settings.json && echo "claude hook OK"
 # 5. The interposer is loaded.
 echo "$DYLD_INSERT_LIBRARIES"               # darwin
 echo "$LD_PRELOAD"                          # linux
-echo "$BOUNCER_PATH"                        # should be your bouncer absolute path
+echo "$VETO_PATH"                        # should be your veto absolute path
 
 # 6. End-to-end — should be refused by the gate.
-BOUNCER_LOG=debug bouncer npm install chai-as-upgraded
-#   bouncer: install refused — malware intelligence flagged the following:
+VETO_LOG=debug veto npm install chai-as-upgraded
+#   veto: install refused — malware intelligence flagged the following:
 #     - chai-as-upgraded@<any> (ecosystem: npm)
 #         [aikido] MALWARE
 ```
@@ -380,11 +380,11 @@ If any step fails, fix it before treating the gate as in effect.
 
 ## Troubleshooting
 
-### "command not found: bouncer" inside Claude Code
+### "command not found: veto" inside Claude Code
 
-The hook is wired with an absolute path to `bouncer`, but Claude Code's
+The hook is wired with an absolute path to `veto`, but Claude Code's
 re-invocation uses bare-name PATH lookup. Make sure `~/.local/bin` (or
-wherever you installed bouncer) is in the PATH that Claude Code
+wherever you installed veto) is in the PATH that Claude Code
 inherits. On macOS, Claude Code's shell environment can differ from
 your terminal's; check the agent shell with `echo $PATH`.
 
@@ -422,11 +422,11 @@ the failing input. The Python hook had a documented fail-OPEN when
 `python3` was missing at hook-invocation time; the Go port closes that
 hole.
 
-### Bouncer refuses to gate ("INTERNAL ERROR — intel store…")
+### Veto refuses to gate ("INTERNAL ERROR — intel store…")
 
 The fail-closed sanity check fired. Either every source returned an
 empty feed (probable upstream incident — try again later, or check
-`bouncer status`), or `BOUNCER_SOURCES` is pointed at non-existent
+`veto status`), or `VETO_SOURCES` is pointed at non-existent
 source IDs. Default is `aikido,openssf,osv`.
 
 ### "could not be loaded" when an unrelated process starts
@@ -441,11 +441,11 @@ for x86_64 children on Apple Silicon (Rosetta), you may need an
 
 ## Bypass mechanics
 
-In all three layers, prepend `BOUNCER_BYPASS=1 ` to the command to skip
+In all three layers, prepend `VETO_BYPASS=1 ` to the command to skip
 the gate for that single invocation:
 
 ```sh
-BOUNCER_BYPASS=1 npm install some-package-i-trust-personally
+VETO_BYPASS=1 npm install some-package-i-trust-personally
 ```
 
 Use sparingly. The bypass exists for cases where you've already
@@ -454,7 +454,7 @@ positive — not as a routine workaround.
 
 ---
 
-## What bouncer does NOT cover
+## What veto does NOT cover
 
 Documented limits, in addition to the threat-model section in
 [`README.md`](../README.md):
@@ -472,8 +472,8 @@ Documented limits, in addition to the threat-model section in
   through.
 - **Transitive dependencies of named packages.** The intel feeds index
   by package name; if you `pip install some-clean-package` and that
-  package's `setup.py` fetches a flagged transitive dep, bouncer won't
+  package's `setup.py` fetches a flagged transitive dep, veto won't
   see the second-level fetch.
 
-Bouncer is one layer of defense, not a substitute for code review of
+Veto is one layer of defense, not a substitute for code review of
 unpinned/unverified dependencies.

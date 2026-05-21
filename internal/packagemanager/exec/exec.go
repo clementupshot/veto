@@ -5,7 +5,7 @@
 // executes it, so the entire command is treated as an install — the first
 // non-flag token after the binary name (or the verb, for pipx) is the spec.
 //
-// A single parameterized Manager serves all five binaries; bouncer's main
+// A single parameterized Manager serves all five binaries; veto's main
 // constructs one instance per supported binary at startup, passing its
 // per-binary FlagsWithValues table so global flags-with-values (e.g.
 // `npx --package foo my-cmd`, `pipx --python python3.12 run bar`) don't
@@ -13,11 +13,11 @@
 package exec
 
 import (
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/argv"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jsspec"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pyspec"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/argv"
+	"github.com/brynbellomy/veto/internal/packagemanager/jsspec"
+	"github.com/brynbellomy/veto/internal/packagemanager/pyspec"
 )
 
 // NpxFlagsWithValues is the realistic set of npx flags whose next argv

@@ -14,11 +14,11 @@ import (
 	"io/fs"
 	"os"
 
-	bouncererrors "github.com/brynbellomy/go-utils/errors"
+	vetoerrors "github.com/brynbellomy/go-utils/errors"
 	"github.com/pelletier/go-toml/v2"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
 )
 
 // Expander handles uv/poetry/pdm lockfile kinds. Stateless; safe for
@@ -59,11 +59,11 @@ func expand(path string) ([]packagemanager.Install, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, bouncererrors.With(err, "read lockfile").Set("path", path)
+		return nil, vetoerrors.With(err, "read lockfile").Set("path", path)
 	}
 	var lf lockfile
 	if err := toml.Unmarshal(data, &lf); err != nil {
-		return nil, bouncererrors.With(err, "parse lockfile TOML").Set("path", path)
+		return nil, vetoerrors.With(err, "parse lockfile TOML").Set("path", path)
 	}
 	out := make([]packagemanager.Install, 0, len(lf.Package))
 	for _, p := range lf.Package {

@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/argv"
+	"github.com/brynbellomy/veto/internal/packagemanager/argv"
 )
 
 func TestFirstNonFlagWithTable(t *testing.T) {

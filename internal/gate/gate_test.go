@@ -7,9 +7,9 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brynbellomy/package-bouncer/internal/gate"
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/gate"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
 )
 
 type fakeSource struct {
@@ -95,8 +95,8 @@ func TestEvaluateOpaqueRemoteRefusedByDefault(t *testing.T) {
 	})
 	require.Equal(t, gate.OutcomeRefuse, dec.Outcome)
 	require.Len(t, dec.Flagged(), 1)
-	require.Equal(t, "bouncer-policy", dec.Flagged()[0].Reports[0].SourceID)
-	require.Contains(t, dec.Flagged()[0].Reports[0].Reason, "BOUNCER_ALLOW_OPAQUE")
+	require.Equal(t, "veto-policy", dec.Flagged()[0].Reports[0].SourceID)
+	require.Contains(t, dec.Flagged()[0].Reports[0].Reason, "VETO_ALLOW_OPAQUE")
 }
 
 // TestEvaluateOpaqueRemoteAllowedWithPolicy: opting in via policy flips
@@ -131,7 +131,7 @@ func TestEvaluateLocalPathRefusedUnderStrictPolicy(t *testing.T) {
 		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local"}, LocalPath: true},
 	})
 	require.Equal(t, gate.OutcomeRefuse, dec.Outcome)
-	require.Equal(t, "bouncer-policy", dec.Flagged()[0].Reports[0].SourceID)
+	require.Equal(t, "veto-policy", dec.Flagged()[0].Reports[0].SourceID)
 	require.Contains(t, dec.Flagged()[0].Reports[0].Reason, "local-path")
 }
 

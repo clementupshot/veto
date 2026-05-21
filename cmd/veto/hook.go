@@ -1,18 +1,18 @@
 // Claude Code PreToolUse hook entrypoint.
 //
-// `bouncer hook claude-code` reads the JSON payload Claude Code sends to a
+// `veto hook claude-code` reads the JSON payload Claude Code sends to a
 // PreToolUse command-hook on stdin, runs the analyzer, and writes a JSON
 // hook-output decision to stdout. Compiled into the same binary as the
-// rest of bouncer so a missing-python3 shebang failure can never silently
-// fail-OPEN — if the bouncer binary is on PATH the hook is present.
+// rest of veto so a missing-python3 shebang failure can never silently
+// fail-OPEN — if the veto binary is on PATH the hook is present.
 //
 // Fail-closed defense in depth:
 //
 //  1. Recovered panics: convert to a hard "deny" with INTERNAL ERROR.
-//  2. Bouncer binary not resolvable: deny with a hard "do not retry"
+//  2. Veto binary not resolvable: deny with a hard "do not retry"
 //     message so colleagues notice the mis-install instead of seeing
-//     bouncer get silently bypassed.
-//  3. Risky command detected: deny with the corrected `bouncer …` prefix
+//     veto get silently bypassed.
+//  3. Risky command detected: deny with the corrected `veto …` prefix
 //     in the message so the agent re-issues correctly.
 //
 // All three states emit a Claude-Code-shaped JSON envelope and exit 0.
@@ -32,7 +32,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/brynbellomy/package-bouncer/internal/hook/claudecode"
+	"github.com/brynbellomy/veto/internal/hook/claudecode"
 )
 
 // claudeHookInput is the subset of Claude Code's PreToolUse payload we use.
@@ -56,19 +56,19 @@ type claudeHookOutput struct {
 	} `json:"hookSpecificOutput"`
 }
 
-// runHook dispatches `bouncer hook <subcommand>`. Only `claude-code` is
+// runHook dispatches `veto hook <subcommand>`. Only `claude-code` is
 // implemented today; others print usage so users see a clear "not wired
 // yet" message instead of a silent no-op.
 func runHook(logger zerolog.Logger, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "bouncer hook: missing subcommand. Try `bouncer hook claude-code`.")
+		fmt.Fprintln(os.Stderr, "veto hook: missing subcommand. Try `veto hook claude-code`.")
 		return exitUsage
 	}
 	switch args[0] {
 	case "claude-code":
 		return runClaudeCodeHook(logger, os.Stdin, os.Stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "bouncer hook: unknown subcommand %q. Available: claude-code\n", args[0])
+		fmt.Fprintf(os.Stderr, "veto hook: unknown subcommand %q. Available: claude-code\n", args[0])
 		return exitUsage
 	}
 }
@@ -86,7 +86,7 @@ func runClaudeCodeHook(logger zerolog.Logger, stdin io.Reader, stdout io.Writer)
 		if r := recover(); r != nil {
 			logger.Error().Interface("panic", r).Msg("hook panic — emitting fail-closed deny")
 			if writeErr := writeDeny(stdout, fmt.Sprintf(
-				"bouncer-hook: INTERNAL ERROR in hook script — install aborted fail-closed.\n\n"+
+				"veto-hook: INTERNAL ERROR in hook script — install aborted fail-closed.\n\n"+
 					"The hook crashed before it could make a routing decision. The agent's command was NOT executed.\n\n"+
 					"Underlying error: %v\n\n"+
 					"Re-run the original command only after the hook is fixed (or temporarily unwire it from "+
@@ -118,31 +118,31 @@ func runClaudeCodeHook(logger zerolog.Logger, stdin io.Reader, stdout io.Writer)
 		return exitOK
 	}
 
-	// Defense layer 2: if bouncer itself isn't on PATH at hook time,
-	// telling the agent to "prefix with bouncer" is useless. Fail closed
+	// Defense layer 2: if veto itself isn't on PATH at hook time,
+	// telling the agent to "prefix with veto" is useless. Fail closed
 	// loudly so the mis-install is visible.
-	if !bouncerReachable() {
+	if !vetoReachable() {
 		msg := fmt.Sprintf(
-			"bouncer-hook: BLOCKED unguarded `%s` invocation, AND the bouncer binary itself was not found on PATH.\n\n"+
+			"veto-hook: BLOCKED unguarded `%s` invocation, AND the veto binary itself was not found on PATH.\n\n"+
 				"This means the safety gate is not installed correctly. Do NOT retry this command — the agent has no way to "+
 				"route a package-manager call through a malware scan right now.\n\n"+
 				"To fix:\n"+
-				"  1. Build and install bouncer: `make install` in the package-bouncer repo, OR `go install "+
-				"github.com/brynbellomy/package-bouncer/cmd/bouncer@latest`\n"+
-				"  2. Confirm `which bouncer` resolves to a real binary\n"+
+				"  1. Build and install veto: `make install` in the veto repo, OR `go install "+
+				"github.com/brynbellomy/veto/cmd/veto@latest`\n"+
+				"  2. Confirm `which veto` resolves to a real binary\n"+
 				"  3. Then retry the original command.",
 			finding.PM,
 		)
 		return writeDecisionOrFail(stdout, msg)
 	}
 
-	corrected := "bouncer " + joinShellQuoted(finding.Tokens)
+	corrected := "veto " + joinShellQuoted(finding.Tokens)
 	msg := fmt.Sprintf(
-		"bouncer-hook: blocked unguarded `%s` invocation.\n"+
-			"Reason: package-bouncer only protects you when the command is routed through it. Re-run with an explicit "+
-			"`bouncer` prefix so the malware scan runs:\n\n  %s\n\n"+
+		"veto-hook: blocked unguarded `%s` invocation.\n"+
+			"Reason: veto only protects you when the command is routed through it. Re-run with an explicit "+
+			"`veto` prefix so the malware scan runs:\n\n  %s\n\n"+
 			"If multiple commands are chained, only the package-manager leaf needs the prefix. To bypass intentionally, "+
-			"prepend `BOUNCER_BYPASS=1 ` to the command.",
+			"prepend `VETO_BYPASS=1 ` to the command.",
 		finding.PM, corrected,
 	)
 	return writeDecisionOrFail(stdout, msg)
@@ -167,13 +167,13 @@ func writeDeny(stdout io.Writer, reason string) error {
 	return json.NewEncoder(stdout).Encode(out)
 }
 
-// bouncerReachable mirrors the Python original's check: confirm that the
-// shell can resolve `bouncer` from PATH, since the agent re-invokes by
+// vetoReachable mirrors the Python original's check: confirm that the
+// shell can resolve `veto` from PATH, since the agent re-invokes by
 // bare name after we tell it to add the prefix. If the hook is wired by
-// absolute path but `bouncer` is not on PATH, the corrected command will
+// absolute path but `veto` is not on PATH, the corrected command will
 // fail with "command not found" — fail closed loudly instead.
-func bouncerReachable() bool {
-	path, err := exec.LookPath("bouncer")
+func vetoReachable() bool {
+	path, err := exec.LookPath("veto")
 	if err != nil {
 		return false
 	}

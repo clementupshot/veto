@@ -1,10 +1,10 @@
 // Package daemon defines the wire protocol and socket plumbing between the
-// bouncer CLI (running inside a sandbox-exec'd agent) and the bouncer daemon
+// veto CLI (running inside a sandbox-exec'd agent) and the veto daemon
 // (running outside the sandbox via launchd).
 //
 // Threat model: the agent process is sandbox-confined and cannot exec any
 // real package manager directly — the kernel returns EPERM. The only
-// PM-adjacent thing the agent can reach is `bouncer`. When `bouncer` needs
+// PM-adjacent thing the agent can reach is `veto`. When `veto` needs
 // to actually run the real PM after a clean gate decision, it asks the
 // daemon to do the exec on its behalf, passing its own stdin/stdout/stderr
 // fds over the Unix socket via SCM_RIGHTS so the user sees the PM's output
@@ -32,8 +32,8 @@ type Request struct {
 	Cwd string `json:"cwd"`
 
 	// Env is the environment to give the PM. Sent verbatim; the daemon
-	// does not filter, except to strip BOUNCER_* control vars that would
-	// confuse the PM or trigger recursion if bouncer is re-invoked.
+	// does not filter, except to strip VETO_* control vars that would
+	// confuse the PM or trigger recursion if veto is re-invoked.
 	Env []string `json:"env"`
 }
 
@@ -53,7 +53,7 @@ const (
 	// StatusAborted means the gate could not make a confident decision
 	// (manifest parse failure, intel store unreachable, etc.). Per
 	// fail-closed posture the PM did NOT run. Distinguished from Refused
-	// so users know it's a bouncer-side failure, not a malware block.
+	// so users know it's a veto-side failure, not a malware block.
 	StatusAborted Status = "aborted"
 
 	// StatusError means the daemon itself failed: socket error, exec

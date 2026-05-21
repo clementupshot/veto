@@ -1,7 +1,7 @@
 // Claude Code settings.json wiring.
 //
-// `bouncer install-claude-hook` makes the JSON edit that wires the Go
-// `bouncer hook claude-code` subcommand into Claude Code's PreToolUse Bash
+// `veto install-claude-hook` makes the JSON edit that wires the Go
+// `veto hook claude-code` subcommand into Claude Code's PreToolUse Bash
 // chain. We make this a first-class subcommand (rather than asking
 // colleagues to hand-edit JSON) because:
 //
@@ -12,7 +12,7 @@
 //     gsd-statusline, etc.) — a naive "write the whole file" approach
 //     would clobber them;
 //   - having one subcommand to wire-up means the onboarding doc can read
-//     "run `bouncer install-claude-hook`" instead of a multi-step JSON
+//     "run `veto install-claude-hook`" instead of a multi-step JSON
 //     surgery walkthrough.
 //
 // Atomicity: we write to a sibling tmp file and rename. settings.json is
@@ -32,7 +32,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// runInstallClaudeHook implements `bouncer install-claude-hook
+// runInstallClaudeHook implements `veto install-claude-hook
 // [--settings PATH] [--project] [--print]`.
 //
 // Without flags, edits ~/.claude/settings.json. With --project, edits
@@ -43,13 +43,13 @@ import (
 func runInstallClaudeHook(logger zerolog.Logger, args []string) int {
 	opts, err := parseClaudeHookFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer install-claude-hook: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto install-claude-hook: %v\n", err)
 		return exitUsage
 	}
 
-	bouncerPath, err := resolveBouncerBinary()
+	vetoPath, err := resolveVetoBinary()
 	if err != nil {
-		logger.Error().Err(err).Msg("locate bouncer binary")
+		logger.Error().Err(err).Msg("locate veto binary")
 		return exitInternal
 	}
 
@@ -59,9 +59,9 @@ func runInstallClaudeHook(logger zerolog.Logger, args []string) int {
 		return exitInternal
 	}
 
-	changed, action := ensureClaudeHook(settings, bouncerPath)
+	changed, action := ensureClaudeHook(settings, vetoPath)
 	if !changed {
-		fmt.Printf("bouncer: %s already wired in %s\n", action, opts.path)
+		fmt.Printf("veto: %s already wired in %s\n", action, opts.path)
 		return exitOK
 	}
 
@@ -79,20 +79,20 @@ func runInstallClaudeHook(logger zerolog.Logger, args []string) int {
 		logger.Error().Err(err).Str("path", opts.path).Msg("write settings")
 		return exitInternal
 	}
-	fmt.Printf("bouncer: %s in %s\n", action, opts.path)
-	fmt.Printf("         hook command: %s hook claude-code\n", bouncerPath)
+	fmt.Printf("veto: %s in %s\n", action, opts.path)
+	fmt.Printf("         hook command: %s hook claude-code\n", vetoPath)
 	fmt.Println("         Restart Claude Code (or open a new session) for the hook to take effect.")
 	return exitOK
 }
 
-// runUninstallClaudeHook removes the bouncer hook entry from the file
+// runUninstallClaudeHook removes the veto hook entry from the file
 // (matching by command containing our binary path or the literal
-// "bouncer hook claude-code" — so older python-shebang installs are also
+// "veto hook claude-code" — so older python-shebang installs are also
 // caught). Other hooks in the same PreToolUse chain are preserved.
 func runUninstallClaudeHook(logger zerolog.Logger, args []string) int {
 	opts, err := parseClaudeHookFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer uninstall-claude-hook: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto uninstall-claude-hook: %v\n", err)
 		return exitUsage
 	}
 
@@ -104,7 +104,7 @@ func runUninstallClaudeHook(logger zerolog.Logger, args []string) int {
 
 	removed := removeClaudeHook(settings)
 	if !removed {
-		fmt.Printf("bouncer: no bouncer hook found in %s — nothing to do\n", opts.path)
+		fmt.Printf("veto: no veto hook found in %s — nothing to do\n", opts.path)
 		return exitOK
 	}
 
@@ -112,7 +112,7 @@ func runUninstallClaudeHook(logger zerolog.Logger, args []string) int {
 		logger.Error().Err(err).Str("path", opts.path).Msg("write settings")
 		return exitInternal
 	}
-	fmt.Printf("bouncer: removed hook entry from %s\n", opts.path)
+	fmt.Printf("veto: removed hook entry from %s\n", opts.path)
 	return exitOK
 }
 
@@ -222,16 +222,16 @@ func writeSettings(path string, settings map[string]any) error {
 }
 
 // ensureClaudeHook mutates settings in place to contain a PreToolUse Bash
-// hook entry that invokes `<bouncerPath> hook claude-code`. Idempotent:
-// if the entry already exists (matched by command string or by "bouncer
-// hook claude-code" substring), it is updated to the current bouncerPath
+// hook entry that invokes `<vetoPath> hook claude-code`. Idempotent:
+// if the entry already exists (matched by command string or by "veto
+// hook claude-code" substring), it is updated to the current vetoPath
 // and the function reports no-change.
 //
 // Returns (changed, humanReadableSummary). The summary distinguishes
 // "added a new entry", "updated an existing entry's command path", and
 // "already correct".
-func ensureClaudeHook(settings map[string]any, bouncerPath string) (bool, string) {
-	wantedCmd := bouncerPath + " hook claude-code"
+func ensureClaudeHook(settings map[string]any, vetoPath string) (bool, string) {
+	wantedCmd := vetoPath + " hook claude-code"
 
 	hooks := getOrCreateObject(settings, "hooks")
 	preToolUse := getOrCreateArray(hooks, "PreToolUse")
@@ -249,15 +249,15 @@ func ensureClaudeHook(settings map[string]any, bouncerPath string) (bool, string
 
 	inner, _ := bashEntry["hooks"].([]any)
 
-	// Look for an existing bouncer entry (matched lenient: any command
-	// referencing bouncer-hook.py or `hook claude-code` is ours).
+	// Look for an existing veto entry (matched lenient: any command
+	// referencing veto-hook.py or `hook claude-code` is ours).
 	for i, raw := range inner {
 		entry, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
 		cmd, _ := entry["command"].(string)
-		if !isBouncerHookCommand(cmd) {
+		if !isVetoHookCommand(cmd) {
 			continue
 		}
 		if cmd == wantedCmd {
@@ -269,7 +269,7 @@ func ensureClaudeHook(settings map[string]any, bouncerPath string) (bool, string
 		bashEntry["hooks"] = inner
 		preToolUse[bashIdx] = bashEntry
 		hooks["PreToolUse"] = preToolUse
-		return true, "updated hook command to point at " + bouncerPath
+		return true, "updated hook command to point at " + vetoPath
 	}
 
 	// Not found — append.
@@ -283,7 +283,7 @@ func ensureClaudeHook(settings map[string]any, bouncerPath string) (bool, string
 	return true, "added hook entry"
 }
 
-// removeClaudeHook strips any bouncer-owned hook entry from the
+// removeClaudeHook strips any veto-owned hook entry from the
 // PreToolUse Bash chain. If that empties the Bash chain, the matcher
 // block is also removed. Returns whether the settings map changed.
 func removeClaudeHook(settings map[string]any) bool {
@@ -321,7 +321,7 @@ func removeClaudeHook(settings map[string]any) bool {
 				continue
 			}
 			cmd, _ := hm["command"].(string)
-			if isBouncerHookCommand(cmd) {
+			if isVetoHookCommand(cmd) {
 				changed = true
 				continue
 			}
@@ -346,20 +346,20 @@ func removeClaudeHook(settings map[string]any) bool {
 	return true
 }
 
-// isBouncerHookCommand recognises any hook command string we (or our
-// Python predecessor) would have inserted. Matches `bouncer hook
-// claude-code` substring AND `bouncer-hook.py` legacy paths.
-func isBouncerHookCommand(cmd string) bool {
+// isVetoHookCommand recognises any hook command string we (or our
+// Python predecessor) would have inserted. Matches `veto hook
+// claude-code` substring AND `veto-hook.py` legacy paths.
+func isVetoHookCommand(cmd string) bool {
 	if cmd == "" {
 		return false
 	}
-	if strings.Contains(cmd, "hook claude-code") && strings.Contains(cmd, "bouncer") {
+	if strings.Contains(cmd, "hook claude-code") && strings.Contains(cmd, "veto") {
 		return true
 	}
-	if strings.Contains(cmd, "bouncer-hook.py") {
+	if strings.Contains(cmd, "veto-hook.py") {
 		return true
 	}
-	if strings.HasSuffix(cmd, "/bouncer-hook") {
+	if strings.HasSuffix(cmd, "/veto-hook") {
 		return true
 	}
 	return false

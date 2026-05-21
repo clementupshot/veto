@@ -13,23 +13,23 @@ import (
 // and regular file. The --force toggle decides the last two.
 func TestEnsureShim(t *testing.T) {
 	dir := t.TempDir()
-	bouncer := filepath.Join(dir, "bouncer-binary")
-	require.NoError(t, os.WriteFile(bouncer, []byte("#!/bin/sh\n"), 0o755))
+	veto := filepath.Join(dir, "veto-binary")
+	require.NoError(t, os.WriteFile(veto, []byte("#!/bin/sh\n"), 0o755))
 
 	t.Run("creates symlink when target missing", func(t *testing.T) {
 		target := filepath.Join(dir, "npm-1")
-		action, err := ensureShim(target, bouncer, false)
+		action, err := ensureShim(target, veto, false)
 		require.NoError(t, err)
 		require.Contains(t, action, "created")
 		linked, err := os.Readlink(target)
 		require.NoError(t, err)
-		require.Equal(t, bouncer, linked)
+		require.Equal(t, veto, linked)
 	})
 
 	t.Run("no-op when already correct", func(t *testing.T) {
 		target := filepath.Join(dir, "npm-2")
-		require.NoError(t, os.Symlink(bouncer, target))
-		action, err := ensureShim(target, bouncer, false)
+		require.NoError(t, os.Symlink(veto, target))
+		action, err := ensureShim(target, veto, false)
 		require.NoError(t, err)
 		require.Empty(t, action, "expected silent no-op when symlink is already correct")
 	})
@@ -39,7 +39,7 @@ func TestEnsureShim(t *testing.T) {
 		other := filepath.Join(dir, "some-other-binary")
 		require.NoError(t, os.WriteFile(other, []byte(""), 0o755))
 		require.NoError(t, os.Symlink(other, target))
-		_, err := ensureShim(target, bouncer, false)
+		_, err := ensureShim(target, veto, false)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "symlink points elsewhere")
 	})
@@ -49,18 +49,18 @@ func TestEnsureShim(t *testing.T) {
 		other := filepath.Join(dir, "some-other-binary-2")
 		require.NoError(t, os.WriteFile(other, []byte(""), 0o755))
 		require.NoError(t, os.Symlink(other, target))
-		action, err := ensureShim(target, bouncer, true)
+		action, err := ensureShim(target, veto, true)
 		require.NoError(t, err)
 		require.Contains(t, action, "updated")
 		linked, err := os.Readlink(target)
 		require.NoError(t, err)
-		require.Equal(t, bouncer, linked)
+		require.Equal(t, veto, linked)
 	})
 
 	t.Run("refuses to overwrite a regular file without force", func(t *testing.T) {
 		target := filepath.Join(dir, "npm-5")
 		require.NoError(t, os.WriteFile(target, []byte("real binary"), 0o755))
-		_, err := ensureShim(target, bouncer, false)
+		_, err := ensureShim(target, veto, false)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "file exists and is not a symlink")
 		// Confirm we didn't touch it:
@@ -71,24 +71,24 @@ func TestEnsureShim(t *testing.T) {
 	t.Run("force replaces a regular file", func(t *testing.T) {
 		target := filepath.Join(dir, "npm-6")
 		require.NoError(t, os.WriteFile(target, []byte("real binary"), 0o755))
-		action, err := ensureShim(target, bouncer, true)
+		action, err := ensureShim(target, veto, true)
 		require.NoError(t, err)
 		require.Contains(t, action, "updated")
 		linked, err := os.Readlink(target)
 		require.NoError(t, err)
-		require.Equal(t, bouncer, linked)
+		require.Equal(t, veto, linked)
 	})
 }
 
 func TestRemoveShim(t *testing.T) {
 	dir := t.TempDir()
-	bouncer := filepath.Join(dir, "bouncer-binary")
-	require.NoError(t, os.WriteFile(bouncer, []byte(""), 0o755))
+	veto := filepath.Join(dir, "veto-binary")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
 
-	t.Run("removes a bouncer-pointing symlink", func(t *testing.T) {
+	t.Run("removes a veto-pointing symlink", func(t *testing.T) {
 		target := filepath.Join(dir, "npm-r1")
-		require.NoError(t, os.Symlink(bouncer, target))
-		removed, err := removeShim(target, bouncer)
+		require.NoError(t, os.Symlink(veto, target))
+		removed, err := removeShim(target, veto)
 		require.NoError(t, err)
 		require.True(t, removed)
 		_, statErr := os.Lstat(target)
@@ -100,7 +100,7 @@ func TestRemoveShim(t *testing.T) {
 		other := filepath.Join(dir, "some-other")
 		require.NoError(t, os.WriteFile(other, []byte(""), 0o755))
 		require.NoError(t, os.Symlink(other, target))
-		removed, err := removeShim(target, bouncer)
+		removed, err := removeShim(target, veto)
 		require.NoError(t, err)
 		require.False(t, removed)
 		// Symlink still in place:
@@ -111,14 +111,14 @@ func TestRemoveShim(t *testing.T) {
 	t.Run("skips a regular file", func(t *testing.T) {
 		target := filepath.Join(dir, "npm-r3")
 		require.NoError(t, os.WriteFile(target, []byte("real binary"), 0o755))
-		removed, err := removeShim(target, bouncer)
+		removed, err := removeShim(target, veto)
 		require.NoError(t, err)
 		require.False(t, removed)
 	})
 
 	t.Run("skips missing target without error", func(t *testing.T) {
 		target := filepath.Join(dir, "missing")
-		removed, err := removeShim(target, bouncer)
+		removed, err := removeShim(target, veto)
 		require.NoError(t, err)
 		require.False(t, removed)
 	})
@@ -126,12 +126,12 @@ func TestRemoveShim(t *testing.T) {
 
 func TestIsShimName(t *testing.T) {
 	// Spot-check that the dispatch table matches the install set. If these
-	// drift apart, `bouncer install-shims` would create a symlink that the
+	// drift apart, `veto install-shims` would create a symlink that the
 	// shim-dispatch code wouldn't recognize.
 	for _, name := range shimmedManagers {
 		require.True(t, isShimName(name), "isShimName must recognize %s", name)
 	}
-	require.False(t, isShimName("bouncer"))
+	require.False(t, isShimName("veto"))
 	require.False(t, isShimName("cargo"))
 	require.False(t, isShimName(""))
 }

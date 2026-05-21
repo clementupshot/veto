@@ -7,7 +7,7 @@
 // shell exported, plus any modifications from
 // `[shell_environment_policy]` in ~/.codex/config.toml.
 //
-// `bouncer install-codex` is therefore a guided wrapper around
+// `veto install-codex` is therefore a guided wrapper around
 // install-shims, plus a config inspection that warns when codex's
 // `shell_environment_policy.inherit = "core"` would strip the user's
 // PATH (which is where our shim dir lives) before the agent shell runs.
@@ -30,10 +30,10 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// runInstallCodex implements `bouncer install-codex [--dir DIR] [--force]`.
+// runInstallCodex implements `veto install-codex [--dir DIR] [--force]`.
 // Same flag shape as install-shims; we hand them through.
 func runInstallCodex(logger zerolog.Logger, args []string) int {
-	fmt.Println("bouncer: wiring Codex CLI via PATH shims")
+	fmt.Println("veto: wiring Codex CLI via PATH shims")
 	fmt.Println()
 	rc := runInstallShims(logger, args)
 	if rc != exitOK {
@@ -41,7 +41,7 @@ func runInstallCodex(logger zerolog.Logger, args []string) int {
 	}
 
 	fmt.Println()
-	fmt.Println("bouncer: checking Codex environment policy")
+	fmt.Println("veto: checking Codex environment policy")
 	report, err := inspectCodexEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  warning: could not inspect codex config: %v\n", err)
@@ -56,10 +56,10 @@ func runInstallCodex(logger zerolog.Logger, args []string) int {
 	fmt.Println("     your PATH order is wrong — shim dir must come first.")
 	fmt.Println("  2. Start a fresh Codex session; codex inherits the parent shell's PATH.")
 	fmt.Println("  3. Inside that session run `npm install --version-check-only`")
-	fmt.Println("     and confirm bouncer logs appear on stderr.")
+	fmt.Println("     and confirm veto logs appear on stderr.")
 	fmt.Println("  4. For direct child-process invocation coverage")
 	fmt.Println("     (e.g. tools that exec /full/path/to/npm), see")
-	fmt.Println("     `bouncer install-preload`.")
+	fmt.Println("     `veto install-preload`.")
 	return exitOK
 }
 
@@ -136,7 +136,7 @@ func inspectCodexEnv() (codexEnvReport, error) {
 
 // printCodexReport renders findings + concrete advice. The aim is: a
 // colleague reading this output knows whether their codex sessions will
-// actually see the bouncer shims.
+// actually see the veto shims.
 func printCodexReport(w *os.File, report codexEnvReport) {
 	if !report.ConfigExists {
 		fmt.Fprintln(w, "  no ~/.codex/config.toml found — codex will inherit your shell PATH by default. ✓")

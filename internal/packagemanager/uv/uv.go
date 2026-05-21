@@ -2,10 +2,10 @@
 package uv
 
 import (
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/argv"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pyspec"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/argv"
+	"github.com/brynbellomy/veto/internal/packagemanager/pyspec"
 )
 
 const binaryName = "uv"

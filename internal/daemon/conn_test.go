@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/brynbellomy/package-bouncer/internal/daemon"
+	"github.com/brynbellomy/veto/internal/daemon"
 )
 
 // TestSendReceiveRoundTrip pumps a Request with three pipe-fds through a

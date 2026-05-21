@@ -29,8 +29,8 @@ import (
 	"github.com/brynbellomy/go-utils/errors"
 	"github.com/rs/zerolog"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/intel/osvschema"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel/osvschema"
 )
 
 const (
@@ -44,7 +44,7 @@ type Options struct {
 	BaseURL string
 
 	// CacheDir is where per-ecosystem zip payloads and etags live.
-	// Required; typically ~/.cache/package-bouncer/osv.
+	// Required; typically ~/.cache/veto/osv.
 	CacheDir string
 
 	// HTTPClient overrides the default 2-minute-timeout client.

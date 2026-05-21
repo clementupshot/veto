@@ -15,9 +15,9 @@ import (
 // TestRunClaudeCodeHook_RiskyEmitsDenyWithCorrectedPrefix is the most
 // important behavior to nail down: a bash command that reaches a covered
 // package manager produces a deny envelope whose message contains the
-// `bouncer <pm> <args>` correction so the agent can re-issue cleanly.
+// `veto <pm> <args>` correction so the agent can re-issue cleanly.
 func TestRunClaudeCodeHook_RiskyEmitsDenyWithCorrectedPrefix(t *testing.T) {
-	withBouncerOnPath(t)
+	withVetoOnPath(t)
 
 	in := encodePayload(t, "Bash", "npm install lodash")
 	var out bytes.Buffer
@@ -26,16 +26,16 @@ func TestRunClaudeCodeHook_RiskyEmitsDenyWithCorrectedPrefix(t *testing.T) {
 
 	decision := decodeDecision(t, &out)
 	require.Equal(t, "deny", decision.PermissionDecision)
-	require.Contains(t, decision.PermissionDecisionReason, "bouncer npm install lodash")
+	require.Contains(t, decision.PermissionDecisionReason, "veto npm install lodash")
 	require.Contains(t, decision.PermissionDecisionReason, "blocked unguarded `npm`")
 }
 
-// TestRunClaudeCodeHook_AllowsBouncerPrefixed: agent already added the
+// TestRunClaudeCodeHook_AllowsVetoPrefixed: agent already added the
 // prefix; we must not deny a second time, or we'd loop forever.
-func TestRunClaudeCodeHook_AllowsBouncerPrefixed(t *testing.T) {
-	withBouncerOnPath(t)
+func TestRunClaudeCodeHook_AllowsVetoPrefixed(t *testing.T) {
+	withVetoOnPath(t)
 
-	in := encodePayload(t, "Bash", "bouncer npm install lodash")
+	in := encodePayload(t, "Bash", "veto npm install lodash")
 	var out bytes.Buffer
 	rc := runClaudeCodeHook(zerolog.Nop(), in, &out)
 	require.Equal(t, exitOK, rc)
@@ -62,10 +62,10 @@ func TestRunClaudeCodeHook_MalformedInput(t *testing.T) {
 	require.Empty(t, strings.TrimSpace(out.String()))
 }
 
-// TestRunClaudeCodeHook_BouncerNotOnPath: when bouncer can't be found by
+// TestRunClaudeCodeHook_VetoNotOnPath: when veto can't be found by
 // the agent's re-invocation, telling them to add a prefix is useless. We
 // must still deny but with a "do not retry" message.
-func TestRunClaudeCodeHook_BouncerNotOnPath(t *testing.T) {
+func TestRunClaudeCodeHook_VetoNotOnPath(t *testing.T) {
 	// Empty PATH guarantees lookup fails.
 	t.Setenv("PATH", "")
 
@@ -76,18 +76,18 @@ func TestRunClaudeCodeHook_BouncerNotOnPath(t *testing.T) {
 
 	decision := decodeDecision(t, &out)
 	require.Equal(t, "deny", decision.PermissionDecision)
-	require.Contains(t, decision.PermissionDecisionReason, "bouncer binary itself was not found on PATH")
+	require.Contains(t, decision.PermissionDecisionReason, "veto binary itself was not found on PATH")
 	require.Contains(t, decision.PermissionDecisionReason, "Do NOT retry")
 }
 
-// withBouncerOnPath drops a fake `bouncer` executable into a temp dir and
+// withVetoOnPath drops a fake `veto` executable into a temp dir and
 // puts it on PATH for the test. Lets the reachable-check pass without
-// requiring bouncer to be installed system-wide.
-func withBouncerOnPath(t *testing.T) {
+// requiring veto to be installed system-wide.
+func withVetoOnPath(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	bouncerPath := filepath.Join(dir, "bouncer")
-	require.NoError(t, os.WriteFile(bouncerPath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	vetoPath := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(vetoPath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 

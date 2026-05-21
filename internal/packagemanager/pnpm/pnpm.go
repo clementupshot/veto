@@ -2,10 +2,10 @@
 package pnpm
 
 import (
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/argv"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jsspec"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/argv"
+	"github.com/brynbellomy/veto/internal/packagemanager/jsspec"
 )
 
 const binaryName = "pnpm"

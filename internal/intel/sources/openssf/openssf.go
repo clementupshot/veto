@@ -12,7 +12,7 @@
 //  2. on-disk parsed gob keyed by etag (skip re-parse on warm refresh),
 //  3. in-memory reports (populated once per process, partitioned per Fetch).
 //
-// All three keep `bouncer <pm> install foo` from paying parse cost on the
+// All three keep `veto <pm> install foo` from paying parse cost on the
 // hot path while still doing a conditional GET to keep the malware view fresh.
 package openssf
 
@@ -33,8 +33,8 @@ import (
 	"github.com/brynbellomy/go-utils/errors"
 	"github.com/rs/zerolog"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
-	"github.com/brynbellomy/package-bouncer/internal/intel/osvschema"
+	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel/osvschema"
 )
 
 const (
@@ -49,7 +49,7 @@ type Options struct {
 	TarballURL string
 
 	// CacheDir is where the tarball and parsed gob blobs live.
-	// Required; typically ~/.cache/package-bouncer/openssf.
+	// Required; typically ~/.cache/veto/openssf.
 	CacheDir string
 
 	// HTTPClient overrides the default 5-minute-timeout client. The first

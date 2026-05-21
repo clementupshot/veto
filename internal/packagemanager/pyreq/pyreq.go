@@ -19,8 +19,8 @@ import (
 
 	"github.com/brynbellomy/go-utils/errors"
 
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pyspec"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/pyspec"
 )
 
 // maxRecursionDepth caps `-r` / `-c` chasing inside requirements files.

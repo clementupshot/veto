@@ -13,16 +13,16 @@ import (
 // gets the full hooks.PreToolUse[Bash][hooks] scaffolding inserted.
 func TestEnsureClaudeHook_FreshSettings(t *testing.T) {
 	settings := map[string]any{}
-	changed, summary := ensureClaudeHook(settings, "/abs/path/to/bouncer")
+	changed, summary := ensureClaudeHook(settings, "/abs/path/to/veto")
 	require.True(t, changed)
 	require.Equal(t, "added hook entry", summary)
 
 	cmd := getHookCommand(t, settings, "Bash", 0)
-	require.Equal(t, "/abs/path/to/bouncer hook claude-code", cmd)
+	require.Equal(t, "/abs/path/to/veto hook claude-code", cmd)
 }
 
 // TestEnsureClaudeHook_PreservesUnrelatedHooks: the user already has a
-// PreToolUse Bash chain with non-bouncer entries (rtk-rewrite, etc.).
+// PreToolUse Bash chain with non-veto entries (rtk-rewrite, etc.).
 // Our entry must be appended without disturbing them.
 func TestEnsureClaudeHook_PreservesUnrelatedHooks(t *testing.T) {
 	settings := map[string]any{
@@ -37,27 +37,27 @@ func TestEnsureClaudeHook_PreservesUnrelatedHooks(t *testing.T) {
 			},
 		},
 	}
-	changed, _ := ensureClaudeHook(settings, "/abs/path/to/bouncer")
+	changed, _ := ensureClaudeHook(settings, "/abs/path/to/veto")
 	require.True(t, changed)
 
 	chain := getBashHookChain(t, settings)
 	require.Len(t, chain, 2, "rtk-rewrite must still be in the chain")
 	require.Equal(t, "/foo/rtk-rewrite.sh", chain[0].(map[string]any)["command"])
-	require.Equal(t, "/abs/path/to/bouncer hook claude-code", chain[1].(map[string]any)["command"])
+	require.Equal(t, "/abs/path/to/veto hook claude-code", chain[1].(map[string]any)["command"])
 }
 
 // TestEnsureClaudeHook_Idempotent: running install twice with the same
-// bouncer path is a no-op the second time.
+// veto path is a no-op the second time.
 func TestEnsureClaudeHook_Idempotent(t *testing.T) {
 	settings := map[string]any{}
-	ensureClaudeHook(settings, "/abs/path/to/bouncer")
-	changed, summary := ensureClaudeHook(settings, "/abs/path/to/bouncer")
+	ensureClaudeHook(settings, "/abs/path/to/veto")
+	changed, summary := ensureClaudeHook(settings, "/abs/path/to/veto")
 	require.False(t, changed)
 	require.Equal(t, "hook", summary)
 }
 
 // TestEnsureClaudeHook_UpgradesLegacyPython: an existing Python-shebang
-// install at .../bouncer-hook.py must be migrated to the Go subcommand
+// install at .../veto-hook.py must be migrated to the Go subcommand
 // in place — same chain position, replaced command.
 func TestEnsureClaudeHook_UpgradesLegacyPython(t *testing.T) {
 	settings := map[string]any{
@@ -66,32 +66,32 @@ func TestEnsureClaudeHook_UpgradesLegacyPython(t *testing.T) {
 				map[string]any{
 					"matcher": "Bash",
 					"hooks": []any{
-						map[string]any{"type": "command", "command": "/old/path/bouncer-hook.py"},
+						map[string]any{"type": "command", "command": "/old/path/veto-hook.py"},
 					},
 				},
 			},
 		},
 	}
-	changed, summary := ensureClaudeHook(settings, "/new/bouncer")
+	changed, summary := ensureClaudeHook(settings, "/new/veto")
 	require.True(t, changed)
 	require.Contains(t, summary, "updated")
 
 	chain := getBashHookChain(t, settings)
 	require.Len(t, chain, 1, "legacy entry must be replaced in place, not duplicated")
-	require.Equal(t, "/new/bouncer hook claude-code", chain[0].(map[string]any)["command"])
+	require.Equal(t, "/new/veto hook claude-code", chain[0].(map[string]any)["command"])
 }
 
-// TestEnsureClaudeHook_UpgradesPathChange: bouncer was reinstalled at a
+// TestEnsureClaudeHook_UpgradesPathChange: veto was reinstalled at a
 // different absolute path. Our install must rewrite the command string.
 func TestEnsureClaudeHook_UpgradesPathChange(t *testing.T) {
 	settings := map[string]any{}
-	ensureClaudeHook(settings, "/old/bouncer")
+	ensureClaudeHook(settings, "/old/veto")
 
-	changed, summary := ensureClaudeHook(settings, "/new/bouncer")
+	changed, summary := ensureClaudeHook(settings, "/new/veto")
 	require.True(t, changed)
 	require.Contains(t, summary, "updated")
 	cmd := getHookCommand(t, settings, "Bash", 0)
-	require.Equal(t, "/new/bouncer hook claude-code", cmd)
+	require.Equal(t, "/new/veto hook claude-code", cmd)
 }
 
 // TestRemoveClaudeHook_LeavesOtherHooksAlone: uninstall must surgically
@@ -103,7 +103,7 @@ func TestRemoveClaudeHook_LeavesOtherHooksAlone(t *testing.T) {
 				map[string]any{
 					"matcher": "Bash",
 					"hooks": []any{
-						map[string]any{"type": "command", "command": "/abs/bouncer hook claude-code"},
+						map[string]any{"type": "command", "command": "/abs/veto hook claude-code"},
 						map[string]any{"type": "command", "command": "/foo/rtk-rewrite.sh"},
 					},
 				},
@@ -126,7 +126,7 @@ func TestRemoveClaudeHook_StripsEmptyBashMatcher(t *testing.T) {
 				map[string]any{
 					"matcher": "Bash",
 					"hooks": []any{
-						map[string]any{"type": "command", "command": "/abs/bouncer hook claude-code"},
+						map[string]any{"type": "command", "command": "/abs/veto hook claude-code"},
 					},
 				},
 			},
@@ -148,7 +148,7 @@ func TestReadWriteSettings_RoundTrip(t *testing.T) {
 		"model": "opus[1m]",
 		"env":   map[string]any{"FOO": "bar"},
 	}
-	ensureClaudeHook(settings, "/abs/path/to/bouncer")
+	ensureClaudeHook(settings, "/abs/path/to/veto")
 	require.NoError(t, writeSettings(path, settings))
 
 	roundTripped, err := readSettings(path)

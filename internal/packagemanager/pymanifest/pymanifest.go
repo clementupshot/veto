@@ -27,10 +27,10 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	bouncererrors "github.com/brynbellomy/go-utils/errors"
+	vetoerrors "github.com/brynbellomy/go-utils/errors"
 
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
-	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pyspec"
+	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/pyspec"
 )
 
 // Expander reads pyproject.toml files and emits the Install records the gate
@@ -85,12 +85,12 @@ func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Inst
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, bouncererrors.With(err, "reading pyproject.toml").Set("path", ref.Path)
+		return nil, vetoerrors.With(err, "reading pyproject.toml").Set("path", ref.Path)
 	}
 
 	var pyp pyproject
 	if _, err := toml.Decode(string(data), &pyp); err != nil {
-		return nil, bouncererrors.With(err, "parse pyproject.toml").Set("path", ref.Path)
+		return nil, vetoerrors.With(err, "parse pyproject.toml").Set("path", ref.Path)
 	}
 
 	// Dedupe by lower-cased PyPI name across all sources; the install set is

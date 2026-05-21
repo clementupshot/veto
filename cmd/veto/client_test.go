@@ -10,7 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel"
 )
 
 // shortSockPath returns a Unix socket path under /tmp short enough to fit
@@ -19,7 +19,7 @@ import (
 // over 30 chars or so. Using /tmp directly leaves comfortable headroom.
 func shortSockPath(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("/tmp", "bouncer-")
+	d, err := os.MkdirTemp("/tmp", "veto-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(d) })
 	return filepath.Join(d, "s")
@@ -27,7 +27,7 @@ func shortSockPath(t *testing.T) string {
 
 // TestClientToDaemonViaSocket: full client→daemon round trip over a real
 // Unix listener. Validates net.Dial("unix"), socket path resolution via
-// BOUNCER_DAEMON_SOCKET, request encode/decode in production code paths
+// VETO_DAEMON_SOCKET, request encode/decode in production code paths
 // (not the test helper's socketpair), and exit-code passthrough.
 func TestClientToDaemonViaSocket(t *testing.T) {
 	tmp := t.TempDir()

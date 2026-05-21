@@ -22,7 +22,7 @@ import (
 	"github.com/brynbellomy/go-utils/errors"
 	"github.com/rs/zerolog"
 
-	"github.com/brynbellomy/package-bouncer/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel"
 )
 
 const (
@@ -36,7 +36,7 @@ type Options struct {
 	BaseURL string
 
 	// CacheDir is where fetched payloads and etags are persisted between runs.
-	// Required; typically ~/.cache/package-bouncer/aikido.
+	// Required; typically ~/.cache/veto/aikido.
 	CacheDir string
 
 	// HTTPClient is used for fetches. Defaults to a client with a 30s timeout.

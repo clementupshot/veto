@@ -38,8 +38,8 @@ import (
 // Idempotent updates re-write the entire block; uninstall strips it.
 // Anything outside the markers is preserved verbatim.
 const (
-	preloadMarkerStart = "# >>> package-bouncer preload (managed) >>>"
-	preloadMarkerEnd   = "# <<< package-bouncer preload (managed) <<<"
+	preloadMarkerStart = "# >>> veto preload (managed) >>>"
+	preloadMarkerEnd   = "# <<< veto preload (managed) <<<"
 )
 
 type preloadOpts struct {
@@ -50,34 +50,34 @@ type preloadOpts struct {
 	print    bool   // when true, write export lines to stdout instead of a file
 }
 
-// runInstallPreload implements `bouncer install-preload`.
+// runInstallPreload implements `veto install-preload`.
 //
 // Required flag: --lib PATH (the path to the prebuilt interposer). We
 // don't try to build it inline — that would require a CC on the user's
-// machine to live inside the bouncer binary, which conflicts with the
+// machine to live inside the veto binary, which conflicts with the
 // "single static Go binary" shape this project optimizes for. Build is
 // `make interposer`, install is this subcommand, and they're separate
 // steps in the onboarding doc.
 func runInstallPreload(logger zerolog.Logger, args []string) int {
 	opts, err := parsePreloadFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer install-preload: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto install-preload: %v\n", err)
 		return exitUsage
 	}
 
 	if opts.libPath == "" {
-		fmt.Fprintln(os.Stderr, "bouncer install-preload: --lib PATH is required.")
-		fmt.Fprintln(os.Stderr, "Run `make interposer` first, then pass the resulting libbouncer_interpose.* path.")
+		fmt.Fprintln(os.Stderr, "veto install-preload: --lib PATH is required.")
+		fmt.Fprintln(os.Stderr, "Run `make interposer` first, then pass the resulting libveto_interpose.* path.")
 		return exitUsage
 	}
 	if err := assertInterposerArtifact(opts.libPath); err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer install-preload: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto install-preload: %v\n", err)
 		return exitUsage
 	}
 
-	bouncerPath, err := resolveBouncerBinary()
+	vetoPath, err := resolveVetoBinary()
 	if err != nil {
-		logger.Error().Err(err).Msg("locate bouncer binary")
+		logger.Error().Err(err).Msg("locate veto binary")
 		return exitInternal
 	}
 
@@ -87,25 +87,25 @@ func runInstallPreload(logger zerolog.Logger, args []string) int {
 	// shell rc already points at that path, every new terminal would
 	// abort with a dyld error. Verifying first means a failure leaves
 	// both the installed copy AND the shell rc untouched.
-	if err := verifyInterposerLoads(opts.libPath, bouncerPath); err != nil {
+	if err := verifyInterposerLoads(opts.libPath, vetoPath); err != nil {
 		logger.Error().Err(err).Msg("interposer load check")
-		fmt.Fprintln(os.Stderr, "bouncer: ERROR — dyld rejected the interposer.")
+		fmt.Fprintln(os.Stderr, "veto: ERROR — dyld rejected the interposer.")
 		fmt.Fprintf(os.Stderr, "  underlying error: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Possible causes: arch mismatch (try `make clean && make interposer`),")
 		fmt.Fprintln(os.Stderr, "corrupted dylib, or a macOS code-signing policy blocking it.")
 		fmt.Fprintln(os.Stderr, "Nothing was modified — your previous Layer 3 install (if any) is intact.")
 		return exitInternal
 	}
-	fmt.Println("bouncer: verified — dyld accepted the interposer in a test process.")
+	fmt.Println("veto: verified — dyld accepted the interposer in a test process.")
 
 	installedLibPath, err := copyInterposer(opts.libPath, opts.installTo)
 	if err != nil {
 		logger.Error().Err(err).Msg("copy interposer")
 		return exitInternal
 	}
-	fmt.Printf("bouncer: installed interposer to %s\n", installedLibPath)
+	fmt.Printf("veto: installed interposer to %s\n", installedLibPath)
 
-	envBlock := renderPreloadEnvBlock(installedLibPath, bouncerPath)
+	envBlock := renderPreloadEnvBlock(installedLibPath, vetoPath)
 
 	if opts.print {
 		fmt.Println()
@@ -117,7 +117,7 @@ func runInstallPreload(logger zerolog.Logger, args []string) int {
 	if rcPath == "" && opts.autoRC {
 		rcPath, err = autoDetectShellRC()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "bouncer install-preload: %v\n", err)
+			fmt.Fprintf(os.Stderr, "veto install-preload: %v\n", err)
 			fmt.Fprintln(os.Stderr, "Pass --shell-rc PATH explicitly, or use --print to dump the export lines.")
 			return exitUsage
 		}
@@ -137,8 +137,8 @@ func runInstallPreload(logger zerolog.Logger, args []string) int {
 		logger.Error().Err(err).Str("rc", rcPath).Msg("update shell rc")
 		return exitInternal
 	}
-	fmt.Printf("bouncer: wrote preload block to %s\n", rcPath)
-	fmt.Println("         Open a new terminal (or `source ~/.zshrc`), then run `bouncer doctor` —")
+	fmt.Printf("veto: wrote preload block to %s\n", rcPath)
+	fmt.Println("         Open a new terminal (or `source ~/.zshrc`), then run `veto doctor` —")
 	fmt.Println("         the 'interposer env' check should go from WARN to PASS.")
 	fmt.Println()
 	printSIPCaveat(os.Stdout)
@@ -146,27 +146,27 @@ func runInstallPreload(logger zerolog.Logger, args []string) int {
 }
 
 // verifyInterposerLoads spawns a quick test subprocess with the
-// preload env var set, exec'ing the bouncer binary itself with `help`.
+// preload env var set, exec'ing the veto binary itself with `help`.
 // If dyld can't load the dylib, the child aborts with a stderr message
 // starting "dyld[…]: terminating because inserted dylib '…' could not
 // be loaded". We surface that as an error so install-preload can roll
 // back before touching the user's shell rc.
 //
-// We exec the bouncer binary specifically because (a) we just installed
+// We exec the veto binary specifically because (a) we just installed
 // it and know it exists, (b) it's user-installed, not SIP-protected,
-// so DYLD_INSERT_LIBRARIES actually applies, and (c) `bouncer help`
+// so DYLD_INSERT_LIBRARIES actually applies, and (c) `veto help`
 // completes in milliseconds without doing any I/O.
-func verifyInterposerLoads(libPath, bouncerPath string) error {
+func verifyInterposerLoads(libPath, vetoPath string) error {
 	envVar := "DYLD_INSERT_LIBRARIES"
 	if runtime.GOOS != "darwin" {
 		envVar = "LD_PRELOAD"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bouncerPath, "help")
+	cmd := exec.CommandContext(ctx, vetoPath, "help")
 	cmd.Env = []string{
 		envVar + "=" + libPath,
-		"BOUNCER_PATH=" + bouncerPath,
+		"VETO_PATH=" + vetoPath,
 		"PATH=/usr/bin:/bin",
 		"HOME=" + os.Getenv("HOME"),
 	}
@@ -214,7 +214,7 @@ func truncateForError(s string, n int) string {
 func runUninstallPreload(logger zerolog.Logger, args []string) int {
 	opts, err := parsePreloadFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bouncer uninstall-preload: %v\n", err)
+		fmt.Fprintf(os.Stderr, "veto uninstall-preload: %v\n", err)
 		return exitUsage
 	}
 
@@ -222,7 +222,7 @@ func runUninstallPreload(logger zerolog.Logger, args []string) int {
 	if rcPath == "" && opts.autoRC {
 		rcPath, err = autoDetectShellRC()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "bouncer uninstall-preload: %v\n", err)
+			fmt.Fprintf(os.Stderr, "veto uninstall-preload: %v\n", err)
 			return exitUsage
 		}
 	}
@@ -231,15 +231,15 @@ func runUninstallPreload(logger zerolog.Logger, args []string) int {
 			logger.Error().Err(err).Str("rc", rcPath).Msg("strip rc block")
 			return exitInternal
 		} else if removed {
-			fmt.Printf("bouncer: removed preload block from %s\n", rcPath)
+			fmt.Printf("veto: removed preload block from %s\n", rcPath)
 		} else {
-			fmt.Printf("bouncer: no managed block found in %s\n", rcPath)
+			fmt.Printf("veto: no managed block found in %s\n", rcPath)
 		}
 	}
 
 	installedLib := installedInterposerPath(opts.installTo)
 	if err := os.Remove(installedLib); err == nil {
-		fmt.Printf("bouncer: removed %s\n", installedLib)
+		fmt.Printf("veto: removed %s\n", installedLib)
 	} else if !os.IsNotExist(err) {
 		logger.Warn().Err(err).Str("path", installedLib).Msg("remove interposer")
 	}
@@ -347,28 +347,28 @@ func copyInterposer(src, installTo string) (string, error) {
 }
 
 // installedInterposerPath returns the canonical install location for the
-// interposer library — ~/.local/lib/libbouncer_interpose.<ext> by default.
+// interposer library — ~/.local/lib/libveto_interpose.<ext> by default.
 func installedInterposerPath(override string) string {
 	dir := override
 	if dir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			dir = filepath.Join(os.TempDir(), "package-bouncer-lib")
+			dir = filepath.Join(os.TempDir(), "veto-lib")
 		} else {
 			dir = filepath.Join(home, ".local", "lib")
 		}
 	}
-	name := "libbouncer_interpose.dylib"
+	name := "libveto_interpose.dylib"
 	if runtime.GOOS != "darwin" {
-		name = "libbouncer_interpose.so"
+		name = "libveto_interpose.so"
 	}
 	return filepath.Join(dir, name)
 }
 
 // renderPreloadEnvBlock returns the shell-rc snippet that exports the
-// interposer env vars. We emit BOUNCER_PATH so the interposer can find
-// the bouncer binary even when PATH varies between sessions.
-func renderPreloadEnvBlock(libPath, bouncerPath string) string {
+// interposer env vars. We emit VETO_PATH so the interposer can find
+// the veto binary even when PATH varies between sessions.
+func renderPreloadEnvBlock(libPath, vetoPath string) string {
 	envVar := "DYLD_INSERT_LIBRARIES"
 	if runtime.GOOS != "darwin" {
 		envVar = "LD_PRELOAD"
@@ -376,7 +376,7 @@ func renderPreloadEnvBlock(libPath, bouncerPath string) string {
 	var b strings.Builder
 	b.WriteString(preloadMarkerStart + "\n")
 	fmt.Fprintf(&b, "export %s=%q\n", envVar, libPath)
-	fmt.Fprintf(&b, "export BOUNCER_PATH=%q\n", bouncerPath)
+	fmt.Fprintf(&b, "export VETO_PATH=%q\n", vetoPath)
 	b.WriteString(preloadMarkerEnd + "\n")
 	return b.String()
 }
@@ -507,7 +507,7 @@ func printSIPCaveat(w io.Writer) {
 	fmt.Fprintln(w, "binaries (/usr/bin, /usr/sbin, /System/...). Layer 3 will not load")
 	fmt.Fprintln(w, "into those processes.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Layer 4 (`bouncer install-wrappers`) closes most of the gap: it replaces")
+	fmt.Fprintln(w, "Layer 4 (`veto install-wrappers`) closes most of the gap: it replaces")
 	fmt.Fprintln(w, "the actual binary bytes at homebrew/mise install paths, so the gate fires")
 	fmt.Fprintln(w, "even when DYLD_INSERT_LIBRARIES is stripped or never inherited (e.g. a")
 	fmt.Fprintln(w, "Python subprocess.run with shell=False and env={}). SIP-protected binaries")

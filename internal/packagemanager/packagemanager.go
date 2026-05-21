@@ -4,7 +4,7 @@
 // pnpx, rushx, uvx, pipx).
 //
 // Each PackageManager parses one binary's argv into a normalized slice of
-// Install records. The bouncer then runs each Install through the gate before
+// Install records. The veto then runs each Install through the gate before
 // exec'ing the real binary.
 //
 // Per-PM implementations live in subpackages — the parent stays slim so
@@ -12,12 +12,12 @@
 package packagemanager
 
 import (
-	"github.com/brynbellomy/package-bouncer/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel"
 )
 
 // Install describes one package the user is about to install.
 type Install struct {
-	// Ref is the (ecosystem, name, version) tuple the bouncer queries the
+	// Ref is the (ecosystem, name, version) tuple the veto queries the
 	// intel store with. Version may be empty when the user gave a range or
 	// no version at all.
 	Ref intel.PackageRef
@@ -39,7 +39,7 @@ type Install struct {
 	// can't be name-keyed-looked-up either, but unlike LocalPath they
 	// can carry malware payloads named in upstream intel by URL or
 	// commit hash. The gate refuses these by default
-	// (`AllowOpaqueRemote=false`); set `BOUNCER_ALLOW_OPAQUE=1` to opt
+	// (`AllowOpaqueRemote=false`); set `VETO_ALLOW_OPAQUE=1` to opt
 	// each one through.
 	OpaqueRemote bool
 }
@@ -72,7 +72,7 @@ const (
 
 	// Lockfile kinds — the resolved, version-pinned, transitively-complete
 	// tree that the package manager will actually install. Gating against
-	// the lockfile is the closest thing bouncer can do to "gate every
+	// the lockfile is the closest thing veto can do to "gate every
 	// transitive dependency" without running the resolver itself: the PM
 	// already wrote the answer to disk.
 	//
@@ -128,7 +128,7 @@ type ManifestRef struct {
 // install verb would fetch. It returns:
 //
 //   - nil when args do not describe an install-style command (e.g. "npm run
-//     dev"); the bouncer passes through to the real binary unchecked.
+//     dev"); the veto passes through to the real binary unchecked.
 //   - an empty slice when args ARE an install verb but no explicit packages
 //     were named (e.g. "npm install" resolving from package.json); the gate's
 //     policy decides how to handle that case.

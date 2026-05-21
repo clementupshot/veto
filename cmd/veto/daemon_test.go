@@ -12,8 +12,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brynbellomy/package-bouncer/internal/daemon"
-	"github.com/brynbellomy/package-bouncer/internal/intel"
+	"github.com/brynbellomy/veto/internal/daemon"
+	"github.com/brynbellomy/veto/internal/intel"
 )
 
 // daemonFakeSource is an in-process intel.Source that returns a fixed list
@@ -150,10 +150,10 @@ func TestDaemonRefusesFlaggedInstall(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "fake npm ran despite refusal")
 }
 
-// TestDaemonHonorsBouncerBypass: BOUNCER_BYPASS=1 in the request env
+// TestDaemonHonorsVetoBypass: VETO_BYPASS=1 in the request env
 // skips the gate and execs the PM regardless of intel verdict. This is
 // the documented per-call escape hatch.
-func TestDaemonHonorsBouncerBypass(t *testing.T) {
+func TestDaemonHonorsVetoBypass(t *testing.T) {
 	tmp := t.TempDir()
 	marker := filepath.Join(tmp, "ran")
 	fakeNpm := filepath.Join(tmp, "npm")
@@ -188,7 +188,7 @@ func TestDaemonHonorsBouncerBypass(t *testing.T) {
 		PM:   "npm",
 		Args: []string{"install", "evil-pkg"},
 		Cwd:  tmp,
-		Env:  []string{"BOUNCER_BYPASS=1", "PATH=" + tmp + ":" + origPath},
+		Env:  []string{"VETO_BYPASS=1", "PATH=" + tmp + ":" + origPath},
 	}, fds))
 
 	resp, err := daemon.RecvResponse(client)
@@ -199,7 +199,7 @@ func TestDaemonHonorsBouncerBypass(t *testing.T) {
 	wg.Wait()
 
 	_, err = os.Stat(marker)
-	require.NoError(t, err, "BOUNCER_BYPASS=1 should have let fakeNpm run")
+	require.NoError(t, err, "VETO_BYPASS=1 should have let fakeNpm run")
 }
 
 func unixPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {

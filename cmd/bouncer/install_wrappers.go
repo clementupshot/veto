@@ -117,13 +117,26 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 		logger.Error().Err(err).Msg("discover wrap candidates")
 		return exitInternal
 	}
-	if len(candidates) == 0 {
-		fmt.Fprintln(os.Stderr, "bouncer install-wrappers: no candidate PM binaries found in known dirs.")
-		fmt.Fprintln(os.Stderr, "Pass --dir to add more discovery roots (homebrew, mise, asdf, etc. are checked by default).")
-		return exitOK
-	}
 
 	state, _ := loadWrapperState(cfg) // empty state is fine
+
+	// Empty candidates is ambiguous: either no PMs exist in known dirs
+	// (fresh machine, nothing to wrap), or everything's already wrapped
+	// from a prior install-wrappers run. Distinguish by consulting state.
+	if len(candidates) == 0 {
+		if existing := len(state.Wrappers); existing > 0 {
+			fmt.Printf("bouncer install-wrappers: %d wrapper%s already installed — nothing new to wrap.\n",
+				existing, pluralS(existing))
+			fmt.Println("Re-run after `brew upgrade` / `mise install` / `asdf install` to re-wrap binaries that toolchain")
+			fmt.Println("upgrades replaced. `bouncer doctor` will flag any wrapper that drifted.")
+			return exitOK
+		}
+		fmt.Fprintln(os.Stderr, "bouncer install-wrappers: no candidate PM binaries found in known dirs.")
+		fmt.Fprintln(os.Stderr, "Checked: /opt/homebrew/bin, /usr/local/bin, ~/.local/share/mise/installs/*/*/bin,")
+		fmt.Fprintln(os.Stderr, "         ~/.asdf/installs/*/*/bin, ~/.bun/bin.")
+		fmt.Fprintln(os.Stderr, "Pass --dir to add more discovery roots, or skip Layer 4 if no PMs are installed locally.")
+		return exitOK
+	}
 
 	stats := wrapperStats{}
 	for _, c := range candidates {
@@ -224,6 +237,13 @@ type wrapperFlags struct {
 	dryRun  bool
 	force   bool
 	verbose bool
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 type wrapperStats struct {

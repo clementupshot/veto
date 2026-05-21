@@ -58,37 +58,53 @@ func TestParseInstalls(t *testing.T) {
 
 func TestManifestRefs(t *testing.T) {
 	m := pdm.New()
-	pypRef := []packagemanager.ManifestRef{{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject}}
 
 	cases := []struct {
-		name string
-		args []string
-		want []packagemanager.ManifestRef
+		name     string
+		args     []string
+		wantNil  bool
+		wantPyp  bool
+		wantLock bool
 	}{
-		{
-			name: "non-install verb returns nil",
-			args: []string{"build"},
-			want: nil,
-		},
-		{
-			name: "pdm install emits pyproject ref",
-			args: []string{"install"},
-			want: pypRef,
-		},
-		{
-			name: "pdm sync emits pyproject ref",
-			args: []string{"sync"},
-			want: pypRef,
-		},
-		{
-			name: "pdm add with spec returns nil",
-			args: []string{"add", "requests"},
-			want: nil,
-		},
+		{name: "non-install verb returns nil", args: []string{"build"}, wantNil: true},
+		{name: "pdm install emits pyproject + pdm.lock refs", args: []string{"install"}, wantPyp: true, wantLock: true},
+		{name: "pdm sync emits pyproject + pdm.lock refs", args: []string{"sync"}, wantPyp: true, wantLock: true},
+		{name: "pdm add with spec emits pdm.lock ref only", args: []string{"add", "requests"}, wantLock: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, m.ManifestRefs(c.args))
+			got := m.ManifestRefs(c.args)
+			if c.wantNil {
+				require.Nil(t, got)
+				return
+			}
+			if c.wantPyp {
+				requireKindPdm(t, got, packagemanager.ManifestKindPyProject)
+			} else {
+				requireNotKindPdm(t, got, packagemanager.ManifestKindPyProject)
+			}
+			if c.wantLock {
+				requireKindPdm(t, got, packagemanager.ManifestKindPdmLock)
+			}
 		})
+	}
+}
+
+func requireKindPdm(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			return
+		}
+	}
+	t.Fatalf("expected ref of kind %q in %v", kind, refs)
+}
+
+func requireNotKindPdm(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			t.Fatalf("did not expect ref of kind %q in %v", kind, refs)
+		}
 	}
 }

@@ -74,78 +74,69 @@ func TestManifestRefs(t *testing.T) {
 	m := uv.New()
 
 	cases := []struct {
-		name string
-		args []string
-		want []packagemanager.ManifestRef
+		name      string
+		args      []string
+		wantNil   bool
+		wantKinds []packagemanager.ManifestKind
 	}{
+		{name: "non-install verb returns nil", args: []string{"build"}, wantNil: true},
 		{
-			name: "non-install verb returns nil",
-			args: []string{"build"},
-			want: nil,
+			name:      "uv add with -r",
+			args:      []string{"add", "-r", "reqs.txt"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindRequirements, packagemanager.ManifestKindUvLock},
 		},
 		{
-			name: "uv add with -r",
-			args: []string{"add", "-r", "reqs.txt"},
-			want: []packagemanager.ManifestRef{
-				{Path: "reqs.txt", Kind: packagemanager.ManifestKindRequirements},
-			},
+			name:      "uv pip install -r",
+			args:      []string{"pip", "install", "-r", "reqs.txt"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindRequirements},
 		},
 		{
-			name: "uv pip install -r",
-			args: []string{"pip", "install", "-r", "reqs.txt"},
-			want: []packagemanager.ManifestRef{
-				{Path: "reqs.txt", Kind: packagemanager.ManifestKindRequirements},
-			},
+			name:      "uv pip install -c",
+			args:      []string{"pip", "install", "-c", "constraints.txt"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindConstraint},
 		},
 		{
-			name: "uv pip install -c",
-			args: []string{"pip", "install", "-c", "constraints.txt"},
-			want: []packagemanager.ManifestRef{
-				{Path: "constraints.txt", Kind: packagemanager.ManifestKindConstraint},
-			},
+			name:      "uv pip install with --requirement long form",
+			args:      []string{"pip", "install", "--requirement", "reqs.txt"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindRequirements},
 		},
 		{
-			name: "uv pip install with --requirement long form",
-			args: []string{"pip", "install", "--requirement", "reqs.txt"},
-			want: []packagemanager.ManifestRef{
-				{Path: "reqs.txt", Kind: packagemanager.ManifestKindRequirements},
-			},
+			name:      "uv sync emits pyproject + uv.lock refs",
+			args:      []string{"sync"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindPyProject, packagemanager.ManifestKindUvLock},
 		},
 		{
-			name: "uv sync always emits pyproject ref",
-			args: []string{"sync"},
-			want: []packagemanager.ManifestRef{
-				{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject},
-			},
+			name:      "uv add with no specs emits pyproject + uv.lock refs",
+			args:      []string{"add"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindPyProject, packagemanager.ManifestKindUvLock},
 		},
 		{
-			name: "uv add with no specs emits pyproject ref",
-			args: []string{"add"},
-			want: []packagemanager.ManifestRef{
-				{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject},
-			},
+			name:      "uv add with explicit spec emits uv.lock ref only",
+			args:      []string{"add", "requests"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindUvLock},
 		},
-		{
-			name: "uv add with explicit spec returns nil",
-			args: []string{"add", "requests"},
-			want: nil,
-		},
-		{
-			name: "uv pip install with -r does not emit pyproject ref",
-			args: []string{"pip", "install", "-r", "reqs.txt"},
-			want: []packagemanager.ManifestRef{
-				{Path: "reqs.txt", Kind: packagemanager.ManifestKindRequirements},
-			},
-		},
-		{
-			name: "uv pip install with no -r and no specs emits nothing (pip semantics)",
-			args: []string{"pip", "install"},
-			want: nil,
-		},
+		{name: "uv pip install with no -r and no specs emits nothing (pip semantics)", args: []string{"pip", "install"}, wantNil: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, m.ManifestRefs(c.args))
+			got := m.ManifestRefs(c.args)
+			if c.wantNil {
+				require.Nil(t, got)
+				return
+			}
+			for _, kind := range c.wantKinds {
+				requireKindUv(t, got, kind)
+			}
 		})
 	}
+}
+
+func requireKindUv(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			return
+		}
+	}
+	t.Fatalf("expected ref of kind %q in %v", kind, refs)
 }

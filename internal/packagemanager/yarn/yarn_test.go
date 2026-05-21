@@ -58,32 +58,57 @@ func TestParseInstalls(t *testing.T) {
 
 func TestManifestRefs(t *testing.T) {
 	m := yarn.New()
-	pkgRef := []packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}
 
 	cases := []struct {
-		name string
-		args []string
-		want []packagemanager.ManifestRef
+		name      string
+		args      []string
+		wantNil   bool
+		wantPkg   bool // expect a package.json ref
+		wantLocks bool // expect the lockfile refs (always emitted for install verbs)
 	}{
-		{
-			name: "non-install verb returns nil",
-			args: []string{"run", "dev"},
-			want: nil,
-		},
-		{
-			name: "install with no specs emits package.json ref",
-			args: []string{"install"},
-			want: pkgRef,
-		},
-		{
-			name: "add with explicit specs returns nil",
-			args: []string{"add", "lodash"},
-			want: nil,
-		},
+		{name: "non-install verb returns nil", args: []string{"run", "dev"}, wantNil: true},
+		{name: "install with no specs emits package.json + lock refs", args: []string{"install"}, wantPkg: true, wantLocks: true},
+		{name: "add with explicit specs emits lock refs only", args: []string{"add", "lodash"}, wantLocks: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, m.ManifestRefs(c.args))
+			got := m.ManifestRefs(c.args)
+			if c.wantNil {
+				require.Nil(t, got)
+				return
+			}
+			if c.wantPkg {
+				requireKind(t, got, packagemanager.ManifestKindPackageJSON)
+			} else {
+				requireNotKind(t, got, packagemanager.ManifestKindPackageJSON)
+			}
+			if c.wantLocks {
+				// Each lockfile we know about must be referenced; the
+				// expander tolerates missing files at scan time.
+				requireKind(t, got, packagemanager.ManifestKindPackageLockJSON)
+				requireKind(t, got, packagemanager.ManifestKindPnpmLockYAML)
+				requireKind(t, got, packagemanager.ManifestKindYarnLock)
+				requireKind(t, got, packagemanager.ManifestKindNpmShrinkwrap)
+			}
 		})
+	}
+}
+
+func requireKind(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			return
+		}
+	}
+	t.Fatalf("expected ref of kind %q in %v", kind, refs)
+}
+
+func requireNotKind(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			t.Fatalf("did not expect ref of kind %q in %v", kind, refs)
+		}
 	}
 }

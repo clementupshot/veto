@@ -23,15 +23,28 @@ import (
 //   - "lodash@^4.17"                   → name + range (kept verbatim as version)
 //   - "@scope/pkg"                     → scoped, no version
 //   - "@scope/pkg@1.2.3"               → scoped + version
-//   - "./local", "../sibling", "/abs"  → local path → Local=true
-//   - "file:./local"                   → local file → Local=true
-//   - "git+https://...", "github:org/repo", "user/repo" → git → Local=true
+//   - "./local", "../sibling", "/abs"  → LocalPath=true
+//   - "file:./local"                   → LocalPath=true
+//   - "git+https://...", "github:org/repo", "user/repo",
+//     "https://x.com/pkg.tgz"          → OpaqueRemote=true
+//
+// LocalPath specs are unverifiable (no name in the intel store); the gate
+// passes them through by default. OpaqueRemote specs fetch code outside
+// the registry and are refused by default — set BOUNCER_ALLOW_OPAQUE=1 to
+// opt in. See gate.Policy.
 func Parse(spec string) packagemanager.Install {
-	if isLocalOrGitSpec(spec) {
+	if isLocalPathSpec(spec) {
 		return packagemanager.Install{
-			Ref:     intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: spec},
-			RawSpec: spec,
-			Local:   true,
+			Ref:       intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: spec},
+			RawSpec:   spec,
+			LocalPath: true,
+		}
+	}
+	if isOpaqueRemoteSpec(spec) {
+		return packagemanager.Install{
+			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: spec},
+			RawSpec:      spec,
+			OpaqueRemote: true,
 		}
 	}
 
@@ -42,15 +55,34 @@ func Parse(spec string) packagemanager.Install {
 	}
 }
 
-func isLocalOrGitSpec(spec string) bool {
+// isLocalPathSpec recognises filesystem-path specs that the gate cannot
+// look up but that don't fetch remote code on their own. `file:` URIs are
+// included even though they have a scheme — they reference a path on
+// this machine.
+func isLocalPathSpec(spec string) bool {
 	if spec == "" {
 		return false
 	}
 	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/") {
 		return true
 	}
+	if strings.HasPrefix(spec, "file:") {
+		return true
+	}
+	return false
+}
+
+// isOpaqueRemoteSpec recognises specs that pull code from outside the
+// registry: git refs (in any of npm's accepted forms), tarball URLs, and
+// the "user/repo" GitHub shorthand. These are refused by default because
+// upstream malware feeds can name them by URL / commit / tag and we'd
+// silently bypass the lookup if we treated them like local paths.
+func isOpaqueRemoteSpec(spec string) bool {
+	if spec == "" {
+		return false
+	}
 	for _, prefix := range []string{
-		"file:", "git+", "git://", "github:", "gist:", "bitbucket:", "gitlab:", "http://", "https://",
+		"git+", "git://", "github:", "gist:", "bitbucket:", "gitlab:", "http://", "https://",
 	} {
 		if strings.HasPrefix(spec, prefix) {
 			return true
@@ -58,7 +90,7 @@ func isLocalOrGitSpec(spec string) bool {
 	}
 	// "user/repo" shorthand: a slash without a leading @scope is a github
 	// shorthand in npm. We treat anything containing "/" and not starting
-	// with "@" as non-registry.
+	// with "@" as remote-fetching.
 	if !strings.HasPrefix(spec, "@") && strings.Contains(spec, "/") {
 		return true
 	}
@@ -112,19 +144,26 @@ func ParseInstallArgs(args []string, installVerbs map[string]struct{}, flagsTaki
 	return installs
 }
 
-// PackageJSONManifestRefs returns a single package.json ManifestRef when the
-// npm-family command would resolve its install set from the local manifest —
-// i.e. an install verb was given but no explicit package specs were named —
-// and nil otherwise.
+// PackageJSONManifestRefs returns ManifestRefs for both the package.json
+// manifest AND each lockfile we know about (package-lock.json,
+// npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock). The expander tolerates
+// missing files, so emitting all of them speculatively gives transitive
+// coverage without the parser having to know which PM is running.
 //
-// alwaysReadsManifest is the subset of install verbs that read the manifest
-// regardless of argv (npm's `ci`, pnpm/yarn `install` after a lockfile, etc.).
-// For verbs in this set the ref is emitted even when explicit specs were also
-// named, because the PM still consults the manifest first.
+// Refs are emitted in two cases:
 //
-// installVerbs and flagsTakingValues match the shape used by ParseInstallArgs
-// so callers stay internally consistent: a manifest ref is emitted exactly
-// when the gate would otherwise have nothing to look up.
+//  1. The verb is in alwaysReadsManifest (npm's `ci` and similar
+//     deterministic-from-lockfile verbs).
+//  2. The verb is an install verb with no explicit specs — the PM is
+//     going to derive its work from the local manifest + lockfile.
+//
+// When the user named explicit specs (`npm install foo`), the gate's
+// argv-driven lookup already covers them; we still emit lockfile refs so
+// the existing transitive tree on disk gets re-gated on every install
+// (strictly safer — a known-flagged transitive dep can't sit in the
+// lockfile unnoticed just because the user is installing something
+// unrelated). For pure performance, install-with-explicit-specs could
+// suppress lockfile expansion; we prefer the safety side here.
 func PackageJSONManifestRefs(
 	args []string,
 	installVerbs map[string]struct{},
@@ -138,12 +177,20 @@ func PackageJSONManifestRefs(
 	if _, isInstall := installVerbs[verb]; !isInstall {
 		return nil
 	}
+	lockRefs := []packagemanager.ManifestRef{
+		{Path: "package-lock.json", Kind: packagemanager.ManifestKindPackageLockJSON},
+		{Path: "npm-shrinkwrap.json", Kind: packagemanager.ManifestKindNpmShrinkwrap},
+		{Path: "pnpm-lock.yaml", Kind: packagemanager.ManifestKindPnpmLockYAML},
+		{Path: "yarn.lock", Kind: packagemanager.ManifestKindYarnLock},
+	}
 	if _, always := alwaysReadsManifest[verb]; always {
-		return []packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}
+		return append([]packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}, lockRefs...)
 	}
 	if specs := argv.CollectPositionalsWithTable(rest, flagsTakingValues); len(specs) > 0 {
-		// User named explicit specs; the gate already has work to do.
-		return nil
+		// User named explicit specs; gate them via argv. Still re-gate
+		// the on-disk lockfile so a known-flagged transitive doesn't
+		// hide there.
+		return lockRefs
 	}
-	return []packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}
+	return append([]packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}, lockRefs...)
 }

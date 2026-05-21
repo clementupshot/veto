@@ -120,6 +120,15 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 		refs = append(refs, packagemanager.ManifestRef{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject})
 	}
 
+	// Always emit the uv.lock ref when this is an install-shaped verb.
+	// The expander tolerates absence, so this is a no-op in directories
+	// without a lock — but in lockfile-using projects it surfaces the
+	// resolved transitive tree to the gate. Closes the transitive-dep
+	// gap that argv + pyproject expansion can't see by themselves.
+	if verb == "add" || verb == "sync" || verb == "install" {
+		refs = append(refs, packagemanager.ManifestRef{Path: "uv.lock", Kind: packagemanager.ManifestKindUvLock})
+	}
+
 	if len(refs) == 0 {
 		return nil
 	}

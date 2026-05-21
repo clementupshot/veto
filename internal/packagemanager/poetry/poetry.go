@@ -79,21 +79,33 @@ var pyprojectInstallVerbs = map[string]struct{}{
 	"update":  {},
 }
 
-// ManifestRefs implements packagemanager.PackageManager. Emits a pyproject.toml
-// ref for `poetry install` / `poetry update` (which derive their work from the
-// project manifest), so the gate's expander can read the file and gate its
-// direct dependencies.
+// ManifestRefs implements packagemanager.PackageManager. Emits both
+// pyproject.toml AND poetry.lock refs for install-shaped verbs. The
+// lockfile carries the resolved transitive tree; the manifest carries
+// the direct deps. Emitting both gives transitive coverage without the
+// parser having to know which file the user has on disk — the expander
+// returns nil, nil for missing files.
+//
+// pyproject.toml is emitted only when the user named no explicit specs
+// (preserving the original "explicit specs supersede manifest pull"
+// behavior for direct gating); poetry.lock is emitted unconditionally so
+// known-flagged transitives can't sit there unnoticed during e.g.
+// `poetry add new-thing`.
 func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 	verb, rest, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
 	if !ok {
 		return nil
 	}
-	if _, isInstall := pyprojectInstallVerbs[verb]; !isInstall {
+	if _, isInstall := installVerbs[verb]; !isInstall {
 		return nil
 	}
-	if specs := argv.CollectPositionalsWithTable(rest, flagsWithValues); len(specs) > 0 {
-		// Explicit specs supersede a manifest pull for these verbs in practice.
-		return nil
+	refs := []packagemanager.ManifestRef{
+		{Path: "poetry.lock", Kind: packagemanager.ManifestKindPoetryLock},
 	}
-	return []packagemanager.ManifestRef{{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject}}
+	if _, derivesFromPyProject := pyprojectInstallVerbs[verb]; derivesFromPyProject {
+		if specs := argv.CollectPositionalsWithTable(rest, flagsWithValues); len(specs) == 0 {
+			refs = append(refs, packagemanager.ManifestRef{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject})
+		}
+	}
+	return refs
 }

@@ -81,10 +81,12 @@ var pyprojectInstallVerbs = map[string]struct{}{
 	"update":  {},
 }
 
-// ManifestRefs implements packagemanager.PackageManager. Emits a pyproject.toml
-// ref for `pdm install` / `pdm sync` and for `pdm add` / `pdm update` only
-// when called without explicit specs, so the gate's expander can read the
-// file and gate its direct dependencies.
+// ManifestRefs implements packagemanager.PackageManager. Emits pdm.lock
+// unconditionally for install-shaped verbs (so the resolved transitive
+// tree gets gated even when the user names an explicit add target);
+// emits pyproject.toml only when no explicit specs were given (preserving
+// the "explicit specs supersede manifest pull" behavior for direct
+// gating). The expander tolerates absence of either file.
 func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 	verb, rest, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
 	if !ok {
@@ -93,8 +95,11 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 	if _, isInstall := pyprojectInstallVerbs[verb]; !isInstall {
 		return nil
 	}
-	if specs := argv.CollectPositionalsWithTable(rest, flagsWithValues); len(specs) > 0 {
-		return nil
+	refs := []packagemanager.ManifestRef{
+		{Path: "pdm.lock", Kind: packagemanager.ManifestKindPdmLock},
 	}
-	return []packagemanager.ManifestRef{{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject}}
+	if specs := argv.CollectPositionalsWithTable(rest, flagsWithValues); len(specs) == 0 {
+		refs = append(refs, packagemanager.ManifestRef{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject})
+	}
+	return refs
 }

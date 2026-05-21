@@ -58,37 +58,53 @@ func TestParseInstalls(t *testing.T) {
 
 func TestManifestRefs(t *testing.T) {
 	m := poetry.New()
-	pypRef := []packagemanager.ManifestRef{{Path: "pyproject.toml", Kind: packagemanager.ManifestKindPyProject}}
 
 	cases := []struct {
-		name string
-		args []string
-		want []packagemanager.ManifestRef
+		name     string
+		args     []string
+		wantNil  bool
+		wantPyp  bool
+		wantLock bool
 	}{
-		{
-			name: "non-install verb returns nil",
-			args: []string{"shell"},
-			want: nil,
-		},
-		{
-			name: "poetry install emits pyproject ref",
-			args: []string{"install"},
-			want: pypRef,
-		},
-		{
-			name: "poetry update emits pyproject ref",
-			args: []string{"update"},
-			want: pypRef,
-		},
-		{
-			name: "poetry add with spec returns nil (no manifest pull)",
-			args: []string{"add", "requests"},
-			want: nil,
-		},
+		{name: "non-install verb returns nil", args: []string{"shell"}, wantNil: true},
+		{name: "poetry install emits pyproject + poetry.lock refs", args: []string{"install"}, wantPyp: true, wantLock: true},
+		{name: "poetry update emits pyproject + poetry.lock refs", args: []string{"update"}, wantPyp: true, wantLock: true},
+		{name: "poetry add with spec emits poetry.lock ref only", args: []string{"add", "requests"}, wantLock: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, m.ManifestRefs(c.args))
+			got := m.ManifestRefs(c.args)
+			if c.wantNil {
+				require.Nil(t, got)
+				return
+			}
+			if c.wantPyp {
+				requireKindPoetry(t, got, packagemanager.ManifestKindPyProject)
+			} else {
+				requireNotKindPoetry(t, got, packagemanager.ManifestKindPyProject)
+			}
+			if c.wantLock {
+				requireKindPoetry(t, got, packagemanager.ManifestKindPoetryLock)
+			}
 		})
+	}
+}
+
+func requireKindPoetry(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			return
+		}
+	}
+	t.Fatalf("expected ref of kind %q in %v", kind, refs)
+}
+
+func requireNotKindPoetry(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			t.Fatalf("did not expect ref of kind %q in %v", kind, refs)
+		}
 	}
 }

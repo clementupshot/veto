@@ -16,8 +16,10 @@
 //     ignored, package emitted (over-include conditional deps; the bouncer
 //     is a safety check, not a resolver)
 //
-// Local paths and URLs are flagged Local=true and pass through to the gate
-// for policy-driven handling.
+// Local filesystem paths are flagged LocalPath=true; remote URLs and git
+// refs are flagged OpaqueRemote=true. The gate's policy decides whether
+// to pass each through (LocalPath default true) or refuse
+// (OpaqueRemote default false; set BOUNCER_ALLOW_OPAQUE=1 to opt in).
 package pyspec
 
 import (
@@ -33,14 +35,22 @@ import (
 var operators = []string{"===", "==", ">=", "<=", "~=", "!=", ">", "<"}
 
 // Parse turns a single command-line spec into an Install for the PyPI
-// ecosystem. Local paths and URLs are marked Local=true.
+// ecosystem. Filesystem paths set LocalPath=true; remote URLs and git
+// refs set OpaqueRemote=true. See package doc for policy semantics.
 func Parse(spec string) packagemanager.Install {
 	raw := spec
-	if isLocalOrURL(spec) {
+	if isLocalPathSpec(spec) {
 		return packagemanager.Install{
-			Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: spec},
-			RawSpec: raw,
-			Local:   true,
+			Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: spec},
+			RawSpec:   raw,
+			LocalPath: true,
+		}
+	}
+	if isOpaqueRemoteSpec(spec) {
+		return packagemanager.Install{
+			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: spec},
+			RawSpec:      raw,
+			OpaqueRemote: true,
 		}
 	}
 
@@ -67,13 +77,23 @@ func Parse(spec string) packagemanager.Install {
 	}
 }
 
-// isLocalOrURL reports whether spec is a file path or URL rather than a
-// PyPI-name spec.
-func isLocalOrURL(spec string) bool {
+// isLocalPathSpec reports whether spec is a filesystem path the gate
+// can't look up but that doesn't fetch remote code on its own.
+func isLocalPathSpec(spec string) bool {
 	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/") {
 		return true
 	}
-	for _, p := range []string{"file:", "git+", "http://", "https://"} {
+	if strings.HasPrefix(spec, "file:") {
+		return true
+	}
+	return false
+}
+
+// isOpaqueRemoteSpec reports whether spec is a remote URL or git
+// reference. These pull code from outside PyPI and are refused by
+// default; BOUNCER_ALLOW_OPAQUE=1 opts each one through.
+func isOpaqueRemoteSpec(spec string) bool {
+	for _, p := range []string{"git+", "http://", "https://"} {
 		if strings.HasPrefix(spec, p) {
 			return true
 		}

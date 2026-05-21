@@ -27,10 +27,21 @@ type Install struct {
 	// diagnostics so users can correlate a block to what they typed.
 	RawSpec string
 
-	// Local indicates a file-path or git-ref spec we cannot meaningfully look
-	// up against a name-keyed intel store. The gate may treat these as
-	// allow-with-warning rather than refuse outright.
-	Local bool
+	// LocalPath is a filesystem-relative or absolute path spec
+	// (`./pkg`, `/abs/pkg`, `file:./pkg`). The intel store is name-keyed,
+	// so we can't look these up — the gate's policy decides whether to
+	// pass them through (default true) or refuse (`AllowLocalPath=false`).
+	LocalPath bool
+
+	// OpaqueRemote is a URL/git/tarball/github-shorthand spec
+	// (`git+https://...`, `https://x.com/pkg.tgz`, `github:user/repo`,
+	// `user/repo`). These fetch code from outside the registry and so
+	// can't be name-keyed-looked-up either, but unlike LocalPath they
+	// can carry malware payloads named in upstream intel by URL or
+	// commit hash. The gate refuses these by default
+	// (`AllowOpaqueRemote=false`); set `BOUNCER_ALLOW_OPAQUE=1` to opt
+	// each one through.
+	OpaqueRemote bool
 }
 
 // ManifestKind tags a ManifestRef so the gate's expander can dispatch on it.
@@ -58,6 +69,42 @@ const (
 	// as ManifestKindPackageJSON: install verbs that derive their work from the
 	// local manifest (`poetry install`, `uv sync`, `pdm install`).
 	ManifestKindPyProject ManifestKind = "pyproject.toml"
+
+	// Lockfile kinds — the resolved, version-pinned, transitively-complete
+	// tree that the package manager will actually install. Gating against
+	// the lockfile is the closest thing bouncer can do to "gate every
+	// transitive dependency" without running the resolver itself: the PM
+	// already wrote the answer to disk.
+	//
+	// Each kind is emitted alongside the manifest kind for install verbs
+	// that consult either. The expander returns nil, nil when the file is
+	// missing, so PMs can safely emit both refs without coordinating.
+
+	// ManifestKindPackageLockJSON is npm's package-lock.json. Covers
+	// lockfileVersion 2 (npm 7+) and 3 (npm 9+) — earlier nested-dependency
+	// schemas degrade to direct-deps-only.
+	ManifestKindPackageLockJSON ManifestKind = "package-lock.json"
+
+	// ManifestKindNpmShrinkwrap is npm-shrinkwrap.json, package-lock.json's
+	// older sibling. Same schema; emitted in case projects pin via shrinkwrap.
+	ManifestKindNpmShrinkwrap ManifestKind = "npm-shrinkwrap.json"
+
+	// ManifestKindPnpmLockYAML is pnpm-lock.yaml. Schema versions 5 through
+	// 9 are recognised; older versions degrade gracefully.
+	ManifestKindPnpmLockYAML ManifestKind = "pnpm-lock.yaml"
+
+	// ManifestKindYarnLock is yarn.lock (yarn classic / v1). Yarn 2+
+	// ("berry") uses a different schema; gating against it is best-effort.
+	ManifestKindYarnLock ManifestKind = "yarn.lock"
+
+	// ManifestKindUvLock is uv's uv.lock (TOML).
+	ManifestKindUvLock ManifestKind = "uv.lock"
+
+	// ManifestKindPoetryLock is poetry's poetry.lock (TOML).
+	ManifestKindPoetryLock ManifestKind = "poetry.lock"
+
+	// ManifestKindPdmLock is pdm's pdm.lock (TOML).
+	ManifestKindPdmLock ManifestKind = "pdm.lock"
 )
 
 // ManifestRef is a parser-extracted pointer to an on-disk manifest the gate

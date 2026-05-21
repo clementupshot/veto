@@ -75,10 +75,17 @@ func TestParseInstalls(t *testing.T) {
 			},
 		},
 		{
-			name: "local path marked Local",
+			name: "local filesystem path marked LocalPath",
 			args: []string{"install", "./local-pkg"},
 			want: []packagemanager.Install{
-				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local-pkg"}, RawSpec: "./local-pkg", Local: true},
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local-pkg"}, RawSpec: "./local-pkg", LocalPath: true},
+			},
+		},
+		{
+			name: "tarball URL marked OpaqueRemote",
+			args: []string{"install", "https://example.com/x.tgz"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "https://example.com/x.tgz"}, RawSpec: "https://example.com/x.tgz", OpaqueRemote: true},
 			},
 		},
 		{
@@ -145,47 +152,58 @@ func TestParseInstalls(t *testing.T) {
 
 func TestManifestRefs(t *testing.T) {
 	m := npm.New()
-	pkgRef := []packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}
 
 	cases := []struct {
-		name string
-		args []string
-		want []packagemanager.ManifestRef
+		name      string
+		args      []string
+		wantNil   bool
+		wantPkg   bool
+		wantLocks bool
 	}{
-		{
-			name: "non-install verb returns nil",
-			args: []string{"run", "dev"},
-			want: nil,
-		},
-		{
-			name: "install with no specs emits package.json ref",
-			args: []string{"install"},
-			want: pkgRef,
-		},
-		{
-			name: "i alias with no specs emits package.json ref",
-			args: []string{"i"},
-			want: pkgRef,
-		},
-		{
-			name: "install with explicit specs returns nil",
-			args: []string{"install", "lodash"},
-			want: nil,
-		},
-		{
-			name: "ci always reads from lockfile/manifest",
-			args: []string{"ci"},
-			want: pkgRef,
-		},
-		{
-			name: "install with flags but no specs still emits ref",
-			args: []string{"install", "--save-dev"},
-			want: pkgRef,
-		},
+		{name: "non-install verb returns nil", args: []string{"run", "dev"}, wantNil: true},
+		{name: "install with no specs emits package.json + lockfile refs", args: []string{"install"}, wantPkg: true, wantLocks: true},
+		{name: "i alias with no specs emits package.json + lockfile refs", args: []string{"i"}, wantPkg: true, wantLocks: true},
+		{name: "install with explicit specs emits lockfile refs only", args: []string{"install", "lodash"}, wantLocks: true},
+		{name: "ci always reads manifest + lockfile", args: []string{"ci"}, wantPkg: true, wantLocks: true},
+		{name: "install with flags but no specs still emits manifest+lockfile refs", args: []string{"install", "--save-dev"}, wantPkg: true, wantLocks: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, m.ManifestRefs(c.args))
+			got := m.ManifestRefs(c.args)
+			if c.wantNil {
+				require.Nil(t, got)
+				return
+			}
+			if c.wantPkg {
+				requireKind(t, got, packagemanager.ManifestKindPackageJSON)
+			} else {
+				requireNotKind(t, got, packagemanager.ManifestKindPackageJSON)
+			}
+			if c.wantLocks {
+				requireKind(t, got, packagemanager.ManifestKindPackageLockJSON)
+				requireKind(t, got, packagemanager.ManifestKindPnpmLockYAML)
+				requireKind(t, got, packagemanager.ManifestKindYarnLock)
+				requireKind(t, got, packagemanager.ManifestKindNpmShrinkwrap)
+			}
 		})
+	}
+}
+
+func requireKind(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			return
+		}
+	}
+	t.Fatalf("expected ref of kind %q in %v", kind, refs)
+}
+
+func requireNotKind(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
+	t.Helper()
+	for _, r := range refs {
+		if r.Kind == kind {
+			t.Fatalf("did not expect ref of kind %q in %v", kind, refs)
+		}
 	}
 }

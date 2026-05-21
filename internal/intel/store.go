@@ -78,10 +78,23 @@ var _ Store = (*memStore)(nil)
 // Lookup implements Store. Semantics:
 //
 //   - ref.Version == "":   unpinned install. Returns every report against any
-//     version of the package — the user is implicitly accepting whatever
-//     version resolves, so any flagged version is a hit.
+//     version of the package.
 //   - ref.Version != "":   pinned install. Returns reports for that exact
-//     version, plus any "all versions" reports (those stored with Version="").
+//     version, AND any other report for the same name — every source we
+//     ingest is malware-only, so a name match at any version is a hit.
+//
+// Why name-match wins regardless of recorded version: aikido / openssf /
+// osv / pypa entries assert "this package name is malicious." The
+// Version field on the report is the version the source happened to
+// sample, not "only this version is bad." Treating a different-version
+// query as a miss would let an attacker republish the same name under a
+// new version and bypass the gate; a lockfile pinning a version the
+// source didn't sample would also slip through. We refuse on name.
+//
+// If a future source introduces version-specific non-malware advisories,
+// this policy must be revisited — but every source today is malware-only
+// (filtered to MAL-* IDs / aikido's malware feed), so name = refuse is
+// the right default.
 func (s *memStore) Lookup(ref PackageRef) Verdict {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -95,16 +108,26 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 		return verdict
 	}
 
+	// Exact-version hits go first so their position in the verdict
+	// reflects "this is the version the upstream feed flagged."
+	exactVersionHits := map[*MalwareReport]struct{}{}
 	if reports, ok := s.byVersion[versionKey{ref.Ecosystem, ref.Name, ref.Version}]; ok {
-		verdict.Reports = append(verdict.Reports, reports...)
+		for i := range reports {
+			verdict.Reports = append(verdict.Reports, reports[i])
+			exactVersionHits[&reports[i]] = struct{}{}
+		}
 	}
-	// "all versions of this package" reports (stored with empty Version on
-	// the report itself) live only in byName; pick them up too.
+	// Name-match: include every other report for this name. Dedups
+	// against the exact-version hits above by report identity so a
+	// single entry doesn't appear twice in the refusal output.
 	if reports, ok := s.byName[nameKey{ref.Ecosystem, ref.Name}]; ok {
-		for _, r := range reports {
-			if r.Version == "" {
-				verdict.Reports = append(verdict.Reports, r)
+		for i := range reports {
+			r := reports[i]
+			if r.Version == ref.Version {
+				// This is an exact-version hit; already counted above.
+				continue
 			}
+			verdict.Reports = append(verdict.Reports, r)
 		}
 	}
 

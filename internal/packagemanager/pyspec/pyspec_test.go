@@ -113,30 +113,39 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
-			name: "local path marked Local",
+			name: "local filesystem path marked LocalPath",
 			spec: "./vendor/wheel",
 			want: packagemanager.Install{
-				Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "./vendor/wheel"},
-				RawSpec: "./vendor/wheel",
-				Local:   true,
+				Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "./vendor/wheel"},
+				RawSpec:   "./vendor/wheel",
+				LocalPath: true,
 			},
 		},
 		{
-			name: "git URL marked Local",
+			name: "git URL marked OpaqueRemote",
 			spec: "git+https://github.com/foo/bar.git",
 			want: packagemanager.Install{
-				Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "git+https://github.com/foo/bar.git"},
-				RawSpec: "git+https://github.com/foo/bar.git",
-				Local:   true,
+				Ref:          intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "git+https://github.com/foo/bar.git"},
+				RawSpec:      "git+https://github.com/foo/bar.git",
+				OpaqueRemote: true,
 			},
 		},
 		{
-			name: "absolute path marked Local",
+			name: "absolute path marked LocalPath",
 			spec: "/abs/path/to/wheel",
 			want: packagemanager.Install{
-				Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "/abs/path/to/wheel"},
-				RawSpec: "/abs/path/to/wheel",
-				Local:   true,
+				Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "/abs/path/to/wheel"},
+				RawSpec:   "/abs/path/to/wheel",
+				LocalPath: true,
+			},
+		},
+		{
+			name: "https tarball URL marked OpaqueRemote",
+			spec: "https://example.com/wheels/foo-1.0.tar.gz",
+			want: packagemanager.Install{
+				Ref:          intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "https://example.com/wheels/foo-1.0.tar.gz"},
+				RawSpec:      "https://example.com/wheels/foo-1.0.tar.gz",
+				OpaqueRemote: true,
 			},
 		},
 		{

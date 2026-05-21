@@ -85,10 +85,23 @@ func (NopExpander) Expand(_ packagemanager.ManifestRef) ([]packagemanager.Instal
 
 // Policy configures gate behavior.
 type Policy struct {
-	// AllowLocal: when true, Installs marked Local (file paths, git URLs) are
-	// passed through without an intel lookup — there is nothing to look up by
-	// name. When false, the gate refuses local installs as well.
-	AllowLocal bool
+	// AllowLocalPath: when true, Installs marked LocalPath (filesystem
+	// paths like `./pkg` or `/abs/pkg`) pass through without an intel
+	// lookup — there is nothing to look up by name. When false, the gate
+	// refuses local filesystem installs as well. Default true.
+	AllowLocalPath bool
+
+	// AllowOpaqueRemote: when true, Installs marked OpaqueRemote (URL,
+	// git, tarball, or `user/repo` GitHub shorthand) pass through. When
+	// false (the default), they are refused — because upstream malware
+	// feeds CAN flag these by URL or commit hash, and silently passing
+	// them through would be a fail-OPEN. The CLI surfaces this as
+	// BOUNCER_ALLOW_OPAQUE=1 for opt-in.
+	//
+	// Refusal is reported through a synthetic intel.Verdict with
+	// SourceID="bouncer-policy" so the existing refusal-printing code
+	// renders it the same as a malware-driven refusal.
+	AllowOpaqueRemote bool
 
 	// ManifestExpander turns ManifestRefs (e.g. `-r requirements.txt`) into
 	// additional Install records before lookup. Defaults to NopExpander so
@@ -96,11 +109,17 @@ type Policy struct {
 	ManifestExpander ManifestExpander
 }
 
-// DefaultPolicy returns a Policy with sensible defaults: local installs pass
-// and manifest expansion is a no-op (callers wire in pyreq.Expander to enable
-// requirements.txt gating).
+// DefaultPolicy returns a Policy with the project's chosen defaults:
+//   - LocalPath installs pass (no intel to look up; the user explicitly
+//     pointed at a path they control)
+//   - OpaqueRemote installs are REFUSED (URL/git/tarball/github-shorthand
+//     bypass the registry and can carry payloads named in upstream
+//     intel; refusing by default closes a fail-OPEN that previously let
+//     `npm install https://evil.com/pkg.tgz` slip through)
+//   - Manifest expansion is a no-op (callers wire in pyreq.Expander etc.
+//     to enable requirements.txt gating).
 func DefaultPolicy() Policy {
-	return Policy{AllowLocal: true, ManifestExpander: NopExpander{}}
+	return Policy{AllowLocalPath: true, AllowOpaqueRemote: false, ManifestExpander: NopExpander{}}
 }
 
 // Gate evaluates Installs against an intel store under a policy.
@@ -191,11 +210,30 @@ func (g *Gate) Evaluate(installs []packagemanager.Install, manifestRefs ...packa
 
 	decision := Decision{Outcome: OutcomeAllow}
 	for _, ins := range expanded {
-		if ins.Local {
-			// Empty-name local lookups are meaningless against a name-keyed store.
-			if g.policy.AllowLocal {
+		// Opaque remote specs (URL / git / tarball / github-shorthand)
+		// are refused by default. Synthesize a Verdict so the existing
+		// printer renders the refusal alongside any malware findings.
+		if ins.OpaqueRemote {
+			if !g.policy.AllowOpaqueRemote {
+				decision.Verdicts = append(decision.Verdicts, policyRefusalVerdict(ins,
+					"opaque-spec install refused: URL/git/tarball specs bypass the package "+
+						"registry and can carry payloads. Set BOUNCER_ALLOW_OPAQUE=1 to override "+
+						"after independently verifying the source."))
+				decision.Outcome = OutcomeRefuse
 				continue
 			}
+			// Allow-opaque: passthrough; no name to look up.
+			continue
+		}
+		if ins.LocalPath {
+			// Empty-name local lookups are meaningless against a name-keyed store.
+			if g.policy.AllowLocalPath {
+				continue
+			}
+			decision.Verdicts = append(decision.Verdicts, policyRefusalVerdict(ins,
+				"local-path install refused: AllowLocalPath is disabled."))
+			decision.Outcome = OutcomeRefuse
+			continue
 		}
 		verdict := g.store.Lookup(ins.Ref)
 		decision.Verdicts = append(decision.Verdicts, verdict)
@@ -204,4 +242,21 @@ func (g *Gate) Evaluate(installs []packagemanager.Install, manifestRefs ...packa
 		}
 	}
 	return decision
+}
+
+// policyRefusalVerdict synthesizes a Verdict that the gate's printer can
+// render identically to a malware-flag refusal. SourceID "bouncer-policy"
+// is the only non-upstream identifier the printer encounters; reserving
+// the name here keeps it from colliding with a real intel source.
+func policyRefusalVerdict(ins packagemanager.Install, reason string) intel.Verdict {
+	return intel.Verdict{
+		Ref: ins.Ref,
+		Reports: []intel.MalwareReport{
+			{
+				PackageRef: ins.Ref,
+				SourceID:   "bouncer-policy",
+				Reason:     reason,
+			},
+		},
+	}
 }

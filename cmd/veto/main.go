@@ -484,7 +484,10 @@ func buildStore(logger zerolog.Logger, cfg config) (intel.Store, error) {
 	if len(sources) == 0 {
 		return nil, errors.New("no usable sources configured")
 	}
-	return intel.NewStore(logger, sources...), nil
+	return intel.NewStore(logger,
+		intel.WithSources(sources...),
+		intel.WithCacheDir(cfg.CacheDir),
+	), nil
 }
 
 func buildSource(logger zerolog.Logger, cfg config, id string) (intel.Source, error) {

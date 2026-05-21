@@ -29,7 +29,7 @@ func (f fakeSource) Fetch(_ context.Context, eco intel.Ecosystem) ([]intel.Malwa
 
 func buildStore(t *testing.T, reports ...intel.MalwareReport) intel.Store {
 	t.Helper()
-	store := intel.NewStore(zerolog.Nop(), fakeSource{reports: reports})
+	store := intel.NewStore(zerolog.Nop(), intel.WithSources(fakeSource{reports: reports}))
 	require.NoError(t, store.Refresh(context.Background()))
 	return store
 }

@@ -36,7 +36,7 @@ func (f daemonFakeSource) Fetch(_ context.Context, eco intel.Ecosystem) ([]intel
 
 func buildTestStore(t *testing.T, reports ...intel.MalwareReport) intel.Store {
 	t.Helper()
-	store := intel.NewStore(zerolog.Nop(), daemonFakeSource{reports: reports})
+	store := intel.NewStore(zerolog.Nop(), intel.WithSources(daemonFakeSource{reports: reports}))
 	require.NoError(t, store.Refresh(context.Background()))
 	return store
 }

@@ -247,8 +247,26 @@ these):
   count cratering between refreshes (e.g. an MITM dropping Aikido's
   response, an upstream wedge) triggers per-bucket retention — the
   previous fetch's slice stays in the index instead of being silently
-  replaced with a near-empty one. Threshold defaults to 50%; warn
-  logs name the source.
+  replaced with a near-empty one. Threshold defaults to 50% of the
+  bucket's all-time-high count (not the previous count), so an
+  attacker who can repeatedly halve the feed cannot threshold-camp
+  the index toward zero. Warn logs name the source.
+
+  **Negative trade-off, mitigated:** retention converts a LOUD
+  failure mode (empty refresh → minHealthyReportCount floor →
+  refusal) into a SILENT one for transient outages. To prevent that
+  silence from becoming permanent stale-pinning under sustained MITM,
+  buckets retained for longer than `MaxRetentionAge` (7 days) are
+  REFUSED on the next failed refresh — they fall back to the LOUD
+  path and surface as a fetch error. The per-bucket freshness state
+  (last-fresh-fetch + historical-max counts) is persisted to
+  `<cache_dir>/intel-baseline.json` so the cap survives a daemon
+  restart and closes the cold-start MITM window. `veto doctor`
+  emits a `intel bucket:<source>/<ecosystem>` row per bucket retained
+  more than 24h, with WARN under MaxRetentionAge and FAIL past it —
+  the operator-visible signal that distinguishes "fresh data" from
+  "stale-retained data" the aggregated `intel store size` line
+  cannot.
 - **Oversized intel payload**: any single feed body exceeding its
   per-source size cap (256 MiB for aikido/osv, 512 MiB for
   openssf/pypa) is rejected for that refresh — a compromised upstream

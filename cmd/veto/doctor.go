@@ -615,6 +615,43 @@ func checkIntel(logger zerolog.Logger, cfg config) []checkResult {
 			})
 		}
 	}
+
+	// Per-bucket retention surface. The retention pipeline can keep a
+	// bucket alive across many refreshes when its upstream is wedged;
+	// without this surface, an operator running doctor sees "intel
+	// store size: ok" and cannot distinguish "fresh data" from "data
+	// retained from a week ago after the upstream went dark." Emit a
+	// row per bucket that is older than 24h (PASS rows would clutter
+	// the output without adding signal — the aggregate freshness line
+	// above covers the everything-is-fresh case) and flag any bucket
+	// past MaxRetentionAge as the LOUD failure mode the retention cap
+	// guarantees on the NEXT failed refresh.
+	const staleWarnAge = 24 * time.Hour
+	for _, b := range store.BucketStatus() {
+		if b.LastRefreshedAt.IsZero() || b.RetainedFor < staleWarnAge {
+			continue
+		}
+		label := fmt.Sprintf("intel bucket:%s/%s", b.SourceID, b.Ecosystem)
+		switch {
+		case b.IsStale:
+			out = append(out, checkResult{
+				status: statusFail,
+				label:  label,
+				detail: fmt.Sprintf("retained for %s (last fresh fetch %s); past MaxRetentionAge — next failed refresh will surface this",
+					b.RetainedFor.Round(time.Hour), b.LastRefreshedAt.Format(time.RFC3339)),
+				howToFix: "Investigate the upstream feed; this bucket has not received a successful refresh in over " +
+					intel.MaxRetentionAge.String() + ".",
+			})
+		default:
+			out = append(out, checkResult{
+				status: statusWarn,
+				label:  label,
+				detail: fmt.Sprintf("retained for %s (last fresh fetch %s); within MaxRetentionAge",
+					b.RetainedFor.Round(time.Hour), b.LastRefreshedAt.Format(time.RFC3339)),
+				howToFix: "Run `veto sync` and check that the upstream feed is reachable.",
+			})
+		}
+	}
 	return out
 }
 

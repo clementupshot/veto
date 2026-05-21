@@ -622,12 +622,22 @@ func (s *memStore) applyRetention(
 			// signal — L4 in the audit.
 			if prevReports, ok := prev[r.key]; ok {
 				if retainOrRefuse(r.key, prevReports, "fetch failed") {
+					msg := "source fetch failed; retaining previous data"
+					if len(prevReports) == 0 {
+						// L4: distinguish "we had no entries last time"
+						// from "we had data and are pinning it." The
+						// former is real state — the upstream once told
+						// us this (source, ecosystem) tuple is empty
+						// — and dropping it would force re-confirmation
+						// at the next refresh.
+						msg = "source fetch failed; preserving acknowledged-empty bucket"
+					}
 					s.logger.Warn().
 						Err(r.err).
 						Str("source", r.key.SourceID).
 						Str("ecosystem", string(r.key.Ecosystem)).
 						Int("retained_reports", len(prevReports)).
-						Msg("source fetch failed; retaining previous data")
+						Msg(msg)
 					continue
 				}
 				// Retention refused for staleness. Fall through to
@@ -637,7 +647,7 @@ func (s *memStore) applyRetention(
 					Err(r.err).
 					Str("source", r.key.SourceID).
 					Str("ecosystem", string(r.key.Ecosystem)).
-					Msg("source fetch failed; no previous data to retain")
+					Msg("source fetch failed; no prior fetch recorded — nothing to retain")
 			}
 			fetchErrs = append(fetchErrs,
 				errors.With(r.err, "fetch failed").

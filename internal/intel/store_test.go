@@ -502,6 +502,108 @@ type fakeClock struct {
 
 func (c *fakeClock) Now() time.Time { return c.now }
 
+// TestStoreRefreshThresholdBoundaries (L1) walks the exact-50% boundary
+// across a range of historicalMax values to confirm the integer-rational
+// form `newCount * den < num * baseline` rejects exactly the
+// `newCount < baseline/2` cases without float truncation.
+//
+// Mutation-resistance: the prior `int(prevCount * 0.5)` form returns 0
+// at baseline=1, so a drop to 0 silently passed. The table-driven cases
+// at baseline=1, 2, 3 detect that regression.
+func TestStoreRefreshThresholdBoundaries(t *testing.T) {
+	logger := zerolog.Nop()
+	makeReports := func(n int) []intel.MalwareReport {
+		out := make([]intel.MalwareReport, n)
+		for i := range out {
+			out[i] = intel.MalwareReport{
+				PackageRef: intel.PackageRef{
+					Ecosystem: intel.EcosystemNPM,
+					Name:      "evil-" + string(rune('a'+i%26)) + string(rune('a'+i/26)),
+					Version:   "1",
+				},
+				SourceID: "alpha",
+			}
+		}
+		return out
+	}
+	cases := []struct {
+		baseline int
+		newCount int
+		retain   bool // true means previous-data retained
+	}{
+		{1, 0, true},    // L1 regression: under float form newCount<0.5 is never true; integer form rejects
+		{2, 0, true},    // 0 < 1
+		{2, 1, false},   // exact 50% accepted (boundary inclusive)
+		{3, 1, true},    // 2<3
+		{3, 2, false},   // 4>=3
+		{5, 2, true},    // 4<5
+		{5, 3, false},   // 6>=5
+		{10, 4, true},   // 8<10
+		{10, 5, false},  // 10>=10 (50% accepted)
+		{100, 49, true}, // 98<100
+		{100, 50, false},
+		{1000, 499, true},
+		{1000, 500, false},
+	}
+	for _, tc := range cases {
+		src := &programmableSource{
+			id: "alpha",
+			fixtures: []programmableFixture{
+				{per: map[intel.Ecosystem][]intel.MalwareReport{intel.EcosystemNPM: makeReports(tc.baseline)}},
+				{per: map[intel.Ecosystem][]intel.MalwareReport{intel.EcosystemNPM: makeReports(tc.newCount)}},
+			},
+		}
+		store := intel.NewStore(logger, intel.WithSources(src))
+		require.NoError(t, store.Refresh(context.Background()))
+		require.NoError(t, store.Refresh(context.Background()))
+		got := store.ReportCount()
+		want := tc.newCount
+		if tc.retain {
+			want = tc.baseline
+		}
+		require.Equalf(t, want, got,
+			"baseline=%d new=%d: expected retain=%v (count=%d) got count=%d",
+			tc.baseline, tc.newCount, tc.retain, want, got)
+	}
+}
+
+// TestStoreRefreshRetainsAcknowledgedEmptyBucket (L4): an empty
+// previous-fetch bucket (the upstream told us "no entries here") must
+// be RETAINED on a subsequent fetch error rather than dropped — the
+// "we knew it was empty" signal is real state and discarding it
+// forces re-confirmation at the next refresh.
+func TestStoreRefreshRetainsAcknowledgedEmptyBucket(t *testing.T) {
+	logger := zerolog.Nop()
+	// Use a source that returns an empty slice for NPM but an error
+	// on the second refresh.
+	src := &programmableSource{
+		id: "alpha",
+		fixtures: []programmableFixture{
+			{per: map[intel.Ecosystem][]intel.MalwareReport{intel.EcosystemNPM: {}}},
+			{err: map[intel.Ecosystem]error{intel.EcosystemNPM: context.DeadlineExceeded}},
+		},
+	}
+	store := intel.NewStore(logger, intel.WithSources(src))
+	require.NoError(t, store.Refresh(context.Background()))
+	require.Equal(t, 0, store.ReportCount(), "refresh 1 produced an empty bucket")
+
+	// Refresh 2 errors for npm. With L4 the empty bucket is retained;
+	// without L4 the bucket would be removed and the next refresh
+	// would need to re-confirm the upstream is empty.
+	require.NoError(t, store.Refresh(context.Background()))
+	// Confirm the bucket is still in BucketStatus (i.e. we still
+	// track this (source, ecosystem) pair).
+	statuses := store.BucketStatus()
+	var found bool
+	for _, st := range statuses {
+		if st.SourceID == "alpha" && st.Ecosystem == intel.EcosystemNPM {
+			found = true
+			require.Equal(t, 0, st.ReportCount, "retained-empty must stay empty")
+		}
+	}
+	require.True(t, found, "acknowledged-empty bucket must survive a subsequent error")
+}
+
 // TestStoreRefreshPersistsBaselineToDisk: a successful Refresh must
 // leave a parseable intel-baseline.json in cacheDir. Mutation-resistance
 // check: removing the writeBaseline call from Refresh causes this test

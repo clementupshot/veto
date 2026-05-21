@@ -46,6 +46,8 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <errno.h>
+#include <limits.h>
+#include <pthread.h>
 
 #ifdef __APPLE__
   // Tell the macOS dyld interposer machinery to swap our function for the
@@ -118,6 +120,49 @@ static const char *basename_of(const char *path) {
   return slash ? slash + 1 : path;
 }
 
+// canonical_veto_path caches realpath(getenv("VETO_PATH")) per
+// process. Populated lazily on first call to is_self_call; protected
+// by a once-init mutex so concurrent callers in the same address
+// space agree. Empty string when VETO_PATH is unset or unresolvable
+// — at that point is_self_call falls back to a basename check, which
+// is what we did before this realpath upgrade (L2 in the audit).
+static char canonical_veto_path[PATH_MAX];
+static pthread_once_t canonical_veto_once = PTHREAD_ONCE_INIT;
+
+static void canonical_veto_init(void) {
+  const char *bp = getenv("VETO_PATH");
+  if (!bp || !*bp) return;
+  char resolved[PATH_MAX];
+  if (realpath(bp, resolved) == NULL) return;
+  size_t n = strlen(resolved);
+  if (n >= sizeof(canonical_veto_path)) return;
+  memcpy(canonical_veto_path, resolved, n + 1);
+}
+
+// is_self_call returns 1 when path resolves (via realpath) to the
+// same inode as VETO_PATH. Strict physical-path identity replaces
+// the prior basename strcmp(bn, "veto") so an attacker-planted
+// /tmp/veto on PATH does not satisfy the recursion guard and
+// silently escape the interposer rewrite. Falls back to basename
+// equality if either side cannot be resolved (VETO_PATH unset,
+// path doesn't exist on disk yet) — matches pre-PR behaviour, so
+// the worst case is a recursion guard that is no looser than what
+// shipped.
+static int is_self_call(const char *path) {
+  if (!path) return 0;
+  pthread_once(&canonical_veto_once, canonical_veto_init);
+
+  if (canonical_veto_path[0] != '\0') {
+    char resolved[PATH_MAX];
+    if (realpath(path, resolved) != NULL) {
+      return strcmp(resolved, canonical_veto_path) == 0;
+    }
+  }
+  // Realpath unavailable on one side. Fall back to the previous
+  // basename check so we don't regress the guard.
+  return strcmp(basename_of(path), "veto") == 0;
+}
+
 // is_risky returns the PM basename if (path, argv) describes a covered
 // risky invocation, otherwise NULL. The returned pointer is owned by argv
 // or by static storage — callers must not free it.
@@ -134,8 +179,11 @@ static const char *is_risky(const char *path, char *const argv[]) {
   const char *bn = basename_of(path);
   if (!bn || !*bn) return NULL;
 
-  // Already through veto? Don't recurse.
-  if (!strcmp(bn, "veto")) return NULL;
+  // Already through veto? Don't recurse. Use strict realpath identity
+  // against VETO_PATH (L2) instead of basename strcmp — a malicious
+  // /tmp/veto on PATH would have satisfied the old guard and slipped
+  // past the interposer entirely.
+  if (is_self_call(path)) return NULL;
 
   if (!in_list(bn, PM_NAMES)) return NULL;
 

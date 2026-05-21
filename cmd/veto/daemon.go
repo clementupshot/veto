@@ -68,6 +68,19 @@ func runDaemon(logger zerolog.Logger, cfg config, args []string) int {
 	// store is healthy. Sandboxed clients connecting before this point
 	// would otherwise hit a cold store and the gate would abort
 	// fail-closed, which is annoying on a fresh boot.
+	//
+	// TODO(L3): partial coverage from H3 persistence (intel-baseline.json
+	// reloads the rolling-max baseline on cold start); full coverage
+	// needs an initial-Refresh ctx-aware delay so the cold-start MITM
+	// window is bounded by an explicit deadline rather than the syncTimeout
+	// default. See consolidated-report.md.
+	//
+	// TODO(L7): the initial Refresh blocks listener readiness on a 5min
+	// timeout. Operators with a slow first sync see no progress until
+	// the daemon either accepts or fails. Emit progress logs OR
+	// background the initial Refresh after a first-listener-ready signal.
+	// Pre-existing pattern, exposed by the new size caps making the cold
+	// sync larger. See consolidated-report.md.
 	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), syncTimeout)
 	if err := store.Refresh(refreshCtx); err != nil {
 		refreshCancel()
@@ -86,6 +99,15 @@ func runDaemon(logger zerolog.Logger, cfg config, args []string) int {
 		Msg("daemon ready")
 
 	// Background refresher.
+	//
+	// TODO(M8): full daemon lifecycle refactor — chStop/wgDone, panic
+	// recovery in fetchAll goroutines (some are already there in
+	// store.go), ctx propagation through parseZip/parseTarball/openssf
+	// gob decode. The refresh loop and accept loop currently use
+	// independent contexts and a shared signal handler; consolidating
+	// these into a single lifecycle with explicit shutdown ordering
+	// (producers stop before consumers) would let us drop the
+	// listener.Close-as-signal pattern. See consolidated-report.md.
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
 	go runRefreshLoop(ctx, logger, store)
@@ -386,4 +408,3 @@ func closeFDsBest(fds []int) {
 		}
 	}
 }
-

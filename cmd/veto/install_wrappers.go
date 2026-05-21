@@ -109,6 +109,14 @@ type wrapperEntry struct {
 // the claude-code hook list, or the in-process gate's PM registry.
 var wrappedManagers = managers.Supported
 
+// TODO(M7): when wrapping decisions are about to refuse based on a
+// pre-existing veto symlink that points at a different veto installation
+// (dev-veto vs system veto, or two parallel forks), consult a configurable
+// known-veto-installation list so the operator can declare which one is
+// authoritative and which one to mutual-exec through. Today the partial-
+// state guard refuses; the M7 ticket asks for a richer "knows-other-veto"
+// reconciliation. See consolidated-report.md.
+
 // runInstallWrappers implements `veto install-wrappers [--dry-run] [--force]`.
 //
 // Default behavior: discover candidate dirs (homebrew, mise installs,

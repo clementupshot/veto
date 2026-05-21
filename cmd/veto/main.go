@@ -322,6 +322,13 @@ func displayVersion(v string) string {
 //
 // The sibling check happens first so an attacker can't bypass Layer 4
 // by manipulating PATH inside the process.
+// TODO(L6): decide whether the legacy in-process execReal path should
+// sanitize VETO_*/DYLD_INSERT_LIBRARIES from os.Environ() before exec.
+// The daemon path already sanitises via daemon.sanitizeEnv; this path
+// inherits the calling shell's env unfiltered, which lets a hostile
+// caller propagate VETO_BYPASS=1 to a child without us seeing it. Out
+// of scope for the hardening follow-up because the daemon is the prod
+// path; in-process is the local-dev fallback. See consolidated-report.md.
 func execReal(name string, args []string) int {
 	realPath, err := findRealBinary(name)
 	if err != nil {

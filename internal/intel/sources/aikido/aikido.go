@@ -28,6 +28,21 @@ import (
 const (
 	defaultBaseURL = "https://malware-list.aikido.dev"
 	sourceID       = "aikido"
+
+	// maxFeedBytes caps how much we accept from the Aikido feed in a
+	// single fetch. Sized generously above the current observed feed
+	// size (~20 MB for npm, ~5 MB for pypi as of 2026-05) so legitimate
+	// growth doesn't trip it, but bounded so a MITM'd or compromised
+	// upstream cannot OOM the long-lived daemon by serving a multi-GB
+	// body. Pair with io.LimitReader(maxFeedBytes+1) and detect the
+	// truncation by checking len(body) > maxFeedBytes.
+	maxFeedBytes = 256 << 20 // 256 MiB
+
+	// staleCacheThreshold controls when the warning fires on the
+	// network-fail-fallback-to-cache path. 24h means: if we fell back
+	// to a cache file older than a day, the operator should know — the
+	// intel set protecting their installs is at least that out of date.
+	staleCacheThreshold = 24 * time.Hour
 )
 
 // Options configures the Aikido source.
@@ -111,7 +126,22 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 // payload is returned without re-downloading the body. On network failure, a
 // previously-cached payload is returned with a logged warning rather than
 // failing the refresh.
+//
+// The 304-with-missing-cache edge case (upstream says "nothing changed" but
+// our cache file vanished — disk wipe, manual cleanup) is recovered by
+// dropping the etag and refetching ONCE. Bounded retry so a wedged
+// filesystem (read-only, quota exhausted) can't loop indefinitely.
 func (s *Source) fetchWithCache(ctx context.Context, url, payloadPath, etagPath string) ([]byte, error) {
+	return s.fetchWithCacheBounded(ctx, url, payloadPath, etagPath, true)
+}
+
+// fetchOnce is fetchWithCache with retry forbidden — used internally when
+// the function has already taken its one allowed retry.
+func (s *Source) fetchOnce(ctx context.Context, url, payloadPath, etagPath string) ([]byte, error) {
+	return s.fetchWithCacheBounded(ctx, url, payloadPath, etagPath, false)
+}
+
+func (s *Source) fetchWithCacheBounded(ctx context.Context, url, payloadPath, etagPath string, retryAllowed bool) ([]byte, error) {
 	prevEtag, _ := os.ReadFile(etagPath)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -124,10 +154,20 @@ func (s *Source) fetchWithCache(ctx context.Context, url, payloadPath, etagPath 
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		// Network failure — fall back to cached payload if we have one. This
-		// keeps the lookup index hot across transient outages.
+		// Network failure — fall back to cached payload if we have one.
+		// Emit a louder warning when the cache is past staleCacheThreshold;
+		// a long-running offline period silently keeping us on month-old
+		// intel is exactly the kind of regression an operator should see.
 		if cached, readErr := os.ReadFile(payloadPath); readErr == nil {
-			s.logger.Warn().Err(err).Str("url", url).Msg("upstream unreachable, using cached payload")
+			logEvt := s.logger.Warn().Err(err).Str("url", url)
+			if stat, statErr := os.Stat(payloadPath); statErr == nil {
+				age := time.Since(stat.ModTime())
+				logEvt = logEvt.Dur("cache_age", age)
+				if age > staleCacheThreshold {
+					logEvt = logEvt.Bool("cache_stale", true)
+				}
+			}
+			logEvt.Msg("upstream unreachable, using cached payload")
 			return cached, nil
 		}
 		return nil, errors.With(err, "http request")
@@ -138,11 +178,19 @@ func (s *Source) fetchWithCache(ctx context.Context, url, payloadPath, etagPath 
 	case http.StatusNotModified:
 		cached, err := os.ReadFile(payloadPath)
 		if err != nil {
+			if !retryAllowed {
+				// Already took our one allowed refetch and the cache is
+				// still missing — give up rather than spin.
+				return nil, errors.With(err, "304 with missing cache after retry").
+					Set("url", url).Set("payload_path", payloadPath)
+			}
 			// Upstream told us nothing changed but we have no local copy.
-			// Treat this as a cache invariant break — drop the etag and refetch.
+			// Treat this as a cache invariant break — drop the etag and refetch
+			// ONCE. Bounded retry so a filesystem in a wedged state (read-only,
+			// quota exhausted, etc.) doesn't spin forever.
 			s.logger.Warn().Err(err).Msg("304 received but cached payload missing; forcing refetch")
 			_ = os.Remove(etagPath)
-			return s.fetchWithCache(ctx, url, payloadPath, etagPath)
+			return s.fetchOnce(ctx, url, payloadPath, etagPath)
 		}
 		return cached, nil
 	case http.StatusOK:
@@ -151,9 +199,18 @@ func (s *Source) fetchWithCache(ctx context.Context, url, payloadPath, etagPath 
 		return nil, errors.WithNew("unexpected status").Set("status", resp.StatusCode, "url", url)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Bound the payload size so a compromised or MITM'd upstream cannot
+	// OOM the daemon by serving a gigantic body. The +1 lets us detect
+	// truncation: if we read more than maxFeedBytes we know upstream was
+	// over the limit and the read was cut short.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
 	if err != nil {
 		return nil, errors.With(err, "read body")
+	}
+	if len(body) > maxFeedBytes {
+		return nil, errors.WithNew("feed payload exceeds size limit").
+			Set("limit_bytes", maxFeedBytes).
+			Set("url", url)
 	}
 
 	if err := writeAtomic(payloadPath, body); err != nil {

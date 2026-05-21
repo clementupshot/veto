@@ -42,12 +42,23 @@ func NewStore(logger zerolog.Logger, sources ...Source) Store {
 		sources = []Source{NopSource{}}
 	}
 	return &memStore{
-		logger:    logger.With().Str("component", "intel.store").Logger(),
-		sources:   sources,
-		byVersion: make(map[versionKey][]MalwareReport),
-		byName:    make(map[nameKey][]MalwareReport),
+		logger:      logger.With().Str("component", "intel.store").Logger(),
+		sources:     sources,
+		byVersion:   make(map[versionKey][]MalwareReport),
+		byName:      make(map[nameKey][]MalwareReport),
+		bySourceEco: make(map[sourceEcoKey][]MalwareReport),
 	}
 }
+
+// partialDropThreshold is the minimum fraction of the previous Refresh's
+// per-(source, ecosystem) report count that the new fetch must clear to
+// have its data swapped in. A new fetch returning < threshold * previous
+// is treated as a partial failure for that (source, ecosystem) pair —
+// the new data is rejected and the previous slice retained, so a single
+// MITM'd or wedged upstream can't silently shrink the index. Set
+// conservatively: malware feeds grow over time, so any meaningful drop
+// is suspicious.
+const partialDropThreshold = 0.5
 
 // versionKey targets exact (ecosystem, name, version) lookups.
 type versionKey struct {
@@ -64,6 +75,27 @@ type nameKey struct {
 	Name      string
 }
 
+// sourceEcoKey identifies the unit of work the store retains per Refresh:
+// one (source, ecosystem) fetch. Retention happens at this granularity so a
+// failure in (aikido, pypi) doesn't drag down (aikido, npm) — and so a
+// network MITM that drops a single feed can't quietly remove every aikido
+// finding from the lookup index.
+type sourceEcoKey struct {
+	SourceID  string
+	Ecosystem Ecosystem
+}
+
+// dedupKey identifies a single MalwareReport in the deduplication pass.
+// A struct (rather than a concatenated string) avoids the theoretical
+// collision where any field contains the separator character, and the
+// extra type-safety makes the dedup intent obvious at the call site.
+type dedupKey struct {
+	SourceID  string
+	Ecosystem Ecosystem
+	Name      string
+	Version   string
+}
+
 type memStore struct {
 	logger  zerolog.Logger
 	sources []Source
@@ -71,6 +103,12 @@ type memStore struct {
 	mu        sync.RWMutex
 	byVersion map[versionKey][]MalwareReport
 	byName    map[nameKey][]MalwareReport
+	// bySourceEco retains the most recent successful fetch of each
+	// (source, ecosystem) pair so the next Refresh can decide, per pair,
+	// whether the new data is plausible (use it) or implausibly small
+	// (retain the previous slice and log a warning). Read+written under
+	// the same mu as byVersion/byName.
+	bySourceEco map[sourceEcoKey][]MalwareReport
 }
 
 var _ Store = (*memStore)(nil)
@@ -134,96 +172,233 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 	return verdict
 }
 
+// fetchResult bundles one (source, ecosystem) fetch outcome.
+type fetchResult struct {
+	key     sourceEcoKey
+	reports []MalwareReport
+	err     error
+}
+
 // Refresh implements Store.
+//
+// Three-stage pipeline:
+//
+//  1. fetchAll: concurrent per-(source, ecosystem) fetch.
+//  2. applyRetention: per-(source, ecosystem) decision to USE the new
+//     slice or RETAIN the previous one. Retention triggers when:
+//     - the fetch returned an error (and we have previous data), OR
+//     - the new count drops below partialDropThreshold * previous count
+//     This closes the partial-refresh hole where a single MITM'd feed
+//     could silently wipe an entire source's coverage.
+//  3. reindex+swap: build byVersion / byName from the resolved
+//     per-source-ecosystem slices, then swap under the write lock.
+//
+// Fail-closed conditions (Refresh returns an error and the in-memory
+// index is left unchanged):
+//
+//   - every (source, ecosystem) fetch returned a real error.
+//   - every (source, ecosystem) fetch returned ErrUnsupportedEcosystem
+//     (the prior code accepted this case as "success" and would have
+//     swapped in an empty index — M4 in the audit).
+//   - the resolved set is non-empty but every retained slice is empty
+//     AND we have no previous data to retain.
 func (s *memStore) Refresh(ctx context.Context) error {
-	type result struct {
-		sourceID string
-		reports  []MalwareReport
-		err      error
+	results := s.fetchAll(ctx)
+
+	// Snapshot previous bySourceEco under the read lock so retention can
+	// fall back to it without holding the write lock during retention
+	// decisions. Slice contents are never mutated post-publication.
+	s.mu.RLock()
+	prevBySourceEco := make(map[sourceEcoKey][]MalwareReport, len(s.bySourceEco))
+	for k, v := range s.bySourceEco {
+		prevBySourceEco[k] = v
+	}
+	s.mu.RUnlock()
+
+	resolved, retentionInfo, fetchErrs := s.applyRetention(results, prevBySourceEco)
+
+	if len(resolved) == 0 {
+		if len(fetchErrs) > 0 {
+			return errors.WithNew("all intel sources failed to refresh").
+				Set("failures", len(fetchErrs)).
+				Cause(stderrors.Join(fetchErrs...))
+		}
+		// Every (source, ecosystem) returned ErrUnsupportedEcosystem AND
+		// there was no prior data to retain. Without successful fetches
+		// we cannot safely swap in a (presumably empty) index.
+		return errors.WithNew("no intel source produced data").
+			Set("hint", "check VETO_SOURCES configuration and feed ecosystem support")
 	}
 
-	results := make(chan result, len(s.sources)*len(AllEcosystems))
-	var wg sync.WaitGroup
+	nextByVersion, nextByName, totalReports := buildIndices(resolved)
 
+	s.mu.Lock()
+	s.byVersion = nextByVersion
+	s.byName = nextByName
+	s.bySourceEco = resolved
+	s.mu.Unlock()
+
+	s.logger.Info().
+		Int("reports", totalReports).
+		Int("source_ecos_fresh", retentionInfo.fresh).
+		Int("source_ecos_retained", retentionInfo.retained).
+		Int("source_ecos_failed", len(fetchErrs)).
+		Msg("intel store refreshed")
+
+	return nil
+}
+
+// fetchAll runs every (source, ecosystem) fetch concurrently and collects
+// every result. Caller decides what to do with errors / empty slices.
+func (s *memStore) fetchAll(ctx context.Context) []fetchResult {
+	out := make(chan fetchResult, len(s.sources)*len(AllEcosystems))
+	var wg sync.WaitGroup
 	for _, src := range s.sources {
 		for _, eco := range AllEcosystems {
 			wg.Add(1)
 			go func(src Source, eco Ecosystem) {
 				defer wg.Done()
 				reports, err := src.Fetch(ctx, eco)
-				results <- result{sourceID: src.ID(), reports: reports, err: err}
+				out <- fetchResult{
+					key:     sourceEcoKey{SourceID: src.ID(), Ecosystem: eco},
+					reports: reports,
+					err:     err,
+				}
 			}(src, eco)
 		}
 	}
+	go func() { wg.Wait(); close(out) }()
 
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
+	results := make([]fetchResult, 0, len(s.sources)*len(AllEcosystems))
+	for r := range out {
+		results = append(results, r)
+	}
+	return results
+}
 
-	nextByVersion := make(map[versionKey][]MalwareReport)
-	nextByName := make(map[nameKey][]MalwareReport)
-	dedup := make(map[string]struct{}) // dedup within a refresh by source+ref
+// retentionStats reports how many (source, ecosystem) buckets used new
+// data vs. retained previous data this refresh. Logged for observability.
+type retentionStats struct {
+	fresh    int
+	retained int
+}
 
-	totalReports := 0
-	successCount := 0
-	failureCount := 0
+// applyRetention turns raw fetch results into the resolved
+// per-(source, ecosystem) report slices that will populate the next
+// index. Retention triggers per-bucket — a fetch error or a steep drop
+// in count keeps the previous data instead of letting it vanish.
+//
+// Returned fetchErrs include only buckets that errored AND had no
+// previous data to retain — those are the buckets that genuinely
+// failed and could not be recovered.
+func (s *memStore) applyRetention(
+	results []fetchResult,
+	prev map[sourceEcoKey][]MalwareReport,
+) (map[sourceEcoKey][]MalwareReport, retentionStats, []error) {
+	resolved := make(map[sourceEcoKey][]MalwareReport)
+	var stats retentionStats
 	var fetchErrs []error
 
-	for r := range results {
-		if r.err != nil {
-			if stderrors.Is(r.err, ErrUnsupportedEcosystem) {
-				continue
-			}
-			failureCount++
-			fetchErrs = append(fetchErrs, errors.With(r.err, "fetch failed").Set("source", r.sourceID))
-			s.logger.Warn().Err(r.err).Str("source", r.sourceID).Msg("source fetch failed")
+	for _, r := range results {
+		// ErrUnsupportedEcosystem is not a failure — the source simply
+		// doesn't cover this ecosystem. Skip without contributing to
+		// either fresh or retained.
+		if r.err != nil && stderrors.Is(r.err, ErrUnsupportedEcosystem) {
 			continue
 		}
-		successCount++
-		for _, report := range r.reports {
-			// Dedup identical (source, ecosystem, name, version) tuples within
-			// a single refresh; same finding from different sources stays
-			// distinct because dedup includes SourceID.
-			dedupKey := r.sourceID + "|" + string(report.Ecosystem) + "|" + report.Name + "|" + report.Version
-			if _, ok := dedup[dedupKey]; ok {
+
+		if r.err != nil {
+			// Real error. Retain prior data if any; otherwise record
+			// the failure so the caller can decide whether the refresh
+			// as a whole is salvageable.
+			if prevReports, ok := prev[r.key]; ok && len(prevReports) > 0 {
+				resolved[r.key] = prevReports
+				stats.retained++
+				s.logger.Warn().
+					Err(r.err).
+					Str("source", r.key.SourceID).
+					Str("ecosystem", string(r.key.Ecosystem)).
+					Int("retained_reports", len(prevReports)).
+					Msg("source fetch failed; retaining previous data")
 				continue
 			}
-			dedup[dedupKey] = struct{}{}
+			s.logger.Warn().
+				Err(r.err).
+				Str("source", r.key.SourceID).
+				Str("ecosystem", string(r.key.Ecosystem)).
+				Msg("source fetch failed; no previous data to retain")
+			fetchErrs = append(fetchErrs,
+				errors.With(r.err, "fetch failed").
+					Set("source", r.key.SourceID).
+					Set("ecosystem", string(r.key.Ecosystem)))
+			continue
+		}
 
-			// Index by exact version (only when the report names one).
+		// Fetch succeeded. Decide between new and previous based on
+		// the partial-drop threshold. Only triggers when we have a
+		// previous baseline to compare against — first-ever fetches
+		// always use the new data.
+		newCount := len(r.reports)
+		prevReports, hadPrev := prev[r.key]
+		prevCount := len(prevReports)
+		if hadPrev && prevCount > 0 {
+			minAllowed := int(float64(prevCount) * partialDropThreshold)
+			if newCount < minAllowed {
+				resolved[r.key] = prevReports
+				stats.retained++
+				s.logger.Warn().
+					Str("source", r.key.SourceID).
+					Str("ecosystem", string(r.key.Ecosystem)).
+					Int("new_count", newCount).
+					Int("prev_count", prevCount).
+					Float64("threshold", partialDropThreshold).
+					Msg("source returned implausibly few reports; retaining previous data")
+				continue
+			}
+		}
+		resolved[r.key] = r.reports
+		stats.fresh++
+	}
+
+	return resolved, stats, fetchErrs
+}
+
+// buildIndices flattens per-(source, ecosystem) slices into the two
+// lookup maps the Store serves Lookups from. Dedup is keyed by
+// dedupKey so that distinct sources reporting the same package stay
+// distinct, but a single source reporting the same finding twice
+// (unusual but legal in OSV-style feeds) collapses to one entry.
+func buildIndices(resolved map[sourceEcoKey][]MalwareReport) (
+	map[versionKey][]MalwareReport,
+	map[nameKey][]MalwareReport,
+	int,
+) {
+	byVersion := make(map[versionKey][]MalwareReport)
+	byName := make(map[nameKey][]MalwareReport)
+	seen := make(map[dedupKey]struct{})
+	total := 0
+	for _, reports := range resolved {
+		for _, report := range reports {
+			k := dedupKey{
+				SourceID:  report.SourceID,
+				Ecosystem: report.Ecosystem,
+				Name:      report.Name,
+				Version:   report.Version,
+			}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
 			if report.Version != "" {
 				vk := versionKey{report.Ecosystem, report.Name, report.Version}
-				nextByVersion[vk] = append(nextByVersion[vk], report)
+				byVersion[vk] = append(byVersion[vk], report)
 			}
-			// Also index by name regardless of version, so unversioned
-			// lookups catch every flagged version.
 			nk := nameKey{report.Ecosystem, report.Name}
-			nextByName[nk] = append(nextByName[nk], report)
-			totalReports++
+			byName[nk] = append(byName[nk], report)
+			total++
 		}
 	}
-
-	// If every source failed, surface the aggregate so the caller can decide
-	// whether to keep using the previous index or fail closed.
-	if successCount == 0 && failureCount > 0 {
-		return errors.WithNew("all intel sources failed to refresh").
-			Set("failures", failureCount).
-			Cause(stderrors.Join(fetchErrs...))
-	}
-
-	s.mu.Lock()
-	s.byVersion = nextByVersion
-	s.byName = nextByName
-	s.mu.Unlock()
-
-	s.logger.Info().
-		Int("reports", totalReports).
-		Int("sources_ok", successCount).
-		Int("sources_failed", failureCount).
-		Msg("intel store refreshed")
-
-	return nil
+	return byVersion, byName, total
 }
 
 // SourceIDs implements Store.
@@ -248,10 +423,9 @@ func (s *memStore) ReportCount() int {
 	}
 	// Add reports that are name-only (no entry in byVersion). These are
 	// the "any version of this package is bad" findings.
-	for k, reports := range s.byName {
+	for _, reports := range s.byName {
 		for _, r := range reports {
 			if r.Version == "" {
-				_ = k
 				total++
 			}
 		}

@@ -156,9 +156,13 @@ func (g *Gate) WithLogger(logger zerolog.Logger) *Gate {
 
 // Evaluate returns the decision for the given installs. A nil installs
 // argument (parser returned no installs) yields OutcomePassThrough.
-// An empty (non-nil) installs argument (parser saw an install verb with no
-// explicit specs, e.g. `npm install` resolving from package.json) yields
-// OutcomeAllow today — refer to veto's known-limitations doc.
+// An empty (non-nil) installs argument paired with empty manifestRefs
+// yields OutcomeAllow — the parser saw an install verb but had nothing
+// to gate, AND the project has no on-disk manifest/lockfile contributing
+// anything either. (For the common "`npm install` resolving from
+// package.json" case the parser DOES emit package.json + every lockfile
+// ManifestRef — see jsspec.PackageJSONManifestRefs — so the gate's
+// expander gates the transitive tree.)
 //
 // manifestRefs, when non-empty, are passed through Policy.ManifestExpander
 // to discover transitive Installs (pip's `-r requirements.txt`, npm's

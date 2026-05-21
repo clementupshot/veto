@@ -41,6 +41,16 @@ const (
 	defaultBaseURL = "https://github.com/ossf/malicious-packages/archive/refs/heads/main.tar.gz"
 	sourceID       = "openssf"
 	osvPrefix      = "osv/malicious/"
+
+	// maxFeedBytes caps the size of the tarball download. The openssf
+	// malicious-packages archive currently sits in the low tens of MB
+	// uncompressed; 512 MiB leaves ample growth room while bounding a
+	// compromised upstream that might stream a multi-GB body.
+	maxFeedBytes = 512 << 20
+
+	// maxAdvisoryBytes bounds each per-advisory JSON read from the
+	// tar stream. Real advisories are a few KB; 5 MiB is generous.
+	maxAdvisoryBytes = 5 << 20
 )
 
 // Options configures the OpenSSF source.
@@ -234,10 +244,20 @@ func (s *Source) downloadIfChanged(ctx context.Context, upstreamEtag string) (st
 		return "", "", errors.With(err, "create temp tarball")
 	}
 	tmpPath := tmp.Name()
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	// LimitReader+1 lets us detect oversized payloads: writing more than
+	// maxFeedBytes is treated as a refused fetch rather than a successful
+	// download of a truncated tarball.
+	written, err := io.Copy(tmp, io.LimitReader(resp.Body, maxFeedBytes+1))
+	if err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
 		return "", "", errors.With(err, "stream tarball")
+	}
+	if written > maxFeedBytes {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", "", errors.WithNew("openssf tarball exceeds size limit").
+			Set("limit_bytes", maxFeedBytes)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
@@ -284,9 +304,18 @@ func (s *Source) parseTarball(path string) ([]intel.MalwareReport, error) {
 		if !isMaliciousEntry(hdr.Name) {
 			continue
 		}
-		payload, err := io.ReadAll(tr)
+		// Per-advisory cap: a tar entry larger than maxAdvisoryBytes is
+		// either malicious or malformed; we skip rather than abort the
+		// whole parse, so a single bad entry can't deny the rest of the
+		// feed.
+		payload, err := io.ReadAll(io.LimitReader(tr, maxAdvisoryBytes+1))
 		if err != nil {
 			return nil, errors.With(err, "read entry").Set("name", hdr.Name)
+		}
+		if len(payload) > maxAdvisoryBytes {
+			s.logger.Warn().Str("entry", hdr.Name).Int("limit_bytes", maxAdvisoryBytes).
+				Msg("openssf advisory exceeds size limit; skipping")
+			continue
 		}
 		adv, err := osvschema.Parse(payload)
 		if err != nil {

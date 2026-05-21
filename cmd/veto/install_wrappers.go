@@ -112,7 +112,7 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 		return exitInternal
 	}
 
-	candidates, err := discoverWrapCandidates(opts)
+	candidates, err := discoverWrapCandidates(opts, vetoPath)
 	if err != nil {
 		logger.Error().Err(err).Msg("discover wrap candidates")
 		return exitInternal
@@ -199,11 +199,19 @@ func runUninstallWrappers(logger zerolog.Logger, cfg config, args []string) int 
 		return exitOK
 	}
 
+	// Resolve the current veto binary once so unwrap can do strict
+	// physical-path identity checks against it for every entry.
+	vetoPath, err := resolveVetoBinary()
+	if err != nil {
+		logger.Error().Err(err).Msg("locate veto binary")
+		return exitInternal
+	}
+
 	remaining := []wrapperEntry{}
 	failed := 0
 	removed := 0
 	for _, w := range state.Wrappers {
-		switch err := unwrap(w, opts.dryRun); {
+		switch err := unwrap(w, vetoPath, opts.dryRun); {
 		case err != nil:
 			failed++
 			remaining = append(remaining, w)
@@ -306,7 +314,7 @@ type wrapCandidate struct {
 // looking for files whose basename matches one of wrappedManagers. We
 // only return files that exist and are executable, and we only return
 // real files (not already veto symlinks).
-func discoverWrapCandidates(opts wrapperFlags) ([]wrapCandidate, error) {
+func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate, error) {
 	candidates := []wrapCandidate{}
 	pmFilter := func(name string) bool {
 		if len(opts.only) == 0 {
@@ -325,7 +333,7 @@ func discoverWrapCandidates(opts wrapperFlags) ([]wrapCandidate, error) {
 				continue
 			}
 			p := filepath.Join(dir, pm)
-			if isWrappableTarget(p) {
+			if isWrappableTarget(p, vetoPath) {
 				candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "homebrew"})
 			}
 		}
@@ -340,7 +348,7 @@ func discoverWrapCandidates(opts wrapperFlags) ([]wrapCandidate, error) {
 					continue
 				}
 				p := filepath.Join(binDir, pm)
-				if isWrappableTarget(p) {
+				if isWrappableTarget(p, vetoPath) {
 					candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "mise"})
 				}
 			}
@@ -353,7 +361,7 @@ func discoverWrapCandidates(opts wrapperFlags) ([]wrapCandidate, error) {
 					continue
 				}
 				p := filepath.Join(binDir, pm)
-				if isWrappableTarget(p) {
+				if isWrappableTarget(p, vetoPath) {
 					candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "asdf"})
 				}
 			}
@@ -365,7 +373,7 @@ func discoverWrapCandidates(opts wrapperFlags) ([]wrapCandidate, error) {
 				continue
 			}
 			p := filepath.Join(bunDir, pm)
-			if isWrappableTarget(p) {
+			if isWrappableTarget(p, vetoPath) {
 				candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "bun"})
 			}
 		}
@@ -378,7 +386,7 @@ func discoverWrapCandidates(opts wrapperFlags) ([]wrapCandidate, error) {
 				continue
 			}
 			p := filepath.Join(dir, pm)
-			if isWrappableTarget(p) {
+			if isWrappableTarget(p, vetoPath) {
 				candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "user"})
 			}
 		}
@@ -419,11 +427,41 @@ func globMiseBinDirs(root string) []string {
 	return out
 }
 
+// pointsAtVeto reports whether linkPath (a symlink) resolves to the
+// same physical file as vetoPath. Both sides are fully evaluated via
+// filepath.EvalSymlinks so a symlink chain that ends at the canonical
+// veto binary is recognized regardless of how many hops it takes.
+//
+// Why a strict identity check matters: the prior version used
+// strings.Contains(target, "veto"), which would accept ANY symlink
+// whose target string contained the substring "veto" — including an
+// attacker-planted /opt/homebrew/bin/npm → /tmp/veto-malware that
+// merely uses our name. Once accepted as "already ours," the wrap
+// step skips and the attacker's shadow stays in place. Resolving and
+// comparing physical paths closes that hole.
+//
+// Returns false (not error) on any I/O failure: a symlink we cannot
+// resolve is, by definition, not provably ours.
+func pointsAtVeto(linkPath, vetoPath string) bool {
+	resolved, err := filepath.EvalSymlinks(linkPath)
+	if err != nil {
+		return false
+	}
+	canonicalVeto, err := filepath.EvalSymlinks(vetoPath)
+	if err != nil {
+		return false
+	}
+	return resolved == canonicalVeto
+}
+
 // isWrappableTarget reports whether the path is something we should
 // wrap: it exists, is not a directory, is executable, and is not
-// already a symlink we own (any symlink whose target name contains
-// "veto" is treated as ours).
-func isWrappableTarget(p string) bool {
+// already our own veto wrapper.
+//
+// "Already ours" is decided by pointsAtVeto (strict physical-path
+// identity), NOT by name substring matching — see that helper for the
+// rationale.
+func isWrappableTarget(p, vetoPath string) bool {
 	info, err := os.Lstat(p)
 	if err != nil {
 		return false
@@ -432,14 +470,10 @@ func isWrappableTarget(p string) bool {
 		return false
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		// Existing symlink. If it points at veto, it's already ours
-		// and we skip. Otherwise it's a real-binary alias (homebrew's
-		// canonical layout) and is wrappable.
-		target, err := os.Readlink(p)
-		if err != nil {
-			return false
-		}
-		if strings.Contains(target, "veto") {
+		// Existing symlink. If it provably points at veto, skip — we
+		// installed it. Otherwise it's a real-binary alias (homebrew's
+		// canonical layout, mise's shim, etc.) and is wrappable.
+		if pointsAtVeto(p, vetoPath) {
 			return false
 		}
 		// Verify the symlink resolves to something we can exec.
@@ -469,10 +503,12 @@ func isWrappableTarget(p string) bool {
 func applyWrapper(c wrapCandidate, vetoPath string, dryRun, force bool) (wrapAction, error) {
 	original := c.path + wrapperSuffix
 
-	// Already wrapped? `c.path` is a veto symlink AND
-	// `<c.path>.veto-original` exists. That's a no-op.
+	// Already wrapped? `c.path` is a symlink that resolves to the SAME
+	// physical file as vetoPath AND `<c.path>.veto-original` exists.
+	// Strict physical-path identity (not name substring) — see
+	// pointsAtVeto for rationale.
 	if existing, err := os.Lstat(c.path); err == nil && existing.Mode()&os.ModeSymlink != 0 {
-		if target, err := os.Readlink(c.path); err == nil && strings.Contains(target, "veto") {
+		if pointsAtVeto(c.path, vetoPath) {
 			if _, err := os.Lstat(original); err == nil {
 				return wrapperActionSkipAlreadyOurs, nil
 			}
@@ -510,7 +546,14 @@ func applyWrapper(c wrapCandidate, vetoPath string, dryRun, force bool) (wrapAct
 // removes the veto symlink at Path, then renames the
 // `.veto-original` sibling back to Path. Errors short-circuit;
 // dry-run skips the actual filesystem operations.
-func unwrap(w wrapperEntry, dryRun bool) error {
+//
+// vetoPath is the current location of the veto binary, resolved once
+// by the caller. We require strict physical-path identity (via
+// pointsAtVeto) before removing — if the symlink at w.Path has been
+// replaced by a brew upgrade or by a third party, we bail out rather
+// than clobber it. Name-substring matching (the prior pattern) would
+// have accepted an attacker-planted symlink to /tmp/veto-evil.
+func unwrap(w wrapperEntry, vetoPath string, dryRun bool) error {
 	if dryRun {
 		return nil
 	}
@@ -526,15 +569,15 @@ func unwrap(w wrapperEntry, dryRun bool) error {
 		return errors.With(err, "lstat").Set("path", w.Path)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(w.Path)
-		if err != nil {
-			return errors.With(err, "readlink")
-		}
-		if !strings.Contains(target, "veto") {
-			// Someone else (brew upgrade?) replaced our symlink. Don't
-			// clobber their work — bail out and let the user decide.
+		if !pointsAtVeto(w.Path, vetoPath) {
+			// The symlink no longer resolves to our veto binary —
+			// either an upgrade replaced it with a real binary
+			// (homebrew/mise's reinstall behavior) or a third party
+			// swapped in a same-named target. Either way, we don't own
+			// it anymore — refuse to remove.
+			current, _ := os.Readlink(w.Path)
 			return errors.WithNew("path no longer points at veto; refusing to overwrite").
-				Set("path", w.Path, "current_target", target)
+				Set("path", w.Path, "current_target", current, "expected_veto", vetoPath)
 		}
 		if err := os.Remove(w.Path); err != nil {
 			return errors.With(err, "remove veto symlink").Set("path", w.Path)

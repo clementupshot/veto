@@ -19,6 +19,7 @@ package pypa
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"io"
@@ -46,6 +47,17 @@ const (
 	// hanging the parser. Real advisories are <10 KB; 1 MB is a generous
 	// safety cap.
 	maxAdvisoryBytes = 1 << 20
+
+	// maxFeedBytes caps the whole-tarball download. PyPA's advisory-db
+	// archive sits in the low-tens-of-MB range today; 512 MiB leaves
+	// growth room while bounding a compromised upstream that streams a
+	// multi-GB body. Paired with io.LimitReader+1 truncation detection.
+	maxFeedBytes = 512 << 20
+
+	// staleCacheThreshold mirrors the aikido source: warn loudly when
+	// we serve from a cache file older than this on the network-fail
+	// fallback path.
+	staleCacheThreshold = 24 * time.Hour
 )
 
 // Options configures the PyPA source.
@@ -125,7 +137,14 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 // rather than abstracted because each source's failure-mode policy
 // differs slightly (which 3xx/4xx is treated as "stale OK" etc.) and
 // abstracting too early would make those differences harder to spot.
+//
+// The 304-with-missing-cache fallback is bounded to a single retry —
+// see the aikido source for the same pattern and rationale.
 func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath string) ([]byte, error) {
+	return s.fetchWithCacheBounded(ctx, payloadPath, etagPath, true)
+}
+
+func (s *Source) fetchWithCacheBounded(ctx context.Context, payloadPath, etagPath string, retryAllowed bool) ([]byte, error) {
 	prevEtag, _ := os.ReadFile(etagPath)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
@@ -138,7 +157,15 @@ func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath strin
 	resp, err := s.client.Do(req)
 	if err != nil {
 		if cached, readErr := os.ReadFile(payloadPath); readErr == nil {
-			s.logger.Warn().Err(err).Str("url", s.url).Msg("upstream unreachable, using cached tarball")
+			logEvt := s.logger.Warn().Err(err).Str("url", s.url)
+			if stat, statErr := os.Stat(payloadPath); statErr == nil {
+				age := time.Since(stat.ModTime())
+				logEvt = logEvt.Dur("cache_age", age)
+				if age > staleCacheThreshold {
+					logEvt = logEvt.Bool("cache_stale", true)
+				}
+			}
+			logEvt.Msg("upstream unreachable, using cached tarball")
 			return cached, nil
 		}
 		return nil, vetoerrors.With(err, "http request")
@@ -149,9 +176,13 @@ func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath strin
 	case http.StatusNotModified:
 		cached, err := os.ReadFile(payloadPath)
 		if err != nil {
+			if !retryAllowed {
+				return nil, vetoerrors.With(err, "304 with missing cache after retry").
+					Set("url", s.url).Set("payload_path", payloadPath)
+			}
 			s.logger.Warn().Err(err).Msg("304 received but cached tarball missing; forcing refetch")
 			_ = os.Remove(etagPath)
-			return s.fetchWithCache(ctx, payloadPath, etagPath)
+			return s.fetchWithCacheBounded(ctx, payloadPath, etagPath, false)
 		}
 		return cached, nil
 	case http.StatusOK:
@@ -160,9 +191,16 @@ func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath strin
 		return nil, vetoerrors.WithNew("unexpected status").Set("status", resp.StatusCode, "url", s.url)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Cap the body at maxFeedBytes so a compromised or MITM'd upstream
+	// can't OOM the daemon by serving a multi-GB tarball. The +1 sentinel
+	// lets us tell "exactly at limit" from "tried to exceed limit."
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
 	if err != nil {
 		return nil, vetoerrors.With(err, "read body")
+	}
+	if len(body) > maxFeedBytes {
+		return nil, vetoerrors.WithNew("pypa tarball exceeds size limit").
+			Set("limit_bytes", maxFeedBytes).Set("url", s.url)
 	}
 	if err := writeAtomic(payloadPath, body); err != nil {
 		return nil, vetoerrors.With(err, "cache payload")
@@ -188,7 +226,7 @@ func (s *Source) fetchWithCache(ctx context.Context, payloadPath, etagPath strin
 //
 // Anything outside `vulns/.../*.yaml` is skipped.
 func parseTarball(payload []byte, logger zerolog.Logger) ([]intel.MalwareReport, error) {
-	gz, err := gzip.NewReader(strings.NewReader(string(payload)))
+	gz, err := gzip.NewReader(bytes.NewReader(payload))
 	if err != nil {
 		return nil, vetoerrors.With(err, "decompress tarball")
 	}

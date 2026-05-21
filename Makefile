@@ -1,4 +1,4 @@
-.PHONY: build test vet tidy clean install install-preload codegen-deps generate-mocks interposer
+.PHONY: build test vet tidy clean install install-unchecked install-preload codegen-deps generate-mocks interposer
 
 BIN := veto
 PKG := ./cmd/veto
@@ -41,7 +41,17 @@ tidy:
 clean:
 	rm -f $(BIN) coverage.out coverage.html $(INTERPOSER_OUT)
 
-install: build
+# `make install` gates on the full test suite (with -race). veto is a
+# security tool; shipping a build whose race detector or invariants are
+# broken is exactly the failure mode it exists to prevent. For the rare
+# case where the user needs to push past a known-failing test (e.g.
+# during an active incident response), `make install-unchecked` skips
+# the dependency.
+install: test build
+	install -m 0755 $(BIN) $(HOME)/.local/bin/$(BIN)
+
+install-unchecked: build
+	@echo "warning: install-unchecked skips tests — only use during an incident response or known-broken-test situation."
 	install -m 0755 $(BIN) $(HOME)/.local/bin/$(BIN)
 
 # `make interposer` builds the native shared library that intercepts

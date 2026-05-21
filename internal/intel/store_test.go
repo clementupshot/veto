@@ -2,6 +2,7 @@ package intel_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -123,6 +124,202 @@ func TestNopSource(t *testing.T) {
 	reports, err := s.Fetch(context.Background(), intel.EcosystemNPM)
 	require.NoError(t, err)
 	require.Empty(t, reports)
+}
+
+// programmableSource lets a test return different per-ecosystem data and
+// per-ecosystem errors on each Refresh call. It exists for the retention
+// tests below, where the "second Refresh" is the case under test.
+//
+// Refresh fires len(AllEcosystems) goroutines concurrently, so Fetch is
+// invoked in parallel. The fixture-index counter is bumped exactly once
+// per Refresh — after every ecosystem has been served from the same
+// fixture — by tracking which ecosystems have been served via a sync.Map.
+type programmableSource struct {
+	id       string
+	mu       sync.Mutex
+	calls    int
+	served   map[intel.Ecosystem]bool
+	fixtures []programmableFixture
+}
+
+type programmableFixture struct {
+	per map[intel.Ecosystem][]intel.MalwareReport
+	err map[intel.Ecosystem]error
+}
+
+func (p *programmableSource) ID() string { return p.id }
+
+func (p *programmableSource) Fetch(_ context.Context, eco intel.Ecosystem) ([]intel.MalwareReport, error) {
+	p.mu.Lock()
+	idx := p.calls
+	if idx >= len(p.fixtures) {
+		idx = len(p.fixtures) - 1
+	}
+	fx := p.fixtures[idx]
+	if p.served == nil {
+		p.served = make(map[intel.Ecosystem]bool)
+	}
+	p.served[eco] = true
+	// Every ecosystem served from this fixture → bump to next.
+	if len(p.served) == len(intel.AllEcosystems) {
+		p.calls++
+		p.served = nil
+	}
+	p.mu.Unlock()
+
+	if fx.err != nil {
+		if e, ok := fx.err[eco]; ok {
+			return nil, e
+		}
+	}
+	return fx.per[eco], nil
+}
+
+// TestStoreRefreshRetainsPreviousOnFetchError: a per-(source, ecosystem)
+// fetch that errors on the second Refresh must NOT silently drop that
+// pair's data — the previous slice is retained instead. This closes the
+// "MITM drops Aikido response → veto silently loses Aikido coverage"
+// fail-open path the audit identified as C1.
+func TestStoreRefreshRetainsPreviousOnFetchError(t *testing.T) {
+	logger := zerolog.Nop()
+	src := &programmableSource{
+		id: "alpha",
+		fixtures: []programmableFixture{
+			// First Refresh: 2 reports.
+			{
+				per: map[intel.Ecosystem][]intel.MalwareReport{
+					intel.EcosystemNPM: {
+						{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil", Version: "1.0.0"}, SourceID: "alpha"},
+						{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "also-evil"}, SourceID: "alpha"},
+					},
+				},
+			},
+			// Second Refresh: npm fetch errors. Previous npm data must be retained.
+			{
+				err: map[intel.Ecosystem]error{
+					intel.EcosystemNPM: context.DeadlineExceeded,
+				},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+	require.Equal(t, 2, store.ReportCount(), "first refresh populated index")
+
+	// Second refresh: npm errors. The lookup must STILL find the
+	// previously-flagged package — that's the retention.
+	require.NoError(t, store.Refresh(context.Background()), "retention should let refresh succeed despite fetch error")
+	v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil", Version: "1.0.0"})
+	require.True(t, v.Flagged(), "previous data must survive a per-source-ecosystem fetch failure")
+}
+
+// TestStoreRefreshRetainsPreviousOnPartialDrop: a per-(source, ecosystem)
+// fetch that returns suspiciously few reports (below partialDropThreshold
+// of the previous count) must be treated as a partial failure and the
+// previous slice retained. Defends against an upstream that's been
+// curated-down-to-empty by an attacker without TLS-level evidence.
+func TestStoreRefreshRetainsPreviousOnPartialDrop(t *testing.T) {
+	logger := zerolog.Nop()
+	makeReports := func(n int) []intel.MalwareReport {
+		out := make([]intel.MalwareReport, n)
+		for i := range out {
+			out[i] = intel.MalwareReport{
+				PackageRef: intel.PackageRef{
+					Ecosystem: intel.EcosystemNPM,
+					Name:      "evil-" + string(rune('a'+i)),
+					Version:   "1",
+				},
+				SourceID: "alpha",
+			}
+		}
+		return out
+	}
+	src := &programmableSource{
+		id: "alpha",
+		fixtures: []programmableFixture{
+			// First refresh: 100 reports.
+			{per: map[intel.Ecosystem][]intel.MalwareReport{intel.EcosystemNPM: makeReports(100)}},
+			// Second refresh: 1 report (1% of previous, well below 50% threshold).
+			{per: map[intel.Ecosystem][]intel.MalwareReport{intel.EcosystemNPM: makeReports(1)}},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+	require.Equal(t, 100, store.ReportCount(), "first refresh populated 100 reports")
+
+	require.NoError(t, store.Refresh(context.Background()))
+	require.Equal(t, 100, store.ReportCount(),
+		"steep drop should trigger retention; index should still have 100 reports")
+}
+
+// TestStoreRefreshAcceptsNewWhenAboveThreshold: the retention policy must
+// not be so aggressive that legitimate small drops trigger it. A drop
+// above the threshold should still let the new data through.
+func TestStoreRefreshAcceptsNewWhenAboveThreshold(t *testing.T) {
+	logger := zerolog.Nop()
+	makeReports := func(n int) []intel.MalwareReport {
+		out := make([]intel.MalwareReport, n)
+		for i := range out {
+			out[i] = intel.MalwareReport{
+				PackageRef: intel.PackageRef{
+					Ecosystem: intel.EcosystemNPM,
+					Name:      "evil-" + string(rune('a'+i)),
+					Version:   "1",
+				},
+				SourceID: "alpha",
+			}
+		}
+		return out
+	}
+	src := &programmableSource{
+		id: "alpha",
+		fixtures: []programmableFixture{
+			{per: map[intel.Ecosystem][]intel.MalwareReport{intel.EcosystemNPM: makeReports(100)}},
+			// 80% retained — well above the 50% threshold; new data should win.
+			{per: map[intel.Ecosystem][]intel.MalwareReport{intel.EcosystemNPM: makeReports(80)}},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+	require.NoError(t, store.Refresh(context.Background()))
+	require.Equal(t, 80, store.ReportCount(),
+		"drop above threshold should let new (smaller) data win")
+}
+
+// TestStoreRefreshAllUnsupportedReturnsError: if every (source, ecosystem)
+// returns ErrUnsupportedEcosystem AND there's no prior data, Refresh must
+// fail rather than silently swap in an empty index. Closes M4 in the audit.
+func TestStoreRefreshAllUnsupportedReturnsError(t *testing.T) {
+	logger := zerolog.Nop()
+	src := &fakeSource{id: "u", fetchEr: intel.ErrUnsupportedEcosystem}
+	store := intel.NewStore(logger, src)
+
+	err := store.Refresh(context.Background())
+	require.Error(t, err, "all-unsupported with no prior data must fail rather than swap in empty index")
+}
+
+// TestStoreDedupKeyHandlesPipeInNames: the dedup key must use struct
+// fields, not "|"-joined strings, so package names containing "|"
+// don't collide with each other. Closes M6 in the audit.
+func TestStoreDedupKeyHandlesPipeInNames(t *testing.T) {
+	logger := zerolog.Nop()
+	src := &fakeSource{
+		id: "alpha",
+		per: map[intel.Ecosystem][]intel.MalwareReport{
+			intel.EcosystemNPM: {
+				// These would collide with a "|"-joined dedup key:
+				//   "alpha|npm|a|b|1" == "alpha|npm|a|b|1"
+				// vs the struct dedup which sees Name="a|b" Version="1"
+				// distinct from Name="a"  Version="b|1".
+				{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "a|b", Version: "1"}, SourceID: "alpha"},
+				{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "a", Version: "b|1"}, SourceID: "alpha"},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+	require.Equal(t, 2, store.ReportCount(),
+		"struct dedup key must treat Name='a|b'+Ver='1' and Name='a'+Ver='b|1' as distinct")
 }
 
 func TestStoreReportCount(t *testing.T) {

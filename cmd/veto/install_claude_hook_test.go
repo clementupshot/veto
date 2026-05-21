@@ -210,3 +210,38 @@ func getHookCommand(t *testing.T, settings map[string]any, matcher string, idx i
 	require.Greater(t, len(chain), idx)
 	return chain[idx].(map[string]any)["command"].(string)
 }
+
+// TestIsVetoHookCommand_TightensBasenameMatching: the old check used
+// strings.Contains(cmd, "veto") which would accept ANY command path
+// that merely contained the substring "veto". An attacker-planted hook
+// command like `/opt/homebrew/bin/notveto-evil hook claude-code` would
+// have matched. The tightened check requires the basename of the first
+// token to be exactly "veto". Same drift class the install-wrappers
+// Layer-4 fix removed; this is the doctor/install-claude-hook side.
+func TestIsVetoHookCommand_TightensBasenameMatching(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"bare veto + hook claude-code", "veto hook claude-code", true},
+		{"abs-path veto + hook claude-code", "/usr/local/bin/veto hook claude-code", true},
+		{"abs-path veto + hook claude-code + args", "/usr/local/bin/veto hook claude-code --some-flag", true},
+		{"quoted veto path with spaces", `"/Users/me/Application Support/veto" hook claude-code`, true},
+		{"legacy veto-hook.py", "/opt/veto/veto-hook.py", true},
+		{"legacy veto-hook (no extension)", "/usr/local/bin/veto-hook", true},
+		// Impostor cases the OLD substring check would have accepted:
+		{"impostor: basename embeds veto but is not veto", "/opt/homebrew/bin/notveto-evil hook claude-code", false},
+		{"impostor: parent dir embeds veto but exe is not", "/opt/veto-tools/bin/evil hook claude-code", false},
+		{"impostor: substring-only veto in arg", "/opt/homebrew/bin/evil hook claude-code /opt/veto-decoy", false},
+		// Not a veto command at all.
+		{"unrelated rtk-rewrite hook", "/usr/local/bin/rtk-rewrite", false},
+		{"veto basename but no hook subcommand", "/usr/local/bin/veto status", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, isVetoHookCommand(tc.cmd))
+		})
+	}
+}

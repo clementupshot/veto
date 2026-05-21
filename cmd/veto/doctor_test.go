@@ -138,11 +138,11 @@ func TestEarlierRealBinary(t *testing.T) {
 
 	pathParts := []string{mise, user}
 	shimIdx := 1 // user is the shim dir (last)
-	got := earlierRealBinary("npm", pathParts, shimIdx)
+	got := earlierRealBinary("npm", pathParts, shimIdx, "")
 	require.Equal(t, realNpm, got)
 
 	// No conflict for a binary that doesn't exist earlier.
-	got = earlierRealBinary("pip", pathParts, shimIdx)
+	got = earlierRealBinary("pip", pathParts, shimIdx, "")
 	require.Equal(t, "", got)
 }
 
@@ -220,3 +220,51 @@ func TestPrintVersionManagerFooters_OnlyForRecognizedManagers(t *testing.T) {
 // Small file-IO helpers used by the earlier-real-binary test.
 func mkdir(p string) error                                 { return os.MkdirAll(p, 0o755) }
 func writeFile(p string, data []byte, m os.FileMode) error { return os.WriteFile(p, data, m) }
+
+// TestEarlierRealBinary_RejectsImpostorVetoSymlink: a same-named-but-
+// different binary earlier in PATH must still be detected as shadowing
+// even when its target path embeds the substring "veto". The previous
+// strings.Contains(resolved, "veto") would have silently skipped it.
+// Mirrors TestIsWrappableTarget_RejectsImpostorVetoSymlink for the
+// doctor side.
+func TestEarlierRealBinary_RejectsImpostorVetoSymlink(t *testing.T) {
+	dir := t.TempDir()
+	earlier := filepath.Join(dir, "earlier")
+	shim := filepath.Join(dir, "shim")
+	for _, d := range []string{earlier, shim} {
+		require.NoError(t, mkdir(d))
+	}
+	vetoPath := filepath.Join(dir, "veto")
+	require.NoError(t, writeFile(vetoPath, []byte(""), 0o755))
+
+	impostor := filepath.Join(dir, "veto-malware")
+	require.NoError(t, writeFile(impostor, []byte(""), 0o755))
+	earlierNpm := filepath.Join(earlier, "npm")
+	require.NoError(t, os.Symlink(impostor, earlierNpm))
+
+	pathParts := []string{earlier, shim}
+	got := earlierRealBinary("npm", pathParts, 1, vetoPath)
+	require.Equal(t, earlierNpm, got,
+		"a symlink to a substring-veto-named-but-different binary must be flagged as shadowing")
+}
+
+// TestEarlierRealBinary_AcceptsRealVetoSymlink: the positive case — a
+// PATH entry that genuinely resolves to the running veto binary is
+// NOT flagged as a conflict.
+func TestEarlierRealBinary_AcceptsRealVetoSymlink(t *testing.T) {
+	dir := t.TempDir()
+	earlier := filepath.Join(dir, "earlier")
+	shim := filepath.Join(dir, "shim")
+	for _, d := range []string{earlier, shim} {
+		require.NoError(t, mkdir(d))
+	}
+	vetoPath := filepath.Join(dir, "veto")
+	require.NoError(t, writeFile(vetoPath, []byte(""), 0o755))
+
+	earlierNpm := filepath.Join(earlier, "npm")
+	require.NoError(t, os.Symlink(vetoPath, earlierNpm))
+
+	pathParts := []string{earlier, shim}
+	got := earlierRealBinary("npm", pathParts, 1, vetoPath)
+	require.Equal(t, "", got, "a symlink pointing at the real veto must not be flagged as shadowing")
+}

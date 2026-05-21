@@ -347,22 +347,70 @@ func removeClaudeHook(settings map[string]any) bool {
 }
 
 // isVetoHookCommand recognises any hook command string we (or our
-// Python predecessor) would have inserted. Matches `veto hook
-// claude-code` substring AND `veto-hook.py` legacy paths.
+// Python predecessor) would have inserted. We deliberately do NOT use
+// a loose strings.Contains(cmd, "veto") check: that pattern was the
+// same drift class the install-wrappers Layer-4 fix removed. An
+// attacker-planted hook command like
+// `/opt/homebrew/bin/notveto-evil hook claude-code` would have
+// matched the old check and been silently accepted as "already ours."
+//
+// Instead, we tokenize cmd, take the first token, and require its
+// basename to be exactly `veto` (modern command) or to end in
+// `veto-hook` / `veto-hook.py` (the Python predecessor). The lexical
+// check is the floor — settings.json commonly stores absolute paths
+// that no longer exist (e.g. after `make install` to a different
+// prefix), and we still need to recognize those as ours to avoid
+// leaving duplicate stale entries on uninstall.
 func isVetoHookCommand(cmd string) bool {
 	if cmd == "" {
 		return false
 	}
-	if strings.Contains(cmd, "hook claude-code") && strings.Contains(cmd, "veto") {
+	exe := firstTokenBasename(cmd)
+	if exe == "" {
+		return false
+	}
+	// Modern form: `<somewhere>/veto hook claude-code [...]`. Require
+	// the leaf basename to be exactly `veto` (not merely contain it).
+	if exe == "veto" && strings.Contains(cmd, "hook claude-code") {
 		return true
 	}
-	if strings.Contains(cmd, "veto-hook.py") {
-		return true
-	}
-	if strings.HasSuffix(cmd, "/veto-hook") {
+	// Legacy Python predecessor: `<somewhere>/veto-hook.py` or
+	// `<somewhere>/veto-hook` (with or without extension).
+	if exe == "veto-hook" || exe == "veto-hook.py" {
 		return true
 	}
 	return false
+}
+
+// firstTokenBasename extracts the basename of the first whitespace-
+// separated token of a command string. Quoted paths are unwrapped so
+// `"/Users/me/Application Support/veto" hook claude-code` collapses
+// to `veto`. Returns "" if the input is empty or malformed.
+//
+// This is a minimal, dependency-free tokenizer; we don't need shlex
+// here because the hook commands we recognise have a strict shape
+// (path + ` hook claude-code` or path alone).
+func firstTokenBasename(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	if cmd[0] == '"' {
+		if end := strings.IndexByte(cmd[1:], '"'); end > 0 {
+			return filepath.Base(cmd[1 : 1+end])
+		}
+		return ""
+	}
+	if cmd[0] == '\'' {
+		if end := strings.IndexByte(cmd[1:], '\''); end > 0 {
+			return filepath.Base(cmd[1 : 1+end])
+		}
+		return ""
+	}
+	if i := strings.IndexAny(cmd, " \t"); i > 0 {
+		return filepath.Base(cmd[:i])
+	}
+	return filepath.Base(cmd)
 }
 
 func findMatcherEntry(entries []any, matcher string) (map[string]any, int) {

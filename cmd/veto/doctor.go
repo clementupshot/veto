@@ -47,9 +47,9 @@ const (
 
 // checkResult is one row in the doctor's output table.
 type checkResult struct {
-	status  status
-	label   string
-	detail  string
+	status   status
+	label    string
+	detail   string
 	howToFix string // shown only on WARN/FAIL
 }
 
@@ -61,12 +61,20 @@ func runDoctor(logger zerolog.Logger, cfg config, args []string) int {
 		return exitUsage
 	}
 
+	// Resolve the running veto binary once; the layer checks compare
+	// every wrapper/shim symlink against this canonical path. Empty on
+	// resolution failure — pointsAtVeto handles that fail-closed.
+	vetoPath, vetoErr := resolveVetoBinary()
+	if vetoErr != nil {
+		vetoPath = ""
+	}
+
 	results := []checkResult{}
 	results = append(results, checkVetoOnPath())
-	results = append(results, checkShimDir()...)
+	results = append(results, checkShimDir(vetoPath)...)
 	results = append(results, checkClaudeHook())
 	results = append(results, checkInterposer()...)
-	results = append(results, checkWrappers(cfg)...)
+	results = append(results, checkWrappers(cfg, vetoPath)...)
 	intelResults := checkIntel(logger, cfg)
 	results = append(results, intelResults...)
 
@@ -137,7 +145,7 @@ func checkVetoOnPath() checkResult {
 // We don't refuse to PASS the shim-dir check just because mise/homebrew
 // is earlier in PATH for SOME binary — that's per-PM granularity, surfaced
 // as per-shim WARN/FAIL.
-func checkShimDir() []checkResult {
+func checkShimDir(vetoPath string) []checkResult {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return []checkResult{{status: statusFail, label: "shim dir", detail: "cannot resolve home: " + err.Error()}}
@@ -174,9 +182,9 @@ func checkShimDir() []checkResult {
 		info, err := os.Lstat(shimPath)
 		if err != nil {
 			out = append(out, checkResult{
-				status:  statusWarn,
-				label:   "shim:" + name,
-				detail:  "not installed",
+				status:   statusWarn,
+				label:    "shim:" + name,
+				detail:   "not installed",
 				howToFix: "Run `veto install-shims` to create missing shims.",
 			})
 			continue
@@ -190,9 +198,11 @@ func checkShimDir() []checkResult {
 			})
 			continue
 		}
-		// Verify the shim points at the veto binary.
-		target, err := os.Readlink(shimPath)
-		if err != nil || !strings.Contains(target, "veto") {
+		// Verify the shim points at the veto binary. Strict
+		// physical-path identity (not name substring) — see
+		// pointsAtVeto in install_wrappers.go for the attack model.
+		target, _ := os.Readlink(shimPath)
+		if !pointsAtVeto(shimPath, vetoPath) {
 			out = append(out, checkResult{
 				status:   statusFail,
 				label:    "shim:" + name,
@@ -204,7 +214,7 @@ func checkShimDir() []checkResult {
 		// Earlier-in-PATH conflict: a real PM lives in a dir that comes
 		// before the shim dir. The shim never gets reached for this PM.
 		if shimIdx >= 0 {
-			shadow := earlierRealBinary(name, pathParts, shimIdx)
+			shadow := earlierRealBinary(name, pathParts, shimIdx, vetoPath)
 			if shadow != "" {
 				// Mise (and asdf, pyenv, nvm, ...) typically own a
 				// version-pinned shim/install dir that the user
@@ -269,7 +279,7 @@ func detectVersionManager(shadowPath string) string {
 // earlierRealBinary returns the path of a real `name` binary earlier in
 // PATH than the shim dir, or "" if none. Used to detect when a shim is
 // silently shadowed by mise/homebrew.
-func earlierRealBinary(name string, pathParts []string, shimIdx int) string {
+func earlierRealBinary(name string, pathParts []string, shimIdx int, vetoPath string) string {
 	for i := 0; i < shimIdx; i++ {
 		candidate := filepath.Join(pathParts[i], name)
 		info, err := os.Stat(candidate)
@@ -278,10 +288,11 @@ func earlierRealBinary(name string, pathParts []string, shimIdx int) string {
 		}
 		// Don't flag if the earlier entry is itself a veto-pointing
 		// symlink (some users wire a system-wide veto outside ~/.local/bin).
-		if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
-			if strings.Contains(resolved, "veto") {
-				continue
-			}
+		// Strict physical-path identity — substring matching here would
+		// silently accept an attacker-planted /usr/local/bin/<pm> →
+		// /tmp/veto-malware.
+		if vetoPath != "" && pointsAtVeto(candidate, vetoPath) {
+			continue
 		}
 		return candidate
 	}
@@ -458,7 +469,7 @@ func checkInterposer() []checkResult {
 // If no state file exists at all we emit a single WARN line, since
 // Layer 4 is opt-in: a user running with just Layers 1-3 is in a valid
 // configuration, just not the strongest one.
-func checkWrappers(cfg config) []checkResult {
+func checkWrappers(cfg config, vetoPath string) []checkResult {
 	state, err := loadWrapperState(cfg)
 	if err != nil {
 		return []checkResult{{
@@ -495,15 +506,19 @@ func checkWrappers(cfg config) []checkResult {
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			out = append(out, checkResult{
-				status: statusFail,
-				label:  "wrapper:" + w.PM,
-				detail: fmt.Sprintf("%s is no longer a symlink — wrapper has been replaced by a real binary (likely after upgrade)", w.Path),
+				status:   statusFail,
+				label:    "wrapper:" + w.PM,
+				detail:   fmt.Sprintf("%s is no longer a symlink — wrapper has been replaced by a real binary (likely after upgrade)", w.Path),
 				howToFix: "Re-run `veto install-wrappers --force` to re-wrap.",
 			})
 			continue
 		}
 		target, _ := os.Readlink(w.Path)
-		if !strings.Contains(target, "veto") {
+		// Strict physical-path identity (not name substring) — substring
+		// matching here would silently accept an attacker-planted
+		// /opt/homebrew/bin/npm → /tmp/veto-malware. See pointsAtVeto
+		// in install_wrappers.go for the attack model.
+		if !pointsAtVeto(w.Path, vetoPath) {
 			out = append(out, checkResult{
 				status: statusFail,
 				label:  "wrapper:" + w.PM,
@@ -516,9 +531,9 @@ func checkWrappers(cfg config) []checkResult {
 		// `.veto-original` must still exist for execReal to find.
 		if _, err := os.Stat(w.OriginalPath); err != nil {
 			out = append(out, checkResult{
-				status: statusFail,
-				label:  "wrapper:" + w.PM,
-				detail: fmt.Sprintf("%s missing — wrapper would execute as veto with nothing to delegate to", w.OriginalPath),
+				status:   statusFail,
+				label:    "wrapper:" + w.PM,
+				detail:   fmt.Sprintf("%s missing — wrapper would execute as veto with nothing to delegate to", w.OriginalPath),
 				howToFix: "Run `veto uninstall-wrappers` to clean state and `veto install-wrappers` to re-wrap.",
 			})
 			continue

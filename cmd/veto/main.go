@@ -118,6 +118,8 @@ func run(args []string) int {
 		return runUninstallClaudeHook(logger, args[1:])
 	case "install-codex":
 		return runInstallCodex(logger, args[1:])
+	case "install-cursor":
+		return runInstallCursor(logger, args[1:])
 	case "install-preload":
 		return runInstallPreload(logger, args[1:])
 	case "uninstall-preload":
@@ -626,6 +628,9 @@ Layer 2 — PATH shims (any agent shell, Codex, CI):
                                remove veto-managed symlinks
   veto install-codex        install-shims + a ~/.codex/config.toml scan
                                for env-policy gotchas
+  veto install-cursor [--project-dir DIR] [--shim-dir DIR] [--skip-shims] [--force]
+                               install-shims + write .cursor/rules/veto.mdc
+                               so Cursor's agent prefixes installs with `+"`veto`"+`
 
 Layer 3 — native execve interposer (catches direct child-process spawns):
   veto install-preload --lib PATH [--shell-rc PATH|auto] [--install-to DIR] [--print]

@@ -1,49 +1,414 @@
-// Package openssf will implement intel.Source for the OpenSSF malicious-packages
+// Package openssf implements intel.Source for OpenSSF's malicious-packages
 // repository at https://github.com/ossf/malicious-packages.
 //
-// Planned data flow: clone or shallow-fetch the repo, walk the OSV-format JSON
-// files under osv/<ecosystem>/ and translate each MAL-* advisory into one or
-// more intel.MalwareReports. The repo contains historical and current findings
-// with per-version granularity, making it the closest single-source overlap
-// with Aikido's feed.
+// The repo publishes per-package MAL-* advisories as JSON files under
+// osv/malicious/<ecosystem>/<package>/<MAL-id>.json. We pull the main-branch
+// tarball (~35 MB compressed), stream-walk the matching entries, and parse
+// each via osvschema.
 //
-// This stub satisfies the interface and registers the source ID so wiring
-// elsewhere already references the eventual production implementation.
+// Three caching layers:
+//
+//  1. on-disk tarball + etag (skip download when upstream etag unchanged),
+//  2. on-disk parsed gob keyed by etag (skip re-parse on warm refresh),
+//  3. in-memory reports (populated once per process, partitioned per Fetch).
+//
+// All three keep `bouncer <pm> install foo` from paying parse cost on the
+// hot path while still doing a conditional GET to keep the malware view fresh.
 package openssf
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
+	"encoding/gob"
+	stderrors "errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/brynbellomy/go-utils/errors"
+	"github.com/rs/zerolog"
 
 	"github.com/brynbellomy/package-bouncer/internal/intel"
+	"github.com/brynbellomy/package-bouncer/internal/intel/osvschema"
 )
 
-const sourceID = "openssf"
+const (
+	defaultBaseURL = "https://github.com/ossf/malicious-packages/archive/refs/heads/main.tar.gz"
+	sourceID       = "openssf"
+	osvPrefix      = "osv/malicious/"
+)
 
 // Options configures the OpenSSF source.
 type Options struct {
-	// CacheDir is where the cloned/fetched repo and parsed snapshot live.
+	// TarballURL overrides the upstream tarball location.
+	TarballURL string
+
+	// CacheDir is where the tarball and parsed gob blobs live.
+	// Required; typically ~/.cache/package-bouncer/openssf.
 	CacheDir string
+
+	// HTTPClient overrides the default 5-minute-timeout client. The first
+	// sync downloads 35 MB so we allow more time than aikido's 30s.
+	HTTPClient *http.Client
+
+	// Logger receives structured log events.
+	Logger zerolog.Logger
 }
 
-// Source is the OpenSSF malicious-packages implementation of intel.Source.
+// Source is the OpenSSF implementation of intel.Source.
 type Source struct {
-	cacheDir string
+	tarballURL string
+	cacheDir   string
+	client     *http.Client
+	logger     zerolog.Logger
+
+	mu      sync.Mutex
+	cached  []intel.MalwareReport
+	loaded  bool
+	cacheEt string
 }
 
 var _ intel.Source = (*Source)(nil)
 
 // New builds an OpenSSF source.
 func New(opts Options) (*Source, error) {
-	return &Source{cacheDir: opts.CacheDir}, nil
+	if opts.CacheDir == "" {
+		return nil, errors.New("openssf: CacheDir is required")
+	}
+	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
+		return nil, errors.With(err, "openssf: create cache dir").Set("path", opts.CacheDir)
+	}
+
+	tarballURL := opts.TarballURL
+	if tarballURL == "" {
+		tarballURL = defaultBaseURL
+	}
+
+	client := opts.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Minute}
+	}
+
+	return &Source{
+		tarballURL: tarballURL,
+		cacheDir:   opts.CacheDir,
+		client:     client,
+		logger:     opts.Logger.With().Str("component", "intel.openssf").Logger(),
+	}, nil
 }
 
 // ID implements intel.Source.
 func (s *Source) ID() string { return sourceID }
 
-// Fetch implements intel.Source. Returns ErrUnsupportedEcosystem until the
-// real implementation lands; this is a fail-silent skip in the Store.
-//
-// @@TODO: implement OSV parsing from ossf/malicious-packages.
-func (s *Source) Fetch(_ context.Context, _ intel.Ecosystem) ([]intel.MalwareReport, error) {
-	return nil, intel.ErrUnsupportedEcosystem
+// Fetch implements intel.Source. The first call within a refresh cycle
+// downloads (or revalidates) and parses; subsequent calls for other
+// ecosystems reuse the cached parse.
+func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.MalwareReport, error) {
+	if _, ok := ecosystemPath(eco); !ok {
+		return nil, intel.ErrUnsupportedEcosystem
+	}
+
+	reports, err := s.ensureLoaded(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	out := reports[:0:0]
+	for _, r := range reports {
+		if r.Ecosystem == eco {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// ensureLoaded brings the in-memory reports into sync with upstream, doing
+// only the work that's actually needed (etag check → maybe download → maybe
+// re-parse → load gob).
+func (s *Source) ensureLoaded(ctx context.Context) ([]intel.MalwareReport, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	upstreamEtag, err := s.headEtag(ctx)
+	if err != nil {
+		// Network blip: fall back to whatever we have in memory or on disk.
+		if s.loaded {
+			s.logger.Warn().Err(err).Msg("etag check failed, using in-memory cache")
+			return s.cached, nil
+		}
+		if cached, ok := s.loadGob(""); ok {
+			s.logger.Warn().Err(err).Msg("etag check failed, using disk gob")
+			s.cached = cached
+			s.loaded = true
+			return s.cached, nil
+		}
+		return nil, errors.With(err, "openssf: cannot reach upstream and no local cache")
+	}
+
+	if s.loaded && s.cacheEt == upstreamEtag {
+		return s.cached, nil
+	}
+
+	// Try the gob first — if disk matches upstream, we skip the heavy parse.
+	if cached, ok := s.loadGob(upstreamEtag); ok {
+		s.cached = cached
+		s.cacheEt = upstreamEtag
+		s.loaded = true
+		return s.cached, nil
+	}
+
+	tarballPath, etag, err := s.downloadIfChanged(ctx, upstreamEtag)
+	if err != nil {
+		return nil, err
+	}
+
+	reports, err := s.parseTarball(tarballPath)
+	if err != nil {
+		return nil, errors.With(err, "openssf: parse tarball")
+	}
+
+	if err := s.writeGob(etag, reports); err != nil {
+		// Gob cache is an optimization; log and keep going.
+		s.logger.Warn().Err(err).Msg("write parsed gob")
+	}
+
+	s.cached = reports
+	s.cacheEt = etag
+	s.loaded = true
+	s.logger.Info().Int("reports", len(reports)).Str("etag", etag).Msg("openssf parsed")
+	return s.cached, nil
+}
+
+func (s *Source) headEtag(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, s.tarballURL, nil)
+	if err != nil {
+		return "", errors.With(err, "build head request")
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", errors.With(err, "head request")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", errors.WithNew("unexpected head status").Set("status", resp.StatusCode)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		return "", errors.New("upstream returned no etag")
+	}
+	return etag, nil
+}
+
+// downloadIfChanged returns the local tarball path and the etag we just saved,
+// downloading only if the local etag differs from upstream.
+func (s *Source) downloadIfChanged(ctx context.Context, upstreamEtag string) (string, string, error) {
+	tarballPath := filepath.Join(s.cacheDir, "main.tar.gz")
+	etagPath := filepath.Join(s.cacheDir, "main.etag")
+
+	if existing, err := os.ReadFile(etagPath); err == nil && string(existing) == upstreamEtag {
+		if _, err := os.Stat(tarballPath); err == nil {
+			return tarballPath, upstreamEtag, nil
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.tarballURL, nil)
+	if err != nil {
+		return "", "", errors.With(err, "build get request")
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", "", errors.With(err, "get tarball")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", errors.WithNew("unexpected get status").Set("status", resp.StatusCode)
+	}
+
+	tmp, err := os.CreateTemp(s.cacheDir, "main.tar.gz.tmp-")
+	if err != nil {
+		return "", "", errors.With(err, "create temp tarball")
+	}
+	tmpPath := tmp.Name()
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", "", errors.With(err, "stream tarball")
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", "", errors.With(err, "close temp tarball")
+	}
+	if err := os.Rename(tmpPath, tarballPath); err != nil {
+		os.Remove(tmpPath)
+		return "", "", errors.With(err, "rename tarball")
+	}
+	if err := os.WriteFile(etagPath, []byte(upstreamEtag), 0o644); err != nil {
+		s.logger.Warn().Err(err).Msg("write etag")
+	}
+	return tarballPath, upstreamEtag, nil
+}
+
+// parseTarball streams the tarball, extracting JSON files under
+// osv/malicious/<ecosystem>/, and feeds each to osvschema.
+func (s *Source) parseTarball(path string) ([]intel.MalwareReport, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, errors.With(err, "open tarball")
+	}
+	defer f.Close()
+
+	gzr, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, errors.With(err, "gzip reader")
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	var reports []intel.MalwareReport
+	for {
+		hdr, err := tr.Next()
+		if stderrors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, errors.With(err, "tar read")
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		if !isMaliciousEntry(hdr.Name) {
+			continue
+		}
+		payload, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, errors.With(err, "read entry").Set("name", hdr.Name)
+		}
+		adv, err := osvschema.Parse(payload)
+		if err != nil {
+			s.logger.Debug().Err(err).Str("entry", hdr.Name).Msg("skip unparseable advisory")
+			continue
+		}
+		reports = append(reports, osvschema.Reports(adv, sourceID)...)
+	}
+	return reports, nil
+}
+
+// isMaliciousEntry returns true if name is `<repo>/osv/malicious/<eco>/.../*.json`.
+func isMaliciousEntry(name string) bool {
+	if !strings.HasSuffix(name, ".json") {
+		return false
+	}
+	// Strip the repo-root prefix (`malicious-packages-main/`).
+	parts := strings.SplitN(name, "/", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	return strings.HasPrefix(parts[1], osvPrefix)
+}
+
+func ecosystemPath(eco intel.Ecosystem) (string, bool) {
+	switch eco {
+	case intel.EcosystemNPM:
+		return "npm", true
+	case intel.EcosystemPyPI:
+		return "pypi", true
+	default:
+		return "", false
+	}
+}
+
+// gob cache layout: <CacheDir>/parsed-<etag-hex>.gob, with the etag baked into
+// the filename so a stale gob can't shadow a fresh tarball.
+type gobBlob struct {
+	Reports []intel.MalwareReport
+}
+
+func (s *Source) gobPath(etag string) string {
+	// Etag may contain quotes; strip them so we can use it in filenames.
+	clean := strings.NewReplacer(`"`, "", `/`, "_", `:`, "_", ` `, "_").Replace(etag)
+	if clean == "" {
+		clean = "no-etag"
+	}
+	return filepath.Join(s.cacheDir, "parsed-"+clean+".gob")
+}
+
+func (s *Source) loadGob(etag string) ([]intel.MalwareReport, bool) {
+	if etag == "" {
+		// Cold path with no etag — pick whichever gob is on disk.
+		entries, err := os.ReadDir(s.cacheDir)
+		if err != nil {
+			return nil, false
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "parsed-") && strings.HasSuffix(e.Name(), ".gob") {
+				return s.readGobFile(filepath.Join(s.cacheDir, e.Name()))
+			}
+		}
+		return nil, false
+	}
+	return s.readGobFile(s.gobPath(etag))
+}
+
+func (s *Source) readGobFile(path string) ([]intel.MalwareReport, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	var blob gobBlob
+	if err := gob.NewDecoder(f).Decode(&blob); err != nil {
+		s.logger.Warn().Err(err).Str("path", path).Msg("gob decode failed; ignoring cache")
+		return nil, false
+	}
+	return blob.Reports, true
+}
+
+func (s *Source) writeGob(etag string, reports []intel.MalwareReport) error {
+	path := s.gobPath(etag)
+	tmp, err := os.CreateTemp(s.cacheDir, "parsed-tmp-")
+	if err != nil {
+		return errors.With(err, "create temp gob")
+	}
+	tmpPath := tmp.Name()
+	enc := gob.NewEncoder(tmp)
+	if err := enc.Encode(gobBlob{Reports: reports}); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return errors.With(err, "encode gob")
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return errors.With(err, "close temp gob")
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return errors.With(err, "rename gob")
+	}
+	// Best-effort: prune older gob files for this source so disk usage stays
+	// bounded as etags rotate.
+	s.pruneOldGobs(path)
+	return nil
+}
+
+func (s *Source) pruneOldGobs(keep string) {
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "parsed-") || !strings.HasSuffix(name, ".gob") {
+			continue
+		}
+		full := filepath.Join(s.cacheDir, name)
+		if full == keep {
+			continue
+		}
+		_ = os.Remove(full)
+	}
 }

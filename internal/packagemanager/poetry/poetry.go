@@ -37,12 +37,10 @@ func (Manager) ParseInstalls(args []string) []packagemanager.Install {
 	if _, isInstall := installVerbs[verb]; !isInstall {
 		return nil
 	}
-	installs := []packagemanager.Install{}
-	for _, tok := range rest {
-		if argv.IsFlag(tok) {
-			continue
-		}
-		installs = append(installs, pyspec.Parse(tok))
+	specs := argv.CollectPositionals(rest)
+	installs := make([]packagemanager.Install, 0, len(specs))
+	for _, spec := range specs {
+		installs = append(installs, pyspec.Parse(spec))
 	}
 	return installs
 }

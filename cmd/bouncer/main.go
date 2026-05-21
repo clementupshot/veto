@@ -48,7 +48,11 @@ const (
 	exitUsage      = 64
 	exitRefused    = 1
 	exitInternal   = 70
-	syncTimeout    = 30 * time.Second
+	// syncTimeout bounds a full refresh across all sources. OpenSSF alone can
+	// take ~10s on first sync (35 MB tarball + 454k entries); allow generous
+	// headroom so the first-time experience isn't surprising. Subsequent
+	// refreshes short-circuit via etag in milliseconds.
+	syncTimeout = 5 * time.Minute
 )
 
 func main() {
@@ -248,7 +252,7 @@ func loadConfig() (config, error) {
 	v.SetEnvPrefix("BOUNCER")
 	v.AutomaticEnv()
 	v.SetDefault("cache_dir", defaultCacheDir())
-	v.SetDefault("sources", []string{"aikido"})
+	v.SetDefault("sources", []string{"aikido", "openssf", "osv"})
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 	v.AddConfigPath(filepath.Join(defaultCacheDir(), ".."))

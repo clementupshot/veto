@@ -81,6 +81,24 @@ func TestParseInstalls(t *testing.T) {
 				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local-pkg"}, RawSpec: "./local-pkg", Local: true},
 			},
 		},
+		{
+			// Regression for leading-dash typosquats: without `--` handling, a
+			// package name starting with `-` would be filtered out as a flag,
+			// silently bypassing the gate.
+			name: "leading-dash package after -- separator is parsed",
+			args: []string{"install", "--", "--hiljson"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "--hiljson"}, RawSpec: "--hiljson"},
+			},
+		},
+		{
+			name: "flags and positionals interleaved with separator",
+			args: []string{"install", "--save-dev", "typescript", "--", "-evil-pkg"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "typescript"}, RawSpec: "typescript"},
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "-evil-pkg"}, RawSpec: "-evil-pkg"},
+			},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

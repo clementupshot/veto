@@ -88,6 +88,10 @@ func splitNameVersion(spec string) (string, string) {
 // args do not start an install command; an empty slice when args ARE an install
 // verb but no explicit specs were named (e.g. `npm install`, `npm ci`).
 //
+// Respects the POSIX `--` separator: every token after `--` is treated as a
+// positional package spec even if it starts with `-` (so leading-dash
+// typosquat names like `-chalk` are gated rather than silently bypassed).
+//
 // @@TODO: support a per-PM table of flags-that-take-values so callers can
 // position global flags before the verb without confusing the parser.
 func ParseInstallArgs(args []string, installVerbs map[string]struct{}) []packagemanager.Install {
@@ -98,12 +102,10 @@ func ParseInstallArgs(args []string, installVerbs map[string]struct{}) []package
 	if _, isInstall := installVerbs[verb]; !isInstall {
 		return nil
 	}
-	installs := []packagemanager.Install{}
-	for _, tok := range rest {
-		if argv.IsFlag(tok) {
-			continue
-		}
-		installs = append(installs, Parse(tok))
+	specs := argv.CollectPositionals(rest)
+	installs := make([]packagemanager.Install, 0, len(specs))
+	for _, spec := range specs {
+		installs = append(installs, Parse(spec))
 	}
 	return installs
 }

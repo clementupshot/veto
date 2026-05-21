@@ -18,3 +18,23 @@ func FirstNonFlag(args []string) (string, []string, bool) {
 	}
 	return "", nil, false
 }
+
+// CollectPositionals returns every non-flag token in args, honoring the POSIX
+// `--` separator: tokens after `--` are positional even when they begin with
+// '-'. Without this, package names like `-chalk` (a real typosquat shape)
+// would be silently filtered out.
+func CollectPositionals(args []string) []string {
+	out := make([]string, 0, len(args))
+	positional := false
+	for _, tok := range args {
+		if !positional && tok == "--" {
+			positional = true
+			continue
+		}
+		if !positional && IsFlag(tok) {
+			continue
+		}
+		out = append(out, tok)
+	}
+	return out
+}

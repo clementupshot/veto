@@ -33,6 +33,7 @@ import (
 	"github.com/brynbellomy/veto/internal/intel/sources/openssf"
 	"github.com/brynbellomy/veto/internal/intel/sources/osv"
 	"github.com/brynbellomy/veto/internal/intel/sources/pypa"
+	"github.com/brynbellomy/veto/internal/managers"
 	"github.com/brynbellomy/veto/internal/packagemanager"
 	"github.com/brynbellomy/veto/internal/packagemanager/bun"
 	pmexec "github.com/brynbellomy/veto/internal/packagemanager/exec"
@@ -51,10 +52,10 @@ import (
 )
 
 const (
-	exitOK         = 0
-	exitUsage      = 64
-	exitRefused    = 1
-	exitInternal   = 70
+	exitOK       = 0
+	exitUsage    = 64
+	exitRefused  = 1
+	exitInternal = 70
 	// syncTimeout bounds a full refresh across all sources. OpenSSF alone can
 	// take ~10s on first sync (35 MB tarball + 454k entries); allow generous
 	// headroom so the first-time experience isn't surprising. Subsequent
@@ -136,16 +137,10 @@ func run(args []string) int {
 }
 
 // isShimName reports whether basename matches one of the package-manager
-// binaries veto shadows via PATH shims. Kept in main.go so shim dispatch
-// stays fast and dependency-free (no config or store touched on the hot path).
+// binaries veto shadows via PATH shims. Delegates to managers.IsSupported
+// so this site cannot drift from the wrapper / shim / claude-hook lists.
 func isShimName(basename string) bool {
-	switch basename {
-	case "npm", "pnpm", "yarn", "bun",
-		"npx", "pnpx", "bunx",
-		"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm":
-		return true
-	}
-	return false
+	return managers.IsSupported(basename)
 }
 
 // runGate handles the `veto <pm> <args...>` path. When the veto
@@ -567,7 +562,11 @@ func (c *compoundExpander) Expand(ref packagemanager.ManifestRef) ([]packagemana
 }
 
 // buildPackageManagers returns the registry of supported PMs keyed by binary
-// name. Adding a new PM = one entry here plus the impl subpackage.
+// name. Every name in managers.Supported must appear here; the init-time
+// check below catches drift between the canonical list and the registry.
+//
+// Adding a new PM: append the name to managers.Supported, then add the
+// entry here (plus the impl subpackage).
 func buildPackageManagers() map[string]packagemanager.PackageManager {
 	return map[string]packagemanager.PackageManager{
 		"npm":    npm.New(),
@@ -586,6 +585,23 @@ func buildPackageManagers() map[string]packagemanager.PackageManager {
 		"bunx": pmexec.New(pmexec.Options{Name: "bunx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.BunxFlagsWithValues}),
 		"uvx":  pmexec.New(pmexec.Options{Name: "uvx", Ecosystem: intel.EcosystemPyPI, FlagsWithValues: pmexec.UvxFlagsWithValues}),
 		"pipx": pmexec.New(pmexec.Options{Name: "pipx", Ecosystem: intel.EcosystemPyPI, PipxStyle: true, FlagsWithValues: pmexec.PipxFlagsWithValues, SpecFlags: pmexec.PipxSpecFlags}),
+	}
+}
+
+// init guards the invariant "every name in managers.Supported has a real
+// PackageManager implementation." A drift here would let the claude-code
+// hook deny `<pm> install`, prompt the agent to retry as `veto <pm>
+// install`, and then have buildPackageManagers()[pm] return nil and
+// fall through to "unknown package manager; passing through" — i.e.
+// run ungated. Panic at startup so the regression is impossible to
+// ship.
+func init() {
+	registry := buildPackageManagers()
+	for _, name := range managers.Supported {
+		if _, ok := registry[name]; !ok {
+			panic("managers.Supported contains " + name +
+				" but buildPackageManagers has no implementation for it")
+		}
 	}
 }
 

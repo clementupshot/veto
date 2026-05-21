@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"github.com/google/shlex"
+
+	"github.com/brynbellomy/veto/internal/managers"
 )
 
 // Finding is the analyzer's verdict on a single Bash command. Empty PM
@@ -30,12 +32,34 @@ type Finding struct {
 	Tokens []string // tokens of the leaf command, after wrapper-stripping
 }
 
-// shimmedPMs is the set of package-manager binary names the hook intercepts.
-// Kept in sync with cmd/veto/shims.go::shimmedManagers.
-var shimmedPMs = map[string]struct{}{
-	"npm": {}, "npx": {}, "yarn": {}, "pnpm": {}, "pnpx": {},
-	"rush": {}, "rushx": {}, "bun": {}, "bunx": {},
-	"pip": {}, "pip3": {}, "uv": {}, "uvx": {}, "poetry": {}, "pipx": {}, "pdm": {},
+// shimmedPMs is the set of package-manager binary names the hook
+// intercepts. Built at init from managers.Supported so this set cannot
+// drift from the wrapper / shim / gate registry.
+//
+// Earlier versions added `rush` / `rushx` here even though the gate
+// had no PackageManager for them — denying `rush install` and
+// prompting `veto rush install` then fell through to "unknown package
+// manager; passing through" and ran ungated. The canonical list
+// excludes them; if real support lands, append to managers.Supported
+// and add a packagemanager subpackage.
+var shimmedPMs = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(managers.Supported))
+	for _, name := range managers.Supported {
+		m[name] = struct{}{}
+	}
+	return m
+}()
+
+// ShimmedPMs returns a copy of the set the hook intercepts, exported
+// for the cross-package drift guard in
+// internal/managers/managers_test.go. Allocates a fresh map per call
+// so callers cannot mutate hook state.
+func ShimmedPMs() map[string]struct{} {
+	out := make(map[string]struct{}, len(shimmedPMs))
+	for k := range shimmedPMs {
+		out[k] = struct{}{}
+	}
+	return out
 }
 
 // dangerousVerbs maps each PM to the verbs that resolve and fetch remote
@@ -46,7 +70,6 @@ var dangerousVerbs = map[string]map[string]struct{}{
 	"yarn":   setOf("install", "add", "upgrade", "up", "dlx"),
 	"pnpm":   setOf("install", "i", "add", "update", "up", "upgrade", "dlx"),
 	"bun":    setOf("install", "i", "add", "update", "upgrade", "x", "create"),
-	"rush":   setOf("install", "add", "update"),
 	"pip":    setOf("install", "download"),
 	"pip3":   setOf("install", "download"),
 	"pipx":   setOf("install", "upgrade", "inject", "run"),
@@ -58,7 +81,7 @@ var dangerousVerbs = map[string]map[string]struct{}{
 // execPMs are the fetch-and-run binaries: every non-help invocation pulls
 // and executes remote code, so any non-trivial argv is treated as risky.
 var execPMs = map[string]struct{}{
-	"npx": {}, "pnpx": {}, "bunx": {}, "rushx": {}, "uvx": {},
+	"npx": {}, "pnpx": {}, "bunx": {}, "uvx": {},
 }
 
 // wrappers are programs whose argv pattern is `<wrapper> [flags] <real-cmd>

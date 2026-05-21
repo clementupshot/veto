@@ -41,6 +41,9 @@ import (
 
 	"github.com/brynbellomy/go-utils/errors"
 	"github.com/rs/zerolog"
+
+	"github.com/brynbellomy/veto/internal/managers"
+	"github.com/brynbellomy/veto/internal/vetopath"
 )
 
 // wrapperSuffix is the rename target. `.veto-original` is verbose on
@@ -79,14 +82,10 @@ type wrapperEntry struct {
 	Source string `json:"source"`
 }
 
-// wrappedManagers is the set of PM names we wrap. Same list as
-// shimmedManagers (defined in shims.go); duplicated here as a guard
-// against the two ever drifting silently.
-var wrappedManagers = []string{
-	"npm", "pnpm", "yarn", "bun",
-	"npx", "pnpx", "bunx",
-	"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm",
-}
+// wrappedManagers is the set of PM names we wrap. Sourced from
+// internal/managers so this site cannot drift from the shim list,
+// the claude-code hook list, or the in-process gate's PM registry.
+var wrappedManagers = managers.Supported
 
 // runInstallWrappers implements `veto install-wrappers [--dry-run] [--force]`.
 //
@@ -427,31 +426,13 @@ func globMiseBinDirs(root string) []string {
 	return out
 }
 
-// pointsAtVeto reports whether linkPath (a symlink) resolves to the
-// same physical file as vetoPath. Both sides are fully evaluated via
-// filepath.EvalSymlinks so a symlink chain that ends at the canonical
-// veto binary is recognized regardless of how many hops it takes.
-//
-// Why a strict identity check matters: the prior version used
-// strings.Contains(target, "veto"), which would accept ANY symlink
-// whose target string contained the substring "veto" — including an
-// attacker-planted /opt/homebrew/bin/npm → /tmp/veto-malware that
-// merely uses our name. Once accepted as "already ours," the wrap
-// step skips and the attacker's shadow stays in place. Resolving and
-// comparing physical paths closes that hole.
-//
-// Returns false (not error) on any I/O failure: a symlink we cannot
-// resolve is, by definition, not provably ours.
+// pointsAtVeto is a local alias for vetopath.PointsAt. Kept for
+// readability at call sites in this file; the shared helper lives in
+// internal/vetopath so doctor.go, install_claude_hook.go, and the
+// interposer recursion-guard can use the same physical-path identity
+// check.
 func pointsAtVeto(linkPath, vetoPath string) bool {
-	resolved, err := filepath.EvalSymlinks(linkPath)
-	if err != nil {
-		return false
-	}
-	canonicalVeto, err := filepath.EvalSymlinks(vetoPath)
-	if err != nil {
-		return false
-	}
-	return resolved == canonicalVeto
+	return vetopath.PointsAt(linkPath, vetoPath)
 }
 
 // isWrappableTarget reports whether the path is something we should
@@ -651,4 +632,3 @@ func saveWrapperState(cfg config, state wrapperState) error {
 	}
 	return os.Rename(tmpPath, path)
 }
-

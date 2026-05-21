@@ -44,7 +44,7 @@ gate/              ← decision logic (allow / refuse / passthrough)
 cmd/bouncer/       ← CLI entrypoint (viper config)
 hooks/             ← agent integrations
   claude-code/     ← PreToolUse Bash hook (Python, stdlib-only)
-  codex/ sirene/   ← planned (PATH-shim approach)
+  codex/ sirene/   ← PATH-shim approach (see `bouncer install-shims`)
 ```
 
 Per-source malware feeds are fetched concurrently with etag-based caching
@@ -85,8 +85,18 @@ agent to route through `bouncer`. Wrappers (`timeout`, `xargs`, `env`,
 `sudo`), `bash -c "…"`, and shell separators (`&&`, `;`, `|`) are all
 handled.
 
-Codex and Sirene integrations will land via the PATH-shim subsystem
-(see [`hooks/codex/`](hooks/codex/), [`hooks/sirene/`](hooks/sirene/)).
+For agents and shells without a hook protocol (Codex CLI, Sirene, CI
+runners, plain terminals), use the PATH-shim subsystem:
+
+```sh
+bouncer install-shims                # symlinks ~/.local/bin/{npm,pnpm,…} → bouncer
+export PATH=$HOME/.local/bin:$PATH   # in front of the real PM directories
+```
+
+Now `npm install foo` resolves via the shim, bouncer detects the
+invocation by its basename (`os.Args[0]`), and dispatches through the
+gate. `bouncer uninstall-shims` reverses it. Both refuse to clobber
+non-bouncer files unless `--force` is passed.
 
 ## Status
 

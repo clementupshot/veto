@@ -361,6 +361,12 @@ func removeClaudeHook(settings map[string]any) bool {
 // that no longer exist (e.g. after `make install` to a different
 // prefix), and we still need to recognize those as ours to avoid
 // leaving duplicate stale entries on uninstall.
+//
+// TODO(H1): when a settings.json entry references an existing file,
+// additionally identity-check the resolved binary against the running
+// veto via vetopath.PointsAt. The basename floor must remain for the
+// stale-path case (uninstall after `make install` to a new prefix),
+// so the identity check is a strict-mode AND, not a replacement.
 func isVetoHookCommand(cmd string) bool {
 	if cmd == "" {
 		return false

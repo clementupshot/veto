@@ -117,6 +117,19 @@ func (s *Source) ID() string { return sourceID }
 
 // Fetch implements intel.Source.
 func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.MalwareReport, error) {
+	return s.fetchBounded(ctx, eco, true)
+}
+
+// fetchBounded is Fetch with a retry budget. Used internally to
+// recover from the 304-with-missing-cache edge case: upstream says
+// "nothing changed" but our zip file vanished (manual cleanup, disk
+// wipe). Drop the etag and refetch ONCE. Mirrors aikido's
+// fetchWithCacheBounded shape. Not extracted to a shared helper for
+// now because the call sites differ on body-handling (zip stream vs
+// json bytes), and an extraction round-trip risks regressing the
+// existing aikido tests which are mutation-resistant per the M6
+// philosophy. (Bryn's M5 review comment.)
+func (s *Source) fetchBounded(ctx context.Context, eco intel.Ecosystem, retryAllowed bool) ([]intel.MalwareReport, error) {
 	ecoPath, ok := ecosystemPath(eco)
 	if !ok {
 		return nil, intel.ErrUnsupportedEcosystem
@@ -166,6 +179,27 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 	case http.StatusNotModified:
 		if entry, ok := s.cached[eco]; ok && entry.etag == string(prevEtag) {
 			return entry.reports, nil
+		}
+		// 304-with-missing-cache: upstream says "nothing changed" but
+		// the on-disk zip is gone. Drop the etag and refetch ONCE
+		// (bounded retry — a wedged filesystem must not loop). Mirrors
+		// aikido's pattern. M5 in the audit.
+		if _, statErr := os.Stat(zipPath); statErr != nil {
+			if !retryAllowed {
+				return nil, errors.With(statErr, "304 with missing cache after retry").
+					Set("url", url).Set("zip_path", zipPath)
+			}
+			s.logger.Warn().Err(statErr).Str("ecosystem", string(eco)).
+				Msg("304 received but cached zip missing; forcing refetch")
+			_ = os.Remove(etagPath)
+			// Release the lock so the recursive call can re-acquire
+			// it without deadlocking. The deferred Unlock at the top
+			// of fetchBounded would otherwise unlock a mutex the
+			// recursive call also released.
+			s.mu.Unlock()
+			result, err := s.fetchBounded(ctx, eco, false)
+			s.mu.Lock() // re-take so the top-level defer's Unlock is balanced
+			return result, err
 		}
 		reports, err := parseZip(zipPath, s.logger)
 		if err != nil {

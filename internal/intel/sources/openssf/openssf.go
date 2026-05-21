@@ -18,9 +18,12 @@ package openssf
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/gob"
+	"encoding/hex"
 	stderrors "errors"
 	"io"
 	"net/http"
@@ -289,6 +292,16 @@ func (s *Source) parseTarball(path string) ([]intel.MalwareReport, error) {
 	defer gzr.Close()
 
 	tr := tar.NewReader(gzr)
+	// reports accumulates one entry per malicious advisory we parse
+	// out of the tarball. Trust per-feed entry count: each entry is
+	// already capped at maxAdvisoryBytes, and OpenSSF currently
+	// publishes ~hundreds of entries per ecosystem. An explicit
+	// aggregate cap is intentionally omitted — it would cause silent
+	// truncation of the malware index without an operator-visible
+	// signal, which is exactly the failure mode H3 spent effort
+	// removing for the (source, ecosystem) bucket retention. The
+	// upstream tarball is already bounded by maxFeedBytes; that's the
+	// real ceiling on this slice. (PR #1 review.)
 	var reports []intel.MalwareReport
 	for {
 		hdr, err := tr.Next()
@@ -383,32 +396,82 @@ func (s *Source) loadGob(etag string) ([]intel.MalwareReport, bool) {
 	return s.readGobFile(s.gobPath(etag))
 }
 
+// readGobFile loads a parsed gob from disk with two integrity checks:
+//
+//  1. io.LimitReader caps decode input at maxFeedBytes so a tampered
+//     local file can't OOM the daemon. The encoded gob is smaller
+//     than the original tarball; maxFeedBytes is the right ceiling.
+//  2. sha256 sidecar (<gobPath>.sha256) holds the hex-encoded hash of
+//     the gob bytes at write time. On read we recompute and compare
+//     BEFORE decode — a mismatch means an attacker has overwritten
+//     the cache file (or the disk corrupted) and we MUST refetch
+//     rather than feed malicious bytes into gob.Decode (which is
+//     itself a code-execution-adjacent surface).
+//
+// On any check failure: delete the gob, sidecar, and etag so the
+// next refresh re-downloads cleanly. M4 in the audit.
 func (s *Source) readGobFile(path string) ([]intel.MalwareReport, bool) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
 	}
-	defer f.Close()
+	if len(data) > maxFeedBytes {
+		s.logger.Warn().Int("len", len(data)).Int("limit", maxFeedBytes).Str("path", path).
+			Msg("gob cache exceeds size cap; refusing decode and invalidating")
+		s.invalidateGobCache(path)
+		return nil, false
+	}
+	sidecar := path + ".sha256"
+	if expected, err := os.ReadFile(sidecar); err == nil {
+		sum := sha256.Sum256(data)
+		got := hex.EncodeToString(sum[:])
+		if strings.TrimSpace(string(expected)) != got {
+			s.logger.Warn().Str("path", path).Str("expected", strings.TrimSpace(string(expected))).
+				Str("got", got).Msg("gob cache sha256 mismatch; invalidating and forcing refetch")
+			s.invalidateGobCache(path)
+			return nil, false
+		}
+	}
 	var blob gobBlob
-	if err := gob.NewDecoder(f).Decode(&blob); err != nil {
+	if err := gob.NewDecoder(io.LimitReader(bytes.NewReader(data), maxFeedBytes)).Decode(&blob); err != nil {
 		s.logger.Warn().Err(err).Str("path", path).Msg("gob decode failed; ignoring cache")
 		return nil, false
 	}
 	return blob.Reports, true
 }
 
+// invalidateGobCache wipes the cached gob, its sidecar, and the
+// main.etag so the next refresh forces a full re-download and
+// re-parse. Used when an integrity check fails.
+func (s *Source) invalidateGobCache(gobPath string) {
+	_ = os.Remove(gobPath)
+	_ = os.Remove(gobPath + ".sha256")
+	_ = os.Remove(filepath.Join(s.cacheDir, "main.etag"))
+}
+
 func (s *Source) writeGob(etag string, reports []intel.MalwareReport) error {
 	path := s.gobPath(etag)
+	// Encode to memory first so we can compute the integrity sha256
+	// of exactly the bytes that hit disk. Streaming into a tmp file
+	// then re-reading would race the sidecar against any concurrent
+	// writer of the same cache.
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(gobBlob{Reports: reports}); err != nil {
+		return errors.With(err, "encode gob")
+	}
+	if buf.Len() > maxFeedBytes {
+		return errors.WithNew("encoded gob exceeds size cap").
+			Set("len", buf.Len()).Set("limit", maxFeedBytes)
+	}
 	tmp, err := os.CreateTemp(s.cacheDir, "parsed-tmp-")
 	if err != nil {
 		return errors.With(err, "create temp gob")
 	}
 	tmpPath := tmp.Name()
-	enc := gob.NewEncoder(tmp)
-	if err := enc.Encode(gobBlob{Reports: reports}); err != nil {
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return errors.With(err, "encode gob")
+		return errors.With(err, "write temp gob")
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
@@ -418,8 +481,12 @@ func (s *Source) writeGob(etag string, reports []intel.MalwareReport) error {
 		os.Remove(tmpPath)
 		return errors.With(err, "rename gob")
 	}
-	// Best-effort: prune older gob files for this source so disk usage stays
-	// bounded as etags rotate.
+	sum := sha256.Sum256(buf.Bytes())
+	sidecar := path + ".sha256"
+	if err := os.WriteFile(sidecar, []byte(hex.EncodeToString(sum[:])), 0o644); err != nil {
+		s.logger.Warn().Err(err).Str("path", sidecar).
+			Msg("write gob sha256 sidecar failed; cache will refresh on next start")
+	}
 	s.pruneOldGobs(path)
 	return nil
 }

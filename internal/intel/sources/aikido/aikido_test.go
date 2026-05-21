@@ -157,8 +157,40 @@ func TestFetch304WithMissingCacheRetriesOnce(t *testing.T) {
 
 	_, err = src.Fetch(context.Background(), intel.EcosystemNPM)
 	require.Error(t, err, "304 with no cache after retry must surface an error")
-	require.LessOrEqual(t, hits.Load(), int64(2),
-		"bounded retry must not spin — at most 2 hits (initial + 1 retry)")
+	require.Equal(t, int64(2), hits.Load(),
+		"bounded retry must take exactly one refetch (initial + 1 retry); "+
+			"LessOrEqual would silently pass a regression that skipped the retry entirely")
+}
+
+// TestFetch304WithCachePresentDoesNotRetry is the positive-path
+// mutation-resistance partner to TestFetch304WithMissingCacheRetriesOnce.
+// When the cache file is present, a 304 response must NOT trigger the
+// "drop etag and refetch" path — exactly one hit. Without this test, a
+// future refactor could accidentally trigger refetch on every 304 and
+// the existing tests would still pass.
+func TestFetch304WithCachePresentDoesNotRetry(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("ETag", `"abc123"`)
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+
+	cacheDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "npm.etag"), []byte(`"abc123"`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "npm.json"), []byte("[]"), 0o644))
+
+	src, err := aikido.New(aikido.Options{
+		BaseURL:  srv.URL,
+		CacheDir: cacheDir,
+		Logger:   zerolog.Nop(),
+	})
+	require.NoError(t, err)
+
+	_, err = src.Fetch(context.Background(), intel.EcosystemNPM)
+	require.NoError(t, err, "304 with cache present must succeed without retry")
+	require.Equal(t, int64(1), hits.Load(), "cache-present 304 must not refetch")
 }
 
 func TestFetchNetworkFailureFallsBackToCache(t *testing.T) {

@@ -5,9 +5,9 @@ package-manager invocations and refusing any that name a flagged package.
 It is built for humans and agent shells alike: every layer below is
 designed to fail closed when the gate can't reach a confident decision.
 
-This doc walks a fresh install through the three defense layers, what
+This doc walks a fresh install through the FOUR defense layers, what
 each layer covers, and how to verify the gate is actually in front of
-your installs. Skim the table, install all three (they compose), and
+your installs. Skim the table, install all four (they compose), and
 read the verification checklist before relying on bouncer in any agent
 session.
 
@@ -15,6 +15,10 @@ session.
 
 ```
               ┌──────────────────────────────────────────────┐
+              │ Layer 4:  real-binary wrappers               │
+              │  catches  absolute-path execve even when     │
+              │           env vars are stripped              │
+              ├──────────────────────────────────────────────┤
               │ Layer 3:  native interposer (LD_PRELOAD /    │
               │           DYLD_INSERT_LIBRARIES)             │
               │  catches  full-path execve, subprocess.Popen │
@@ -32,17 +36,21 @@ session.
 
 The layers compose. Layer 1 catches Claude's primary attack surface;
 layer 2 catches Codex and any non-Claude shell; layer 3 closes the
-"direct child-process invocation" gap.
+direct-child-process gap when the calling process inherits the
+preload env; layer 4 closes that gap unconditionally by wrapping the
+real binaries at their absolute install paths.
 
-| Threat                                            | Layer 1 | Layer 2 | Layer 3 |
-|---------------------------------------------------|:-------:|:-------:|:-------:|
-| `npm install evil` in Claude's Bash tool          |   ✓     |   ✓     |   ✓     |
-| `timeout 30 npm install evil`                     |   ✓     |   ✓     |   ✓     |
-| `bash -c "cd / && pip install evil"`              |   ✓     |   ✓     |   ✓     |
-| Codex agent typing `pnpm add evil`                |   —     |   ✓     |   ✓     |
-| Python `subprocess.run(["npm","install","evil"])` |   —     |   ✓     |   ✓     |
-| Python `subprocess.run(["/full/path/npm","..."])` |   —     |   —     |   ✓     |
-| SIP-protected system binary (`/usr/bin/*`)        |   —     |   —     |   —     |
+| Threat                                            | Layer 1 | Layer 2 | Layer 3 | Layer 4 |
+|---------------------------------------------------|:-------:|:-------:|:-------:|:-------:|
+| `npm install evil` in Claude's Bash tool          |   ✓     |   ✓     |   ✓     |   ✓     |
+| `timeout 30 npm install evil`                     |   ✓     |   ✓     |   ✓     |   ✓     |
+| `bash -c "cd / && pip install evil"`              |   ✓     |   ✓     |   ✓     |   ✓     |
+| Codex agent typing `pnpm add evil`                |   —     |   ✓     |   ✓     |   ✓     |
+| Python `subprocess.run(["npm","install","evil"])` |   —     |   ✓     |   ✓     |   ✓     |
+| Python `subprocess.run(["/full/path/npm","..."])` |   —     |   —     |   ✓     |   ✓     |
+| Same as above but env stripped (no DYLD_INSERT)   |   —     |   —     |   —     |   ✓     |
+| Lockfile transitive dep flagged                   |   —     |   ✓     |   ✓     |   ✓     |
+| SIP-protected system binary (`/usr/bin/*`)        |   —     |   —     |   —     |   —     |
 
 The last row is a documented limitation. macOS strips
 `DYLD_INSERT_LIBRARIES` from SIP-protected binaries; no user-space
@@ -265,6 +273,73 @@ bouncer uninstall-preload --shell-rc auto
 
 Strips the managed block from the shell rc and removes the installed
 library file.
+
+---
+
+## Layer 4 — Real-binary wrappers
+
+The strongest single layer. Layers 2–3 protect "things that go through
+the shell" and "things that load libc with our preload env." Layer 4
+protects the *bytes at the absolute path* — bouncer literally
+substitutes itself for `/opt/homebrew/bin/npm`, the mise install dirs,
+and so on. No env-var dependency, no PATH-order dependency, no process
+cooperation needed.
+
+### Install
+
+```sh
+bouncer install-wrappers              # discover + wrap homebrew + mise + asdf + .bun
+bouncer install-wrappers --dry-run    # show what would change without writing
+bouncer install-wrappers --only npm   # restrict to one PM
+bouncer install-wrappers --dir /path  # add an extra discovery root
+```
+
+For each known install dir (`/opt/homebrew/bin`, `~/.local/share/mise/installs/*/*/bin`,
+`~/.asdf/installs/*/*/bin`, `~/.bun/bin`, plus any `--dir` you pass),
+bouncer:
+
+1. atomically renames `<dir>/<pm>` to `<dir>/<pm>.bouncer-original`
+2. installs a symlink at `<dir>/<pm>` pointing at the bouncer binary
+
+When a caller execs `/opt/homebrew/bin/npm install foo`, the kernel
+runs the bouncer symlink. Bouncer's basename dispatch routes through
+the gate. If allowed, `findRealBinary` finds the `.bouncer-original`
+sibling and exec's it.
+
+### What this catches that Layer 3 doesn't
+
+```py
+# Caller scrubs env so DYLD_INSERT_LIBRARIES doesn't propagate.
+subprocess.run(
+    ["/opt/homebrew/bin/npm", "install", "evil"],
+    shell=False,
+    env={"PATH": "/usr/bin:/bin"},   # interposer NOT inherited
+)
+```
+
+The interposer (Layer 3) doesn't fire because the dylib isn't loaded
+into this child process. Layer 4 doesn't care — the file at
+`/opt/homebrew/bin/npm` *is* bouncer.
+
+### Tradeoffs
+
+- **Brew/mise/asdf upgrades wipe the wrappers.** Every `brew upgrade
+  node` and `mise install node@whatever` rewrites the file at the
+  wrapper site. Re-run `bouncer install-wrappers` after any
+  toolchain upgrade. `bouncer doctor` flags drift.
+- **State is durable.** Wrapper installations are recorded in
+  `~/.cache/package-bouncer/wrappers.json`. `bouncer uninstall-wrappers`
+  replays every entry in reverse: remove the symlink, rename
+  `.bouncer-original` back to `<pm>`.
+- **SIP-protected dirs are unreachable.** Just like Layer 3,
+  `/usr/bin/pip3` cannot be wrapped — the directory is read-only
+  even to root.
+
+### Uninstall
+
+```sh
+bouncer uninstall-wrappers
+```
 
 ---
 

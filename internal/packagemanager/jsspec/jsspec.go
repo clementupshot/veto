@@ -92,20 +92,58 @@ func splitNameVersion(spec string) (string, string) {
 // positional package spec even if it starts with `-` (so leading-dash
 // typosquat names like `-chalk` are gated rather than silently bypassed).
 //
-// @@TODO: support a per-PM table of flags-that-take-values so callers can
-// position global flags before the verb without confusing the parser.
-func ParseInstallArgs(args []string, installVerbs map[string]struct{}) []packagemanager.Install {
-	verb, rest, ok := argv.FirstNonFlag(args)
+// flagsTakingValues is the PM's table of flags whose next argv token is a
+// value, not a positional (e.g. npm's "--prefix /tmp"). A nil/empty map is
+// accepted; the parser then degrades to flag-name-only skipping, which can
+// misread a flag's value as the verb. Pass the PM-specific table.
+func ParseInstallArgs(args []string, installVerbs map[string]struct{}, flagsTakingValues argv.FlagsWithValues) []packagemanager.Install {
+	verb, rest, ok := argv.FirstNonFlagWithTable(args, flagsTakingValues)
 	if !ok {
 		return nil
 	}
 	if _, isInstall := installVerbs[verb]; !isInstall {
 		return nil
 	}
-	specs := argv.CollectPositionals(rest)
+	specs := argv.CollectPositionalsWithTable(rest, flagsTakingValues)
 	installs := make([]packagemanager.Install, 0, len(specs))
 	for _, spec := range specs {
 		installs = append(installs, Parse(spec))
 	}
 	return installs
+}
+
+// PackageJSONManifestRefs returns a single package.json ManifestRef when the
+// npm-family command would resolve its install set from the local manifest —
+// i.e. an install verb was given but no explicit package specs were named —
+// and nil otherwise.
+//
+// alwaysReadsManifest is the subset of install verbs that read the manifest
+// regardless of argv (npm's `ci`, pnpm/yarn `install` after a lockfile, etc.).
+// For verbs in this set the ref is emitted even when explicit specs were also
+// named, because the PM still consults the manifest first.
+//
+// installVerbs and flagsTakingValues match the shape used by ParseInstallArgs
+// so callers stay internally consistent: a manifest ref is emitted exactly
+// when the gate would otherwise have nothing to look up.
+func PackageJSONManifestRefs(
+	args []string,
+	installVerbs map[string]struct{},
+	alwaysReadsManifest map[string]struct{},
+	flagsTakingValues argv.FlagsWithValues,
+) []packagemanager.ManifestRef {
+	verb, rest, ok := argv.FirstNonFlagWithTable(args, flagsTakingValues)
+	if !ok {
+		return nil
+	}
+	if _, isInstall := installVerbs[verb]; !isInstall {
+		return nil
+	}
+	if _, always := alwaysReadsManifest[verb]; always {
+		return []packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}
+	}
+	if specs := argv.CollectPositionalsWithTable(rest, flagsTakingValues); len(specs) > 0 {
+		// User named explicit specs; the gate already has work to do.
+		return nil
+	}
+	return []packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}
 }

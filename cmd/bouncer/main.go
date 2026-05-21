@@ -34,11 +34,14 @@ import (
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/bun"
 	pmexec "github.com/brynbellomy/package-bouncer/internal/packagemanager/exec"
+	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jsmanifest"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/npm"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pdm"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pip"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pnpm"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/poetry"
+	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pymanifest"
+	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pyreq"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/uv"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/yarn"
 )
@@ -98,7 +101,8 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 	}
 
 	installs := pm.ParseInstalls(pmArgs)
-	if installs == nil {
+	manifestRefs := pm.ManifestRefs(pmArgs)
+	if installs == nil && len(manifestRefs) == 0 {
 		// Not an install verb — pass through immediately, no intel needed.
 		return execReal(pmName, pmArgs)
 	}
@@ -121,8 +125,10 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 		return exitInternal
 	}
 
-	g := gate.New(store, gate.DefaultPolicy())
-	decision := g.Evaluate(installs)
+	policy := gate.DefaultPolicy()
+	policy.ManifestExpander = newCompoundExpander()
+	g := gate.New(store, policy).WithLogger(logger)
+	decision := g.Evaluate(installs, manifestRefs...)
 
 	switch decision.Outcome {
 	case gate.OutcomePassThrough, gate.OutcomeAllow:
@@ -318,6 +324,42 @@ func buildSource(logger zerolog.Logger, cfg config, id string) (intel.Source, er
 	}
 }
 
+// compoundExpander dispatches manifest refs to the leaf expander that owns
+// the kind. Keeping the dispatch in one place lets each leaf expander stay
+// scoped to its own kinds and testable in isolation.
+type compoundExpander struct {
+	pyReq *pyreq.Expander
+	js    *jsmanifest.Expander
+	pyPrj *pymanifest.Expander
+}
+
+// newCompoundExpander wires the three leaf expanders behind a single
+// gate.ManifestExpander.
+func newCompoundExpander() *compoundExpander {
+	return &compoundExpander{
+		pyReq: pyreq.New(),
+		js:    jsmanifest.New(),
+		pyPrj: pymanifest.New(),
+	}
+}
+
+var _ gate.ManifestExpander = (*compoundExpander)(nil)
+
+// Expand implements gate.ManifestExpander by dispatching on ref.Kind. Unknown
+// kinds are a no-op; the gate already tolerates a nil, nil return.
+func (c *compoundExpander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Install, error) {
+	switch ref.Kind {
+	case packagemanager.ManifestKindRequirements, packagemanager.ManifestKindConstraint:
+		return c.pyReq.Expand(ref)
+	case packagemanager.ManifestKindPackageJSON:
+		return c.js.Expand(ref)
+	case packagemanager.ManifestKindPyProject:
+		return c.pyPrj.Expand(ref)
+	default:
+		return nil, nil
+	}
+}
+
 // buildPackageManagers returns the registry of supported PMs keyed by binary
 // name. Adding a new PM = one entry here plus the impl subpackage.
 func buildPackageManagers() map[string]packagemanager.PackageManager {
@@ -333,11 +375,11 @@ func buildPackageManagers() map[string]packagemanager.PackageManager {
 		"pdm":    pdm.New(),
 
 		// Fetch-and-run binaries — every non-help invocation is treated as install.
-		"npx":  pmexec.New(pmexec.Options{Name: "npx", Ecosystem: intel.EcosystemNPM}),
-		"pnpx": pmexec.New(pmexec.Options{Name: "pnpx", Ecosystem: intel.EcosystemNPM}),
-		"bunx": pmexec.New(pmexec.Options{Name: "bunx", Ecosystem: intel.EcosystemNPM}),
-		"uvx":  pmexec.New(pmexec.Options{Name: "uvx", Ecosystem: intel.EcosystemPyPI}),
-		"pipx": pmexec.New(pmexec.Options{Name: "pipx", Ecosystem: intel.EcosystemPyPI, PipxStyle: true}),
+		"npx":  pmexec.New(pmexec.Options{Name: "npx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.NpxFlagsWithValues}),
+		"pnpx": pmexec.New(pmexec.Options{Name: "pnpx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.PnpxFlagsWithValues}),
+		"bunx": pmexec.New(pmexec.Options{Name: "bunx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.BunxFlagsWithValues}),
+		"uvx":  pmexec.New(pmexec.Options{Name: "uvx", Ecosystem: intel.EcosystemPyPI, FlagsWithValues: pmexec.UvxFlagsWithValues}),
+		"pipx": pmexec.New(pmexec.Options{Name: "pipx", Ecosystem: intel.EcosystemPyPI, PipxStyle: true, FlagsWithValues: pmexec.PipxFlagsWithValues}),
 	}
 }
 

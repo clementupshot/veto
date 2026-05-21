@@ -9,6 +9,7 @@ package bun
 import (
 	"github.com/brynbellomy/package-bouncer/internal/intel"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
+	"github.com/brynbellomy/package-bouncer/internal/packagemanager/argv"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jsspec"
 )
 
@@ -19,6 +20,26 @@ var installVerbs = map[string]struct{}{
 	"update": {}, "upgrade": {},
 	"x":      {}, // `bun x <pkg>` — fetches and runs
 	"create": {}, // `bun create <template>` — fetches a starter template
+}
+
+// alwaysReadsManifest is empty for bun: install verbs resolve from the
+// manifest only when no specs are given (caught by the empty-specs branch).
+var alwaysReadsManifest = map[string]struct{}{}
+
+// flagsWithValues lists bun flags whose next argv token is the value.
+// Bun's CLI is still evolving; this is the realistic set agents/users
+// reach for, not an exhaustive mirror of `bun --help`.
+var flagsWithValues = argv.FlagsWithValues{
+	"--cwd":         {},
+	"--config":      {},
+	"-c":            {},
+	"--registry":    {},
+	"--cache-dir":   {},
+	"--backend":     {},
+	"--lockfile":    {},
+	"--prefix":      {},
+	"--target":      {},
+	"--bun-debug-jsc": {},
 }
 
 // Manager parses bun install commands.
@@ -37,5 +58,12 @@ func (Manager) Ecosystem() intel.Ecosystem { return intel.EcosystemNPM }
 
 // ParseInstalls implements packagemanager.PackageManager.
 func (Manager) ParseInstalls(args []string) []packagemanager.Install {
-	return jsspec.ParseInstallArgs(args, installVerbs)
+	return jsspec.ParseInstallArgs(args, installVerbs, flagsWithValues)
+}
+
+// ManifestRefs implements packagemanager.PackageManager. Emits a package.json
+// ref when an install verb was given with no explicit specs, so the gate's
+// expander can read the manifest and gate its direct dependencies.
+func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
+	return jsspec.PackageJSONManifestRefs(args, installVerbs, alwaysReadsManifest, flagsWithValues)
 }

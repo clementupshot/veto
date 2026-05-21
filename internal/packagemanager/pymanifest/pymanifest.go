@@ -1,0 +1,214 @@
+// Package pymanifest reads Python pyproject.toml files and turns their
+// direct-dependency tables into Install records.
+//
+// This is the I/O side of poetry/uv/pdm's "verb implies the manifest" flow
+// (`poetry install`, `uv sync`, `pdm install`). The package manager returns a
+// ManifestKindPyProject ref from argv; the gate's expander — implemented here
+// — opens the TOML and walks the dependency tables that real-world Python
+// projects use:
+//
+//   - [project] dependencies = [...]          (PEP 621 standard)
+//   - [project.optional-dependencies.<group>] (PEP 621 extras)
+//   - [tool.poetry.dependencies]              (Poetry)
+//   - [tool.poetry.group.<name>.dependencies] (Poetry group deps)
+//
+// Direct deps only. The intel store's name-keyed fallback catches every
+// flagged version when the spec is a range we can't pin.
+//
+// @@TODO: full PEP 508 marker evaluation. Today we over-include conditional
+// deps for the same reason pyspec does — over-gating is safer than missing a
+// dep that would actually install.
+package pymanifest
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+	bouncererrors "github.com/brynbellomy/go-utils/errors"
+
+	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
+	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pyspec"
+)
+
+// Expander reads pyproject.toml files and emits the Install records the gate
+// looks up.
+//
+// Safe for concurrent use; New() returns a stateless instance.
+type Expander struct{}
+
+// New returns the default Expander.
+func New() *Expander { return &Expander{} }
+
+// pyproject is the subset of fields the expander cares about. Unknown
+// fields are tolerated — projects mix conventions and load tools we don't
+// recognize all the time.
+//
+// Poetry dependency values vary in shape — a plain string ("^1.0") for the
+// common case, or an inline table ({ version = "^1.0", optional = true })
+// for path/git/markered specs — so we decode them as `any` and type-switch
+// in poetryDeps.
+type pyproject struct {
+	Project struct {
+		Dependencies         []string            `toml:"dependencies"`
+		OptionalDependencies map[string][]string `toml:"optional-dependencies"`
+	} `toml:"project"`
+	Tool struct {
+		Poetry struct {
+			Dependencies map[string]any         `toml:"dependencies"`
+			Group        map[string]poetryGroup `toml:"group"`
+		} `toml:"poetry"`
+	} `toml:"tool"`
+}
+
+// poetryGroup mirrors the shape of `[tool.poetry.group.<name>]`. Only the
+// dependency map is needed for gating.
+type poetryGroup struct {
+	Dependencies map[string]any `toml:"dependencies"`
+}
+
+// Expand reads ref.Path and returns the []Install its direct-dependency
+// tables resolve to. Returns nil, nil for any ref.Kind other than
+// ManifestKindPyProject so the compound expander can dispatch by kind.
+//
+// A missing file is not an error — some install verbs run from non-project
+// directories. Malformed TOML returns a wrapped error with the path attached.
+func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Install, error) {
+	if ref.Kind != packagemanager.ManifestKindPyProject {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(ref.Path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, bouncererrors.With(err, "reading pyproject.toml").Set("path", ref.Path)
+	}
+
+	var pyp pyproject
+	if _, err := toml.Decode(string(data), &pyp); err != nil {
+		return nil, bouncererrors.With(err, "parse pyproject.toml").Set("path", ref.Path)
+	}
+
+	// Dedupe by lower-cased PyPI name across all sources; the install set is
+	// a set, not a multiset, and a dep listed in both [project] and
+	// [tool.poetry.dependencies] should be gated once.
+	seen := make(map[string]struct{}, 16)
+	var installs []packagemanager.Install
+
+	addInstall := func(ins packagemanager.Install) {
+		key := strings.ToLower(strings.TrimSpace(ins.Ref.Name))
+		if key == "" {
+			return
+		}
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		installs = append(installs, ins)
+	}
+
+	// PEP 621: [project] dependencies = ["requests>=2.0", ...]
+	for _, spec := range pyp.Project.Dependencies {
+		addInstall(pyspec.Parse(spec))
+	}
+
+	// PEP 621: [project.optional-dependencies.<group>] = ["pytest>=7", ...]
+	for _, group := range pyp.Project.OptionalDependencies {
+		for _, spec := range group {
+			addInstall(pyspec.Parse(spec))
+		}
+	}
+
+	// Poetry: [tool.poetry.dependencies]
+	for _, ins := range poetryDeps(pyp.Tool.Poetry.Dependencies) {
+		addInstall(ins)
+	}
+
+	// Poetry: [tool.poetry.group.<name>.dependencies]
+	for _, group := range pyp.Tool.Poetry.Group {
+		for _, ins := range poetryDeps(group.Dependencies) {
+			addInstall(ins)
+		}
+	}
+
+	return installs, nil
+}
+
+// poetryDeps turns a Poetry-shaped dep map into Installs.
+//
+// The TOML value for each name can be:
+//
+//   - A plain string ("^1.0", "*") → name with that string as the version.
+//   - An inline table ({ version = "^1.0", ... }) → pull the version key;
+//     emit name with empty version if no version key is present (path/git/url
+//     deps).
+//   - Anything else (array of tables for multi-source deps, etc.) → emit name
+//     with empty version. The intel store's name-keyed lookup still catches
+//     flagged versions.
+//
+// The "python" key under [tool.poetry.dependencies] is excluded — it's a
+// Python version constraint, not a package.
+func poetryDeps(deps map[string]any) []packagemanager.Install {
+	if len(deps) == 0 {
+		return nil
+	}
+	out := make([]packagemanager.Install, 0, len(deps))
+	for name, raw := range deps {
+		if strings.EqualFold(name, "python") {
+			continue
+		}
+		version := decodePoetryVersion(raw)
+		// Build an Install directly: pyspec's spec grammar is PEP 508 (the
+		// Python ecosystem's "name op version" form), which doesn't match
+		// Poetry's ranges ("^1.0", "~1"). We carry the version verbatim and
+		// let the intel store's name-keyed fallback do the rest.
+		install := pyspec.Parse(name)
+		install.Ref.Version = exactVersionOrEmpty(version)
+		install.RawSpec = name + " (from pyproject.toml)"
+		out = append(out, install)
+	}
+	return out
+}
+
+// decodePoetryVersion returns the version string for a Poetry dep value.
+// Returns "" for any shape we can't pin to a version.
+func decodePoetryVersion(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if s, ok := v["version"].(string); ok {
+			return s
+		}
+		// Inline table with no `version` key — path/git/url dep. Nothing
+		// to pin; the name-keyed fallback handles it.
+		return ""
+	default:
+		return ""
+	}
+}
+
+// exactVersionOrEmpty returns version when it's a literal exact version (no
+// range operators, no wildcard) and "" otherwise. Poetry ranges ("^1.0",
+// "~1", "*") collapse to empty so the gate falls back to a name-keyed lookup
+// that catches every flagged version of that package.
+func exactVersionOrEmpty(version string) string {
+	v := strings.TrimSpace(version)
+	if v == "" || v == "*" {
+		return ""
+	}
+	for _, c := range v {
+		if c == '^' || c == '~' || c == '>' || c == '<' || c == '=' || c == '!' || c == ' ' || c == ',' || c == '*' {
+			return ""
+		}
+	}
+	return v
+}
+
+var _ interface {
+	Expand(packagemanager.ManifestRef) ([]packagemanager.Install, error)
+} = (*Expander)(nil)

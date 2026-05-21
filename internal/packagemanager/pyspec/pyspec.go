@@ -1,6 +1,23 @@
 // Package pyspec parses Python-ecosystem package specifiers shared across pip,
-// uv, poetry, and pdm. It accepts a useful subset of PEP 508 (name plus a
-// single version operator); full extras/markers parsing is @@TODO.
+// uv, poetry, and pdm.
+//
+// The parser accepts the practical subset of PEP 508 that turns up in
+// command-line specs and requirements.txt lines:
+//
+//   - bare name: "requests"
+//   - single operator: "pkg==1.0"
+//   - whitespace around the operator: "pkg == 1.0"
+//   - multiple version operators: "pkg>=1.0,<2.0" → name only, empty version
+//     (the intel store does exact-version matching, so a range collapses to
+//     "any version of this name" and the store's unversioned lookup catches
+//     every flagged version)
+//   - extras (single or comma list): "pkg[ext1,ext2]==1.0" → extras stripped
+//   - environment markers: "pkg==1.0; python_version >= '3.8'" → marker
+//     ignored, package emitted (over-include conditional deps; the bouncer
+//     is a safety check, not a resolver)
+//
+// Local paths and URLs are flagged Local=true and pass through to the gate
+// for policy-driven handling.
 package pyspec
 
 import (
@@ -10,31 +27,48 @@ import (
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
 )
 
-// Operators ordered longest-first so "==" wins over the "=" prefix-match.
-var operators = []string{"==", ">=", "<=", "~=", "!=", ">", "<"}
+// operators is the set of PEP 440 version comparison operators we recognize,
+// ordered longest-first so "==" wins over the "=" prefix-match and "===" wins
+// over "==".
+var operators = []string{"===", "==", ">=", "<=", "~=", "!=", ">", "<"}
 
 // Parse turns a single command-line spec into an Install for the PyPI
 // ecosystem. Local paths and URLs are marked Local=true.
 func Parse(spec string) packagemanager.Install {
+	raw := spec
 	if isLocalOrURL(spec) {
 		return packagemanager.Install{
 			Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: spec},
-			RawSpec: spec,
+			RawSpec: raw,
 			Local:   true,
 		}
 	}
-	name, version := splitVersion(spec)
-	// Strip extras: "pkg[extra]" → "pkg". The intel store is name-keyed; extras
-	// don't affect malware identity.
+
+	// Strip the environment marker (everything after the first ';'). We
+	// deliberately ignore the marker — see package doc.
+	body := spec
+	if i := strings.IndexByte(body, ';'); i >= 0 {
+		body = body[:i]
+	}
+	body = strings.TrimSpace(body)
+
+	name, versionPart := splitNameAndVersion(body)
+	// Strip extras: "pkg[extra]" or "pkg[ext1,ext2]" → "pkg". The intel store
+	// is name-keyed; extras don't affect malware identity.
 	if i := strings.IndexByte(name, '['); i >= 0 {
 		name = name[:i]
 	}
+	name = strings.TrimSpace(name)
+
+	version := resolveVersion(versionPart)
 	return packagemanager.Install{
 		Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: name, Version: version},
-		RawSpec: spec,
+		RawSpec: raw,
 	}
 }
 
+// isLocalOrURL reports whether spec is a file path or URL rather than a
+// PyPI-name spec.
 func isLocalOrURL(spec string) bool {
 	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/") {
 		return true
@@ -47,11 +81,57 @@ func isLocalOrURL(spec string) bool {
 	return false
 }
 
-func splitVersion(spec string) (string, string) {
-	for _, op := range operators {
-		if name, version, ok := strings.Cut(spec, op); ok {
-			return name, version
+// splitNameAndVersion returns (name, versionPart) where versionPart is
+// everything from the first version operator onward (operator included), or
+// empty if no operator was found. Whitespace around the operator is tolerated:
+// "pkg == 1.0" splits as ("pkg", "== 1.0").
+//
+// We scan left-to-right looking for the earliest occurrence of any operator
+// after a name character (so a leading "===" couldn't ever match here — names
+// can't start with an operator), then return the boundary. The longest-first
+// ordering of `operators` ensures e.g. ">=" doesn't get clipped to ">".
+func splitNameAndVersion(spec string) (string, string) {
+	// Find the earliest cut point across all operators.
+	earliest := -1
+	for i := 0; i < len(spec); i++ {
+		c := spec[i]
+		if c == '=' || c == '<' || c == '>' || c == '!' || c == '~' {
+			earliest = i
+			break
 		}
 	}
-	return spec, ""
+	if earliest < 0 {
+		return strings.TrimSpace(spec), ""
+	}
+	return strings.TrimSpace(spec[:earliest]), spec[earliest:]
+}
+
+// resolveVersion extracts an exact version from versionPart, or returns "" if
+// the spec is a range (multiple operators) or otherwise non-exact. versionPart
+// includes the leading operator(s), e.g. "==1.0" or ">=1.0,<2.0" or "== 1.0".
+//
+// Returns the version literal (with surrounding whitespace stripped) only when
+// the spec is a single "==" constraint. Anything else — multi-clause specs,
+// non-equality operators — collapses to empty version, which makes the gate
+// fall back to a name-keyed lookup that catches every flagged version.
+func resolveVersion(versionPart string) string {
+	versionPart = strings.TrimSpace(versionPart)
+	if versionPart == "" {
+		return ""
+	}
+	// Multi-clause spec: "pkg>=1.0,<2.0" → empty version, name-keyed lookup.
+	if strings.ContainsRune(versionPart, ',') {
+		return ""
+	}
+	for _, op := range operators {
+		if strings.HasPrefix(versionPart, op) {
+			if op != "==" {
+				// Inequality / range / arbitrary-equality operators give us no
+				// single version to look up. Collapse to name-keyed lookup.
+				return ""
+			}
+			return strings.TrimSpace(versionPart[len(op):])
+		}
+	}
+	return ""
 }

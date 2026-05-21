@@ -86,3 +86,88 @@ func TestEvaluateEmptyInstallsAllow(t *testing.T) {
 	dec := g.Evaluate([]packagemanager.Install{})
 	require.Equal(t, gate.OutcomeAllow, dec.Outcome)
 }
+
+// fakeExpander returns a fixed slice of Installs for any ManifestRef it
+// sees. Used in tests to simulate pyreq.Expander without touching disk.
+type fakeExpander struct {
+	installs []packagemanager.Install
+	err      error
+	seen     []packagemanager.ManifestRef
+}
+
+func (f *fakeExpander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Install, error) {
+	f.seen = append(f.seen, ref)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.installs, nil
+}
+
+func TestEvaluateManifestExpansionRefusesOnFlaggedInstall(t *testing.T) {
+	store := buildStore(t,
+		intel.MalwareReport{
+			PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-py", Version: "1.0.0"},
+			SourceID:   "fake",
+		},
+	)
+	exp := &fakeExpander{installs: []packagemanager.Install{
+		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-py", Version: "1.0.0"}, RawSpec: "evil-py==1.0.0"},
+	}}
+	policy := gate.DefaultPolicy()
+	policy.ManifestExpander = exp
+	g := gate.New(store, policy)
+
+	dec := g.Evaluate(nil, packagemanager.ManifestRef{Path: "requirements.txt", Kind: packagemanager.ManifestKindRequirements})
+	require.Equal(t, gate.OutcomeRefuse, dec.Outcome)
+	require.Len(t, dec.Flagged(), 1)
+	require.Equal(t, "evil-py", dec.Flagged()[0].Ref.Name)
+	require.Len(t, exp.seen, 1)
+	require.Equal(t, "requirements.txt", exp.seen[0].Path)
+}
+
+func TestEvaluateManifestExpansionGatesAlongsideArgvInstalls(t *testing.T) {
+	store := buildStore(t,
+		intel.MalwareReport{
+			PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-py", Version: "1.0.0"},
+			SourceID:   "fake",
+		},
+	)
+	exp := &fakeExpander{installs: []packagemanager.Install{
+		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-py", Version: "1.0.0"}, RawSpec: "evil-py==1.0.0"},
+	}}
+	policy := gate.DefaultPolicy()
+	policy.ManifestExpander = exp
+	g := gate.New(store, policy)
+
+	dec := g.Evaluate(
+		[]packagemanager.Install{
+			{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "innocent"}, RawSpec: "innocent"},
+		},
+		packagemanager.ManifestRef{Path: "requirements.txt", Kind: packagemanager.ManifestKindRequirements},
+	)
+	require.Equal(t, gate.OutcomeRefuse, dec.Outcome)
+	require.Len(t, dec.Verdicts, 2)
+	require.Len(t, dec.Flagged(), 1)
+}
+
+func TestEvaluateManifestExpanderErrorLogsAndContinues(t *testing.T) {
+	// I/O failure on the manifest must NOT crash the gate; argv-named installs
+	// still get checked.
+	store := buildStore(t)
+	exp := &fakeExpander{err: errSentinel{}}
+	policy := gate.DefaultPolicy()
+	policy.ManifestExpander = exp
+	g := gate.New(store, policy)
+
+	dec := g.Evaluate(
+		[]packagemanager.Install{
+			{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "innocent"}, RawSpec: "innocent"},
+		},
+		packagemanager.ManifestRef{Path: "missing.txt", Kind: packagemanager.ManifestKindRequirements},
+	)
+	require.Equal(t, gate.OutcomeAllow, dec.Outcome)
+}
+
+type errSentinel struct{}
+
+func (errSentinel) Error() string { return "fake io failure" }

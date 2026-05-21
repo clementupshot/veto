@@ -150,7 +150,7 @@ func TestUnwrap_RestoresOriginal(t *testing.T) {
 		PM:           "npm",
 		Source:       "user",
 	}
-	require.NoError(t, unwrap(entry, false))
+	require.NoError(t, unwrap(entry, veto, false))
 
 	// npm is once again a regular file with the original body.
 	info, err := os.Lstat(npm)
@@ -169,6 +169,8 @@ func TestUnwrap_RestoresOriginal(t *testing.T) {
 // for manual cleanup.
 func TestUnwrap_BailsIfSymlinkRetargeted(t *testing.T) {
 	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
 	npm := filepath.Join(dir, "npm")
 	other := filepath.Join(dir, "other")
 	require.NoError(t, os.WriteFile(other, []byte(""), 0o755))
@@ -178,7 +180,7 @@ func TestUnwrap_BailsIfSymlinkRetargeted(t *testing.T) {
 	require.NoError(t, os.WriteFile(original, []byte("orig"), 0o755))
 
 	entry := wrapperEntry{Path: npm, OriginalPath: original, PM: "npm"}
-	err := unwrap(entry, false)
+	err := unwrap(entry, veto, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no longer points at veto")
 
@@ -269,30 +271,74 @@ func TestLoadWrapperState_MalformedJSON_Errors(t *testing.T) {
 // because false positives (wrapping our own symlink) cause loops.
 func TestIsWrappableTarget_FiltersCorrectly(t *testing.T) {
 	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
 
 	regular := filepath.Join(dir, "regular")
 	require.NoError(t, os.WriteFile(regular, []byte("#!/bin/sh\n"), 0o755))
-	require.True(t, isWrappableTarget(regular), "regular executable should be wrappable")
+	require.True(t, isWrappableTarget(regular, veto), "regular executable should be wrappable")
 
 	notExec := filepath.Join(dir, "notexec")
 	require.NoError(t, os.WriteFile(notExec, []byte(""), 0o644))
-	require.False(t, isWrappableTarget(notExec), "non-executable should be skipped")
+	require.False(t, isWrappableTarget(notExec, veto), "non-executable should be skipped")
 
 	vetoSym := filepath.Join(dir, "veto-shim")
-	veto := filepath.Join(dir, "veto")
-	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
 	require.NoError(t, os.Symlink(veto, vetoSym))
-	require.False(t, isWrappableTarget(vetoSym), "already-veto symlink must NOT be re-wrappable")
+	require.False(t, isWrappableTarget(vetoSym, veto), "already-veto symlink must NOT be re-wrappable")
 
 	cellarTarget := filepath.Join(dir, "cellar-real")
 	require.NoError(t, os.WriteFile(cellarTarget, []byte(""), 0o755))
 	homebrewLink := filepath.Join(dir, "homebrew-link")
 	require.NoError(t, os.Symlink(cellarTarget, homebrewLink))
-	require.True(t, isWrappableTarget(homebrewLink), "homebrew-style real symlink IS wrappable")
+	require.True(t, isWrappableTarget(homebrewLink, veto), "homebrew-style real symlink IS wrappable")
 
 	dirPath := filepath.Join(dir, "subdir")
 	require.NoError(t, os.Mkdir(dirPath, 0o755))
-	require.False(t, isWrappableTarget(dirPath), "directories must not be wrappable")
+	require.False(t, isWrappableTarget(dirPath, veto), "directories must not be wrappable")
+}
+
+// TestIsWrappableTarget_RejectsImpostorVetoSymlink: an attacker-planted
+// symlink whose target merely contains the substring "veto" but does
+// NOT resolve to the real veto binary must NOT be accepted as "already
+// ours" — otherwise our wrap step would skip and the impostor would
+// stay in place. Closes C5 in the audit.
+func TestIsWrappableTarget_RejectsImpostorVetoSymlink(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+
+	// Impostor: an executable named to embed "veto" in its target string
+	// but living at a path the real veto binary does NOT live at.
+	impostorTarget := filepath.Join(dir, "veto-malware")
+	require.NoError(t, os.WriteFile(impostorTarget, []byte(""), 0o755))
+	npmShadow := filepath.Join(dir, "npm")
+	require.NoError(t, os.Symlink(impostorTarget, npmShadow))
+
+	require.True(t, isWrappableTarget(npmShadow, veto),
+		"symlink to a same-named-but-different binary must still be wrappable; "+
+			"prior strings.Contains(target,\"veto\") would have wrongly skipped this")
+}
+
+// TestUnwrap_RefusesImpostorVetoSymlink: same threat model, unwrap side.
+// If a third party has replaced our symlink with one to an impostor
+// veto-named target between install and uninstall, we must refuse to
+// remove it rather than silently doing the attacker's cleanup for them.
+func TestUnwrap_RefusesImpostorVetoSymlink(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+	impostor := filepath.Join(dir, "veto-attacker")
+	require.NoError(t, os.WriteFile(impostor, []byte(""), 0o755))
+
+	// State claims we wrapped this path. Filesystem reality: someone
+	// repointed it at the impostor.
+	npm := filepath.Join(dir, "npm")
+	require.NoError(t, os.Symlink(impostor, npm))
+	w := wrapperEntry{Path: npm, OriginalPath: npm + wrapperSuffix, PM: "npm", Source: "test"}
+
+	err := unwrap(w, veto, false)
+	require.Error(t, err, "unwrap must refuse a symlink that no longer points at the real veto binary")
+	require.Contains(t, err.Error(), "refusing to overwrite")
 }
 
 // TestRunInstallWrappers_EndToEnd: drive runInstallWrappers against a
@@ -353,7 +399,7 @@ func TestRunInstallWrappers_EndToEnd(t *testing.T) {
 
 	// Unwrap each and confirm reversal.
 	for _, w := range loaded.Wrappers {
-		require.NoError(t, unwrap(w, false))
+		require.NoError(t, unwrap(w, vetoBin, false))
 	}
 	for _, c := range candidates {
 		info, err := os.Lstat(c.path)

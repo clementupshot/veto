@@ -13,3 +13,7 @@
 
 # Local-only state
 .envrc.local
+
+# Native interposer build artifacts (built via `make interposer`)
+libbouncer_interpose.dylib
+libbouncer_interpose.so

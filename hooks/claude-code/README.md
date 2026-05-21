@@ -1,36 +1,43 @@
 # Claude Code hook
 
-`bouncer-hook.py` is a Claude Code `PreToolUse` hook for the `Bash` tool. It
-detects package-manager install commands — even when wrapped (`timeout`,
-`xargs`, `env`, `sudo`, …), invoked through `bash -c "..."`, or chained with
-`&&`/`||`/`;`/`|` — and refuses the tool call if it isn't prefixed with
-`bouncer`. The agent then reissues the command with the prefix, routing the
-install through bouncer's malware scan.
+The Claude Code `PreToolUse` hook is the `bouncer hook claude-code`
+subcommand built into the bouncer binary itself. It detects
+package-manager install commands — even when wrapped (`timeout`,
+`xargs`, `env`, `sudo`, …), invoked through `bash -c "..."`, or chained
+with `&&`/`||`/`;`/`|` — and refuses the tool call if it isn't prefixed
+with `bouncer`. The agent then reissues the command with the prefix,
+routing the install through bouncer's malware scan.
 
 ## Wiring
 
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/package-bouncer/hooks/claude-code/bouncer-hook.py"
-          }
-        ]
-      }
-    ]
-  }
-}
+```sh
+bouncer install-claude-hook            # edits ~/.claude/settings.json
+bouncer install-claude-hook --project  # edits ./.claude/settings.json
+bouncer install-claude-hook --print    # preview the change without writing
 ```
 
-If you already have a Bash `PreToolUse` chain, append this entry to the
-existing `hooks` array; hooks run in order and any one of them can deny.
+Idempotent. Re-running upgrades the command path if bouncer was
+reinstalled at a different location. Other hooks in the same
+`PreToolUse[Bash]` chain are preserved.
+
+To uninstall:
+
+```sh
+bouncer uninstall-claude-hook
+```
+
+## Why the hook lives in the bouncer binary
+
+The previous design used a Python script via shebang
+(`bouncer-hook.py`). That script had a documented fail-OPEN: if
+`python3` was missing at hook-invocation time, Claude Code would let
+the unguarded tool call through. Compiling the hook into the same
+binary the agent's corrected command must already invoke removes that
+failure mode entirely — if `bouncer` is on PATH, the hook is too.
+
+The legacy `bouncer-hook.py` is kept in this directory for reference
+during the transition. `install-claude-hook` recognises old shebang
+wiring and migrates it to the Go subcommand in place.
 
 ## Coverage
 

@@ -26,20 +26,24 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 
+	"github.com/brynbellomy/package-bouncer/internal/daemon"
 	"github.com/brynbellomy/package-bouncer/internal/gate"
 	"github.com/brynbellomy/package-bouncer/internal/intel"
 	"github.com/brynbellomy/package-bouncer/internal/intel/sources/aikido"
 	"github.com/brynbellomy/package-bouncer/internal/intel/sources/openssf"
 	"github.com/brynbellomy/package-bouncer/internal/intel/sources/osv"
+	"github.com/brynbellomy/package-bouncer/internal/intel/sources/pypa"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/bun"
 	pmexec "github.com/brynbellomy/package-bouncer/internal/packagemanager/exec"
+	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jslock"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/jsmanifest"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/npm"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pdm"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pip"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pnpm"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/poetry"
+	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pylock"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pymanifest"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/pyreq"
 	"github.com/brynbellomy/package-bouncer/internal/packagemanager/uv"
@@ -106,6 +110,26 @@ func run(args []string) int {
 		return runInstallShims(logger, args[1:])
 	case "uninstall-shims":
 		return runUninstallShims(logger, args[1:])
+	case "hook":
+		return runHook(logger, args[1:])
+	case "install-claude-hook":
+		return runInstallClaudeHook(logger, args[1:])
+	case "uninstall-claude-hook":
+		return runUninstallClaudeHook(logger, args[1:])
+	case "install-codex":
+		return runInstallCodex(logger, args[1:])
+	case "install-preload":
+		return runInstallPreload(logger, args[1:])
+	case "uninstall-preload":
+		return runUninstallPreload(logger, args[1:])
+	case "install-wrappers":
+		return runInstallWrappers(logger, cfg, args[1:])
+	case "uninstall-wrappers":
+		return runUninstallWrappers(logger, cfg, args[1:])
+	case "doctor":
+		return runDoctor(logger, cfg, args[1:])
+	case "daemon":
+		return runDaemon(logger, cfg, args[1:])
 	}
 
 	return runGate(logger, cfg, args)
@@ -124,9 +148,25 @@ func isShimName(basename string) bool {
 	return false
 }
 
-// runGate handles the `bouncer <pm> <args...>` path: gate the install, then
-// exec the real PM.
+// runGate handles the `bouncer <pm> <args...>` path. When the bouncer
+// daemon is reachable on its Unix socket, the request is forwarded to it
+// — that's the kernel-enforcement path inside a sandbox-exec'd agent.
+// Otherwise we fall back to running the gate in-process and exec'ing the
+// real PM ourselves, which is the "daemon-less courtesy mode" for users
+// who haven't set up launchd yet but still want their interactive shell
+// to be soft-gated via PATH shims.
 func runGate(logger zerolog.Logger, cfg config, args []string) int {
+	if socketPath, err := daemon.SocketPath(); err == nil && daemonSocketExists(socketPath) {
+		return daemonClient(logger, socketPath, args[0], args[1:])
+	}
+	return runGateInProcess(logger, cfg, args)
+}
+
+// runGateInProcess is the legacy in-process gate path. Used when the
+// daemon socket isn't reachable (no launchd install, or development
+// without the daemon running). Same gate logic, same intel store, just
+// invoked in the bouncer CLI process directly.
+func runGateInProcess(logger zerolog.Logger, cfg config, args []string) int {
 	pmName, pmArgs := args[0], args[1:]
 	pms := buildPackageManagers()
 	pm, ok := pms[pmName]
@@ -176,6 +216,13 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 
 	policy := gate.DefaultPolicy()
 	policy.ManifestExpander = newCompoundExpander()
+	// BOUNCER_ALLOW_OPAQUE=1 opts URL/git/tarball/github-shorthand specs
+	// through the gate. The default refuses them — see
+	// gate.DefaultPolicy docs for why.
+	if cfg.AllowOpaqueRemote {
+		policy.AllowOpaqueRemote = true
+		logger.Warn().Msg("BOUNCER_ALLOW_OPAQUE=1 set; opaque remote specs (URL/git/tarball) will NOT be refused")
+	}
 	g := gate.New(store, policy).WithLogger(logger)
 	decision := g.Evaluate(installs, manifestRefs...)
 
@@ -263,6 +310,20 @@ func displayVersion(v string) string {
 
 // execReal replaces the current process with the real package-manager binary.
 // Returns an exit code only on errors before exec; on success it never returns.
+//
+// Resolution preference order:
+//
+//  1. Sibling `<argv[0]>.bouncer-original` — set by `bouncer
+//     install-wrappers`, which atomically moves a real PM binary aside
+//     and replaces the original path with a bouncer symlink. This is
+//     Layer 4: it catches absolute-path invocations
+//     (`/opt/homebrew/bin/npm install …`) that bypass PATH lookup
+//     entirely.
+//  2. PATH lookup, skipping any candidates whose target IS bouncer
+//     (avoids the shim chain re-entering itself).
+//
+// The sibling check happens first so an attacker can't bypass Layer 4
+// by manipulating PATH inside the process.
 func execReal(name string, args []string) int {
 	realPath, err := findRealBinary(name)
 	if err != nil {
@@ -277,9 +338,39 @@ func execReal(name string, args []string) int {
 	return exitInternal
 }
 
-// findRealBinary returns the first executable named `name` in PATH that is
-// not the bouncer binary itself (so shims that point at bouncer don't recurse).
+// findWrappedOriginal returns the path to a `.bouncer-original` sibling
+// of argv[0] when bouncer was invoked through a real-binary wrapper, or
+// ("", false) otherwise. Layer 4 (`bouncer install-wrappers`) plants
+// these sibling files; the resolver here unwraps them.
+//
+// argv[0] must contain a path separator — a bare-name shim invocation
+// (e.g. from a ~/.local/bin/<pm> resolved through PATH) does not point
+// at a real-binary wrapper site, even though os.Args[0] may be the
+// resolved absolute path on some platforms. We err on the side of
+// false-negative here and let the PATH walk handle bare names.
+func findWrappedOriginal(argv0 string) (string, bool) {
+	if argv0 == "" || !strings.ContainsRune(argv0, '/') {
+		return "", false
+	}
+	abs, err := filepath.Abs(argv0)
+	if err != nil {
+		return "", false
+	}
+	original := abs + ".bouncer-original"
+	info, err := os.Stat(original)
+	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		return "", false
+	}
+	return original, true
+}
+
+// findRealBinary returns the path bouncer should exec to satisfy a
+// gated install. Prefers a wrapped-original sibling (Layer 4), then
+// falls back to a PATH walk that skips any bouncer-pointing entries.
 func findRealBinary(name string) (string, error) {
+	if wrapped, ok := findWrappedOriginal(os.Args[0]); ok {
+		return wrapped, nil
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return "", errors.With(err, "resolve self")
@@ -310,6 +401,15 @@ func findRealBinary(name string) (string, error) {
 			resolved = candidate
 		}
 		if resolved == selfReal {
+			// This PATH entry IS bouncer (either a Layer 2 shim or a
+			// Layer 4 wrapper). If a `.bouncer-original` sibling exists,
+			// that's the wrapped real binary — use it instead of
+			// continuing the PATH walk. Without this check, a system
+			// where every PATH entry has been wrapped would yield
+			// "not found in PATH" because every candidate gets skipped.
+			if sibling := candidate + ".bouncer-original"; isExecutableRegularOrSymlink(sibling) {
+				return sibling, nil
+			}
 			continue
 		}
 		return candidate, nil
@@ -317,9 +417,26 @@ func findRealBinary(name string) (string, error) {
 	return "", errors.WithNew("not found in PATH").Set("name", name)
 }
 
+// isExecutableRegularOrSymlink returns true if `p` exists, is not a
+// directory, and resolves to an executable file (resolving symlinks).
+// Used by findRealBinary's `.bouncer-original` sibling lookup —
+// homebrew wrappers leave a symlink-into-Cellar as the original, so
+// we must follow symlinks here, not just stat.
+func isExecutableRegularOrSymlink(p string) bool {
+	info, err := os.Stat(p) // Stat follows symlinks
+	if err != nil {
+		return false
+	}
+	if info.IsDir() {
+		return false
+	}
+	return info.Mode()&0o111 != 0
+}
+
 type config struct {
-	CacheDir string
-	Sources  []string // enabled source IDs
+	CacheDir          string
+	Sources           []string // enabled source IDs
+	AllowOpaqueRemote bool     // BOUNCER_ALLOW_OPAQUE=1 opts URL/git/tarball specs through
 }
 
 func loadConfig() (config, error) {
@@ -327,15 +444,17 @@ func loadConfig() (config, error) {
 	v.SetEnvPrefix("BOUNCER")
 	v.AutomaticEnv()
 	v.SetDefault("cache_dir", defaultCacheDir())
-	v.SetDefault("sources", []string{"aikido", "openssf", "osv"})
+	v.SetDefault("sources", []string{"aikido", "openssf", "osv", "pypa"})
+	v.SetDefault("allow_opaque", false)
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 	v.AddConfigPath(filepath.Join(defaultCacheDir(), ".."))
 	_ = v.ReadInConfig() // optional config file
 
 	cfg := config{
-		CacheDir: v.GetString("cache_dir"),
-		Sources:  v.GetStringSlice("sources"),
+		CacheDir:          v.GetString("cache_dir"),
+		Sources:           v.GetStringSlice("sources"),
+		AllowOpaqueRemote: v.GetBool("allow_opaque"),
 	}
 	if cfg.CacheDir == "" {
 		return cfg, errors.New("cache_dir resolved empty")
@@ -388,6 +507,11 @@ func buildSource(logger zerolog.Logger, cfg config, id string) (intel.Source, er
 		return osv.New(osv.Options{
 			CacheDir: filepath.Join(cfg.CacheDir, "osv"),
 		})
+	case "pypa":
+		return pypa.New(pypa.Options{
+			CacheDir: filepath.Join(cfg.CacheDir, "pypa"),
+			Logger:   logger,
+		})
 	default:
 		return nil, errors.WithNew("unknown source").Set("id", id)
 	}
@@ -397,18 +521,22 @@ func buildSource(logger zerolog.Logger, cfg config, id string) (intel.Source, er
 // the kind. Keeping the dispatch in one place lets each leaf expander stay
 // scoped to its own kinds and testable in isolation.
 type compoundExpander struct {
-	pyReq *pyreq.Expander
-	js    *jsmanifest.Expander
-	pyPrj *pymanifest.Expander
+	pyReq  *pyreq.Expander
+	js     *jsmanifest.Expander
+	pyPrj  *pymanifest.Expander
+	jsLock *jslock.Expander
+	pyLock *pylock.Expander
 }
 
-// newCompoundExpander wires the three leaf expanders behind a single
+// newCompoundExpander wires the leaf expanders behind a single
 // gate.ManifestExpander.
 func newCompoundExpander() *compoundExpander {
 	return &compoundExpander{
-		pyReq: pyreq.New(),
-		js:    jsmanifest.New(),
-		pyPrj: pymanifest.New(),
+		pyReq:  pyreq.New(),
+		js:     jsmanifest.New(),
+		pyPrj:  pymanifest.New(),
+		jsLock: jslock.New(),
+		pyLock: pylock.New(),
 	}
 }
 
@@ -424,6 +552,15 @@ func (c *compoundExpander) Expand(ref packagemanager.ManifestRef) ([]packagemana
 		return c.js.Expand(ref)
 	case packagemanager.ManifestKindPyProject:
 		return c.pyPrj.Expand(ref)
+	case packagemanager.ManifestKindPackageLockJSON,
+		packagemanager.ManifestKindNpmShrinkwrap,
+		packagemanager.ManifestKindPnpmLockYAML,
+		packagemanager.ManifestKindYarnLock:
+		return c.jsLock.Expand(ref)
+	case packagemanager.ManifestKindUvLock,
+		packagemanager.ManifestKindPoetryLock,
+		packagemanager.ManifestKindPdmLock:
+		return c.pyLock.Expand(ref)
 	default:
 		return nil, nil
 	}
@@ -470,23 +607,55 @@ func printUsage(w io.Writer) {
 Usage:
   bouncer <pm> <pm-args...>    gate a package-manager invocation, then exec it
   bouncer sync                 refresh malware intel from all configured sources
-  bouncer install-shims [--dir DIR] [--force]
-                               create PATH symlinks so `+"`npm install foo`"+` is
-                               routed through bouncer transparently (default
-                               dir: ~/.local/bin). Use this to wire up Codex,
-                               Sirene, CI, or any shell without a hook layer.
-  bouncer uninstall-shims [--dir DIR]
-                               remove bouncer-managed symlinks from DIR
   bouncer status               print configured sources and cache location
+  bouncer doctor               verify defense layers + intel state (run after install)
   bouncer help                 this message
+
+Layer 1 — Claude Code hook (Bash tool interception):
+  bouncer install-claude-hook [--project] [--settings PATH] [--print]
+                               wire bouncer into ~/.claude/settings.json
+  bouncer uninstall-claude-hook [--settings PATH]
+                               remove the bouncer hook entry (preserves siblings)
+  bouncer hook claude-code     read PreToolUse JSON from stdin, write a deny
+                               decision to stdout if the command reaches a PM
+
+Layer 2 — PATH shims (any agent shell, Codex, CI):
+  bouncer install-shims [--dir DIR] [--force]
+                               symlinks ~/.local/bin/{npm,pip,…} → bouncer
+  bouncer uninstall-shims [--dir DIR]
+                               remove bouncer-managed symlinks
+  bouncer install-codex        install-shims + a ~/.codex/config.toml scan
+                               for env-policy gotchas
+
+Layer 3 — native execve interposer (catches direct child-process spawns):
+  bouncer install-preload --lib PATH [--shell-rc PATH|auto] [--install-to DIR] [--print]
+                               install the libbouncer_interpose.{dylib,so}
+                               and export DYLD_INSERT_LIBRARIES / LD_PRELOAD +
+                               BOUNCER_PATH from your shell rc. Build the
+                               artifact first with `+"`make interposer`"+`.
+  bouncer uninstall-preload [--shell-rc PATH|auto] [--install-to DIR]
+                               strip the managed shell-rc block and remove
+                               the installed library
+
+Layer 4 — real-binary wrappers (catches absolute-path invocations):
+  bouncer install-wrappers [--dry-run] [--force] [--dir DIR] [--only PM]
+                               atomically replace /opt/homebrew/bin/<pm>,
+                               mise install dirs, etc. with bouncer symlinks.
+                               Catches `+"`subprocess.run([abs_path,…])`"+` even
+                               when DYLD_INSERT_LIBRARIES is stripped.
+  bouncer uninstall-wrappers   reverse every wrapper recorded in state
 
 Supported package managers:
   npm, pnpm, yarn, bun, pip, pip3, uv, poetry, pdm,
   npx, pnpx, bunx, uvx, pipx
 
 Environment:
-  BOUNCER_CACHE_DIR    override cache location (default: $XDG_CACHE_HOME/package-bouncer)
-  BOUNCER_SOURCES      comma-separated source IDs (default: aikido)
-  BOUNCER_LOG          set to "debug" for verbose logging
+  BOUNCER_CACHE_DIR     override cache location (default: $XDG_CACHE_HOME/package-bouncer)
+  BOUNCER_SOURCES       comma-separated source IDs (default: aikido,openssf,osv,pypa)
+  BOUNCER_LOG           set to "debug" for verbose logging
+  BOUNCER_BYPASS        prepend `+"`BOUNCER_BYPASS=1 `"+` to skip the gate for one invocation
+  BOUNCER_ALLOW_OPAQUE  set to 1 to opt URL/git/tarball/github-shorthand specs
+                        through; refused by default (see README)
+  BOUNCER_PATH          set by install-preload; consumed by the interposer
 `)
 }

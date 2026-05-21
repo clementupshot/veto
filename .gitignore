@@ -1,0 +1,15 @@
+/bouncer
+/dist/
+/coverage.out
+/coverage.html
+*.test
+*.prof
+
+# Editor noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local-only state
+.envrc.local

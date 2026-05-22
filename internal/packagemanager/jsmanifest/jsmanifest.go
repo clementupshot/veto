@@ -23,6 +23,7 @@ import (
 
 	vetoerrors "github.com/brynbellomy/go-utils/errors"
 
+	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/packagemanager"
 	"github.com/brynbellomy/veto/internal/packagemanager/jsspec"
 )
@@ -99,19 +100,50 @@ func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Inst
 // the real package name+version so the gate looks up the actually-installed
 // package, not the local alias the developer typed. Without this, an attacker
 // can hide a malicious package under a benign-looking local name.
+//
+// Opaque-remote values ("git+https://...", "github:user/repo", "user/repo",
+// tarball URLs) and local-path values ("./local", "file:./local", "/abs") are
+// detected on the VERSION side — package.json keys are always the local
+// install name, never the spec — and emit Installs with the appropriate
+// OpaqueRemote / LocalPath flag set, so the gate's policy can refuse opaque
+// fetches by default. Without this, the version string would be passed to
+// jsspec.Parse(name+"@"+version) and the resulting Install would look like a
+// clean name with no remote-fetch indication.
 func appendDeps(out []packagemanager.Install, deps map[string]string) []packagemanager.Install {
 	for name, version := range deps {
-		if alias, aliasVer, ok := jsspec.UnwrapNpmAlias(strings.TrimSpace(version)); ok {
+		v := strings.TrimSpace(version)
+		if alias, aliasVer, ok := jsspec.UnwrapNpmAlias(v); ok {
 			spec := alias
-			if v := exactPin(aliasVer); v != "" {
-				spec = alias + "@" + v
+			if p := exactPin(aliasVer); p != "" {
+				spec = alias + "@" + p
 			}
 			out = append(out, jsspec.Parse(spec))
 			continue
 		}
+		// Detect opaque-remote / local-path forms on the version side. These
+		// fetch code from outside the registry (or from disk), so we MUST set
+		// the appropriate flag rather than letting the value be parsed as a
+		// "name@version" pin — otherwise the gate sees a clean Install and the
+		// AllowOpaqueRemote policy never gets a chance to refuse it.
+		if jsspec.IsLocalPathSpec(v) {
+			out = append(out, packagemanager.Install{
+				Ref:       intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: name},
+				RawSpec:   name + "@" + version,
+				LocalPath: true,
+			})
+			continue
+		}
+		if jsspec.IsOpaqueRemoteSpec(v) {
+			out = append(out, packagemanager.Install{
+				Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: name},
+				RawSpec:      name + "@" + version,
+				OpaqueRemote: true,
+			})
+			continue
+		}
 		spec := name
-		if v := exactPin(version); v != "" {
-			spec = name + "@" + v
+		if p := exactPin(version); p != "" {
+			spec = name + "@" + p
 		}
 		out = append(out, jsspec.Parse(spec))
 	}

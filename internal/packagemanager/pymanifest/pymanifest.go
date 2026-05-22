@@ -29,6 +29,7 @@ import (
 	"github.com/BurntSushi/toml"
 	vetoerrors "github.com/brynbellomy/go-utils/errors"
 
+	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/packagemanager"
 	"github.com/brynbellomy/veto/internal/packagemanager/pyspec"
 )
@@ -144,8 +145,14 @@ func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Inst
 //
 //   - A plain string ("^1.0", "*") → name with that string as the version.
 //   - An inline table ({ version = "^1.0", ... }) → pull the version key;
-//     emit name with empty version if no version key is present (path/git/url
-//     deps).
+//     emit name with empty version if no version key is present.
+//   - An inline table with `git`, `url`, or `source` keys (no `version`) →
+//     OpaqueRemote dep. Set OpaqueRemote=true so the gate's policy can
+//     refuse remote-code-fetching deps by default. Without this, a
+//     `{git = "https://evil"}` value would surface as a clean Install with
+//     no remote-fetch indication and silently bypass AllowOpaqueRemote.
+//   - An inline table with a `path` key → LocalPath dep. Set LocalPath=true
+//     for the same reason.
 //   - Anything else (array of tables for multi-source deps, etc.) → emit name
 //     with empty version. The intel store's name-keyed lookup still catches
 //     flagged versions.
@@ -161,6 +168,25 @@ func poetryDeps(deps map[string]any) []packagemanager.Install {
 		if strings.EqualFold(name, "python") {
 			continue
 		}
+		// Inline-table form: inspect for opaque-remote / local-path keys
+		// BEFORE we route through pyspec.Parse(name), which would otherwise
+		// emit a clean Install with no flag set.
+		if tbl, ok := raw.(map[string]any); ok {
+			if kind, ok := classifyPoetryInlineTable(tbl); ok {
+				ins := packagemanager.Install{
+					Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: name},
+					RawSpec: name + " (from pyproject.toml)",
+				}
+				switch kind {
+				case poetryInlineLocalPath:
+					ins.LocalPath = true
+				case poetryInlineOpaqueRemote:
+					ins.OpaqueRemote = true
+				}
+				out = append(out, ins)
+				continue
+			}
+		}
 		version := decodePoetryVersion(raw)
 		// Build an Install directly: pyspec's spec grammar is PEP 508 (the
 		// Python ecosystem's "name op version" form), which doesn't match
@@ -172,6 +198,41 @@ func poetryDeps(deps map[string]any) []packagemanager.Install {
 		out = append(out, install)
 	}
 	return out
+}
+
+// poetryInlineKind classifies a Poetry inline-table dep that doesn't resolve
+// to a plain version. The classifier only fires when the table lacks a
+// `version` key — a `{version = "^1.0", git = "..."}` value still gets the
+// version path because Poetry permits both to coexist (the version constrains
+// what the git ref must satisfy).
+type poetryInlineKind int
+
+const (
+	poetryInlineOpaqueRemote poetryInlineKind = iota + 1
+	poetryInlineLocalPath
+)
+
+// classifyPoetryInlineTable returns (kind, true) when the table carries a
+// `git`, `url`, or `path` key and NO `version` key — i.e. when the dep is
+// resolved against something other than PyPI by name+version. Returns
+// (_, false) otherwise so the caller falls back to the version-string path.
+func classifyPoetryInlineTable(tbl map[string]any) (poetryInlineKind, bool) {
+	if _, hasVersion := tbl["version"].(string); hasVersion {
+		return 0, false
+	}
+	if _, ok := tbl["path"]; ok {
+		return poetryInlineLocalPath, true
+	}
+	if _, ok := tbl["git"]; ok {
+		return poetryInlineOpaqueRemote, true
+	}
+	if _, ok := tbl["url"]; ok {
+		return poetryInlineOpaqueRemote, true
+	}
+	// `source` alone (without git/url/path) refers to a named alternate
+	// PyPI-like index — leave it to the version-string path so the
+	// name-keyed lookup still applies.
+	return 0, false
 }
 
 // decodePoetryVersion returns the version string for a Poetry dep value.

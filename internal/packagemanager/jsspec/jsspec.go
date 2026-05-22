@@ -33,7 +33,7 @@ import (
 // the registry and are refused by default — set VETO_ALLOW_OPAQUE=1 to
 // opt in. See gate.Policy.
 func Parse(spec string) packagemanager.Install {
-	if isLocalPathSpec(spec) {
+	if IsLocalPathSpec(spec) {
 		return packagemanager.Install{
 			Ref:       intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: spec},
 			RawSpec:   spec,
@@ -52,7 +52,7 @@ func Parse(spec string) packagemanager.Install {
 			RawSpec: spec,
 		}
 	}
-	if isOpaqueRemoteSpec(spec) {
+	if IsOpaqueRemoteSpec(spec) {
 		return packagemanager.Install{
 			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: spec},
 			RawSpec:      spec,
@@ -79,11 +79,15 @@ func tryParseAlias(spec string) (string, string, bool) {
 	return UnwrapNpmAlias(version)
 }
 
-// isLocalPathSpec recognises filesystem-path specs that the gate cannot
+// IsLocalPathSpec recognises filesystem-path specs that the gate cannot
 // look up but that don't fetch remote code on their own. `file:` URIs are
 // included even though they have a scheme — they reference a path on
 // this machine.
-func isLocalPathSpec(spec string) bool {
+//
+// Exported so manifest readers (jsmanifest) can classify package.json values
+// — which use the same shorthand grammar as command-line specs — without
+// re-deriving the predicate.
+func IsLocalPathSpec(spec string) bool {
 	if spec == "" {
 		return false
 	}
@@ -96,12 +100,16 @@ func isLocalPathSpec(spec string) bool {
 	return false
 }
 
-// isOpaqueRemoteSpec recognises specs that pull code from outside the
+// IsOpaqueRemoteSpec recognises specs that pull code from outside the
 // registry: git refs (in any of npm's accepted forms), tarball URLs, and
 // the "user/repo" GitHub shorthand. These are refused by default because
 // upstream malware feeds can name them by URL / commit / tag and we'd
 // silently bypass the lookup if we treated them like local paths.
-func isOpaqueRemoteSpec(spec string) bool {
+//
+// Exported so manifest readers (jsmanifest) can classify package.json values
+// — which use the same shorthand grammar as command-line specs — without
+// re-deriving the predicate.
+func IsOpaqueRemoteSpec(spec string) bool {
 	if spec == "" {
 		return false
 	}

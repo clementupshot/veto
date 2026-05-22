@@ -143,6 +143,75 @@ func TestExpandPackageJSONNpmAliases(t *testing.T) {
 	require.Equal(t, "2.0.0", byName["@scope/real"].Ref.Version)
 }
 
+// TestExpandPackageJSONOpaqueAndLocalSpecs ensures package.json values that
+// reference code outside the registry (git URLs, github shorthand, tarballs,
+// `user/repo`) are flagged OpaqueRemote, and filesystem-path values are
+// flagged LocalPath. Without these flags the gate's policy can't refuse
+// remote-code fetches by default — the value would otherwise pass through
+// jsspec.Parse(name+"@"+version) and emerge as a clean Install record.
+func TestExpandPackageJSONOpaqueAndLocalSpecs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package.json")
+
+	contents := `{
+  "name": "demo",
+  "dependencies": {
+    "git-https": "git+https://evil/repo",
+    "git-plain": "git://evil/repo",
+    "github-shorthand": "github:user/repo",
+    "user-repo": "user/repo",
+    "tarball": "https://evil.example.com/pkg.tgz",
+    "rel-path": "./local",
+    "rel-parent": "../sibling",
+    "file-uri": "file:./local",
+    "abs-path": "/abs/path",
+    "normal": "^1.0.0",
+    "pinned": "1.2.3"
+  }
+}`
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o644))
+
+	exp := jsmanifest.New()
+	installs, err := exp.Expand(packagemanager.ManifestRef{
+		Path: path,
+		Kind: packagemanager.ManifestKindPackageJSON,
+	})
+	require.NoError(t, err)
+	require.Len(t, installs, 11)
+
+	byName := make(map[string]packagemanager.Install, len(installs))
+	for _, ins := range installs {
+		require.Equal(t, intel.EcosystemNPM, ins.Ref.Ecosystem)
+		byName[ins.Ref.Name] = ins
+	}
+
+	for _, name := range []string{"git-https", "git-plain", "github-shorthand", "user-repo", "tarball"} {
+		ins, ok := byName[name]
+		require.True(t, ok, "missing %s in installs", name)
+		require.True(t, ins.OpaqueRemote, "%s must be flagged OpaqueRemote", name)
+		require.False(t, ins.LocalPath, "%s must not be flagged LocalPath", name)
+		require.Equal(t, "", ins.Ref.Version, "%s must have empty version (no clean name+version)", name)
+	}
+
+	for _, name := range []string{"rel-path", "rel-parent", "file-uri", "abs-path"} {
+		ins, ok := byName[name]
+		require.True(t, ok, "missing %s in installs", name)
+		require.True(t, ins.LocalPath, "%s must be flagged LocalPath", name)
+		require.False(t, ins.OpaqueRemote, "%s must not be flagged OpaqueRemote", name)
+	}
+
+	// Normal version ranges and pins still take the existing path.
+	normal := byName["normal"]
+	require.False(t, normal.OpaqueRemote)
+	require.False(t, normal.LocalPath)
+	require.Equal(t, "", normal.Ref.Version, "caret range collapses to empty")
+
+	pinned := byName["pinned"]
+	require.False(t, pinned.OpaqueRemote)
+	require.False(t, pinned.LocalPath)
+	require.Equal(t, "1.2.3", pinned.Ref.Version, "exact pin preserved")
+}
+
 func TestExpandEmptyDeps(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "package.json")

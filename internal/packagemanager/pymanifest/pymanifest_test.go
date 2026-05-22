@@ -124,6 +124,74 @@ func TestExpandMalformedTOMLReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestExpandPyProjectPoetryOpaqueAndLocalInlineTables ensures Poetry inline-
+// table deps that reference code outside PyPI (git/url) are flagged
+// OpaqueRemote, and inline-table path deps are flagged LocalPath. Without
+// these flags the gate's policy can't refuse remote-code fetches by default
+// — the value would otherwise pass through pyspec.Parse(name) and emerge as
+// a clean Install record.
+func TestExpandPyProjectPoetryOpaqueAndLocalInlineTables(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pyproject.toml")
+
+	contents := `
+[tool.poetry]
+name = "demo"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+git-dep = { git = "https://evil/repo.git" }
+url-dep = { url = "https://evil.example.com/pkg.tar.gz" }
+path-dep = { path = "./local" }
+version-dep = { version = "^1.0" }
+plain-version = "1.2.3"
+`
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o644))
+
+	exp := pymanifest.New()
+	installs, err := exp.Expand(packagemanager.ManifestRef{
+		Path: path,
+		Kind: packagemanager.ManifestKindPyProject,
+	})
+	require.NoError(t, err)
+
+	byName := make(map[string]packagemanager.Install, len(installs))
+	for _, ins := range installs {
+		require.Equal(t, intel.EcosystemPyPI, ins.Ref.Ecosystem)
+		byName[ins.Ref.Name] = ins
+	}
+
+	gitDep, ok := byName["git-dep"]
+	require.True(t, ok)
+	require.True(t, gitDep.OpaqueRemote, "Poetry git inline-table must flag OpaqueRemote")
+	require.False(t, gitDep.LocalPath)
+
+	urlDep, ok := byName["url-dep"]
+	require.True(t, ok)
+	require.True(t, urlDep.OpaqueRemote, "Poetry url inline-table must flag OpaqueRemote")
+	require.False(t, urlDep.LocalPath)
+
+	pathDep, ok := byName["path-dep"]
+	require.True(t, ok)
+	require.True(t, pathDep.LocalPath, "Poetry path inline-table must flag LocalPath")
+	require.False(t, pathDep.OpaqueRemote)
+
+	// Plain-version path: existing behaviour, no flags set.
+	plain, ok := byName["plain-version"]
+	require.True(t, ok)
+	require.False(t, plain.OpaqueRemote)
+	require.False(t, plain.LocalPath)
+	require.Equal(t, "1.2.3", plain.Ref.Version)
+
+	// Inline table with `version` key keeps the existing version path
+	// (range collapses to empty), no flags set.
+	verDep, ok := byName["version-dep"]
+	require.True(t, ok)
+	require.False(t, verDep.OpaqueRemote)
+	require.False(t, verDep.LocalPath)
+	require.Equal(t, "", verDep.Ref.Version, "Poetry ^1.0 range collapses to empty")
+}
+
 func TestExpandDedupesAcrossSections(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pyproject.toml")

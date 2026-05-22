@@ -100,6 +100,39 @@ lodash@^4.17.21:
 	requireContains(t, got, intel.EcosystemNPM, "express", "4.18.2")
 }
 
+// TestExpandPnpmLockNpmAlias ensures pnpm packages-map keys of the form
+// `/alias@npm:realname@version` resolve to the REAL package, not the alias.
+// An attacker landing a package under a clean-looking local name must still
+// be gated against the actually-installed name.
+func TestExpandPnpmLockNpmAlias(t *testing.T) {
+	const lock = `lockfileVersion: '9.0'
+packages:
+  /lodash@npm:evil@1.0:
+    resolution: {integrity: sha512-xxx}
+  /react@npm:preact@10.5.0:
+    resolution: {integrity: sha512-yyy}
+`
+	got := mustExpand(t, "pnpm-lock.yaml", packagemanager.ManifestKindPnpmLockYAML, lock)
+	requireContains(t, got, intel.EcosystemNPM, "evil", "1.0")
+	requireContains(t, got, intel.EcosystemNPM, "preact", "10.5.0")
+	// The alias local name must not leak through as a separate Install.
+	requireMissing(t, got, "lodash")
+	requireMissing(t, got, "react")
+}
+
+// TestExpandYarnLockBerryNpmAlias covers yarn-berry headers of the form
+// `"alias@npm:realname@version"` — the real package wins over the alias.
+func TestExpandYarnLockBerryNpmAlias(t *testing.T) {
+	const lock = `# yarn berry lockfile
+"lodash@npm:evil@1.0":
+  version: 1.0
+  resolution: "evil@npm:1.0"
+`
+	got := mustExpand(t, "yarn.lock", packagemanager.ManifestKindYarnLock, lock)
+	requireContains(t, got, intel.EcosystemNPM, "evil", "1.0")
+	requireMissing(t, got, "lodash")
+}
+
 // TestExpandMissingFile_ReturnsNilNil: PMs emit lock refs speculatively,
 // so missing files must not error.
 func TestExpandMissingFile_ReturnsNilNil(t *testing.T) {

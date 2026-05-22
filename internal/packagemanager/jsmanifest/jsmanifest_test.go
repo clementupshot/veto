@@ -99,6 +99,50 @@ func TestExpandMalformedJSONReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestExpandPackageJSONNpmAliases ensures values like "npm:realname@version"
+// in package.json dependency maps unwrap to the real package, not the local
+// alias name. Without this, a developer can shadow a clean-looking name over
+// an attacker-controlled package and bypass the gate.
+func TestExpandPackageJSONNpmAliases(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "package.json")
+
+	contents := `{
+  "name": "demo",
+  "dependencies": {
+    "lodash": "npm:evil-pkg@1.0",
+    "react": "npm:preact",
+    "compat": "npm:@scope/real@2.0.0"
+  }
+}`
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o644))
+
+	exp := jsmanifest.New()
+	installs, err := exp.Expand(packagemanager.ManifestRef{
+		Path: path,
+		Kind: packagemanager.ManifestKindPackageJSON,
+	})
+	require.NoError(t, err)
+	require.Len(t, installs, 3)
+
+	byName := make(map[string]packagemanager.Install, len(installs))
+	for _, ins := range installs {
+		byName[ins.Ref.Name] = ins
+	}
+
+	require.NotContains(t, byName, "lodash", "alias name must not appear; real package wins")
+	require.Contains(t, byName, "evil-pkg")
+	require.Equal(t, "1.0", byName["evil-pkg"].Ref.Version)
+
+	require.NotContains(t, byName, "react")
+	require.Contains(t, byName, "preact")
+	require.Equal(t, "", byName["preact"].Ref.Version, "unversioned alias → name-keyed lookup")
+
+	require.NotContains(t, byName, "compat")
+	require.Contains(t, byName, "@scope/real")
+	require.Equal(t, "2.0.0", byName["@scope/real"].Ref.Version)
+}
+
 func TestExpandEmptyDeps(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "package.json")

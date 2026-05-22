@@ -174,6 +174,53 @@ func TestParse(t *testing.T) {
 				RawSpec: "pkg===1.0.0+local",
 			},
 		},
+		// PEP 508 URL specs: `<name> @ <url>` — name extracted, URL flagged
+		// OpaqueRemote so the policy refuses it by default.
+		{
+			name: "PEP 508 url spec extracts name and flags OpaqueRemote",
+			spec: "requests @ https://evil.com/x.tgz",
+			want: packagemanager.Install{
+				Ref:          intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "requests"},
+				RawSpec:      "requests @ https://evil.com/x.tgz",
+				OpaqueRemote: true,
+			},
+		},
+		{
+			name: "PEP 508 url spec with git+ scheme flags OpaqueRemote",
+			spec: "mypkg @ git+https://github.com/foo/bar.git@main",
+			want: packagemanager.Install{
+				Ref:          intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "mypkg"},
+				RawSpec:      "mypkg @ git+https://github.com/foo/bar.git@main",
+				OpaqueRemote: true,
+			},
+		},
+		{
+			name: "PEP 508 url spec with local path flags LocalPath",
+			spec: "requests @ ./local/path",
+			want: packagemanager.Install{
+				Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "requests"},
+				RawSpec:   "requests @ ./local/path",
+				LocalPath: true,
+			},
+		},
+		{
+			name: "PEP 508 url spec with file:// flags LocalPath",
+			spec: "mypkg @ file:///tmp/wheel.whl",
+			want: packagemanager.Install{
+				Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "mypkg"},
+				RawSpec:   "mypkg @ file:///tmp/wheel.whl",
+				LocalPath: true,
+			},
+		},
+		{
+			name: "PEP 508 url spec with extras strips extras from name",
+			spec: "requests[security] @ https://evil.com/x.tgz",
+			want: packagemanager.Install{
+				Ref:          intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "requests"},
+				RawSpec:      "requests[security] @ https://evil.com/x.tgz",
+				OpaqueRemote: true,
+			},
+		},
 	}
 
 	for _, c := range cases {

@@ -62,19 +62,68 @@ func Parse(spec string) packagemanager.Install {
 	}
 	body = strings.TrimSpace(body)
 
-	name, versionPart := splitNameAndVersion(body)
-	// Strip extras: "pkg[extra]" or "pkg[ext1,ext2]" → "pkg". The intel store
-	// is name-keyed; extras don't affect malware identity.
-	if i := strings.IndexByte(name, '['); i >= 0 {
-		name = name[:i]
+	// PEP 508 URL spec: "<name> @ <url-or-path>". The grammar requires
+	// whitespace around the '@' — see https://peps.python.org/pep-0508/#grammar
+	// (urlspec ::= '@' wsp* URL_reference). Detect the " @ " sentinel
+	// BEFORE operator splitting, because none of the operator characters
+	// =<>!~ appear in the URL spec and the whole thing would otherwise be
+	// parsed as a bare name and silently allowed.
+	//
+	// Note: we deliberately require space-at-space, not bare '@', so we
+	// don't collide with version-spec shapes like "pkg@1.0" (which is not
+	// valid PEP 508 anyway).
+	if name, urlRef, ok := splitPEP508URLSpec(body); ok {
+		name = stripExtras(name)
+		install := packagemanager.Install{
+			Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: name},
+			RawSpec: raw,
+		}
+		if isLocalPathSpec(urlRef) {
+			install.LocalPath = true
+		} else {
+			// Anything else on the right of " @ " — URL, git+, etc. — is
+			// remote code fetching. Refuse by default; OpaqueRemote keeps the
+			// known-name in the install so the policy can apply name-based
+			// allowlists if needed.
+			install.OpaqueRemote = true
+		}
+		return install
 	}
-	name = strings.TrimSpace(name)
+
+	name, versionPart := splitNameAndVersion(body)
+	name = stripExtras(name)
 
 	version := resolveVersion(versionPart)
 	return packagemanager.Install{
 		Ref:     intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: name, Version: version},
 		RawSpec: raw,
 	}
+}
+
+// stripExtras removes "[ext1,ext2]" suffixes from a package name. Extras
+// don't affect the malware identity the intel store keys on.
+func stripExtras(name string) string {
+	if i := strings.IndexByte(name, '['); i >= 0 {
+		name = name[:i]
+	}
+	return strings.TrimSpace(name)
+}
+
+// splitPEP508URLSpec detects the PEP 508 urlspec form: `<name> @ <url-ref>`.
+// Returns (name, urlRef, true) when the body contains a literal " @ "
+// (space-at-space) — that whitespace is required by the grammar and lets us
+// distinguish from non-PEP-508 shapes like "pkg@1.0".
+func splitPEP508URLSpec(body string) (string, string, bool) {
+	name, urlRef, ok := strings.Cut(body, " @ ")
+	if !ok {
+		return "", "", false
+	}
+	name = strings.TrimSpace(name)
+	urlRef = strings.TrimSpace(urlRef)
+	if name == "" || urlRef == "" {
+		return "", "", false
+	}
+	return name, urlRef, true
 }
 
 // isLocalPathSpec reports whether spec is a filesystem path the gate

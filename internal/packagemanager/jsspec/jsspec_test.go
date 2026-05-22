@@ -35,6 +35,14 @@ func TestParse(t *testing.T) {
 		{"github:user/repo", "github:user/repo", "", false, true},
 		{"user/repo", "user/repo", "", false, true}, // npm shorthand
 		{"https://example.com/x.tgz", "https://example.com/x.tgz", "", false, true},
+
+		// npm aliases: lookup the REAL package, not the local alias name.
+		// "alias@npm:realname@version" → name="realname", version="version".
+		{"lodash@npm:evil-pkg@1.0", "evil-pkg", "1.0", false, false},
+		{"foo@npm:bar", "bar", "", false, false},
+		{"react@npm:preact@10.5.0", "preact", "10.5.0", false, false},
+		// Scoped real-name behind alias.
+		{"compat@npm:@scope/real@2.0.0", "@scope/real", "2.0.0", false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.spec, func(t *testing.T) {

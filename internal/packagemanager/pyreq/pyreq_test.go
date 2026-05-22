@@ -109,6 +109,69 @@ func TestExpandMissingFileReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestExpandEditableLinesNotDropped covers `-e <spec>` and `--editable <spec>`
+// directives: they were previously silently dropped because expandFile
+// short-circuited any line starting with `-`. An attacker can stash
+// `-e git+https://evil/repo` in a requirements.txt and a user might think
+// it's gated when it isn't.
+func TestExpandEditableLinesNotDropped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "req.txt")
+
+	contents := `# editable installs must be flagged
+-e git+https://evil/repo@main
+--editable git+https://evil2/other
+--editable=git+https://evil3/third
+-e ./local/pkg
+`
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o644))
+
+	exp := pyreq.New()
+	installs, err := exp.Expand(packagemanager.ManifestRef{
+		Path: path,
+		Kind: packagemanager.ManifestKindRequirements,
+	})
+	require.NoError(t, err)
+	require.Len(t, installs, 4)
+
+	// First three are git URLs → OpaqueRemote.
+	require.True(t, installs[0].OpaqueRemote, "git+https editable must be flagged OpaqueRemote")
+	require.Equal(t, "git+https://evil/repo@main", installs[0].Ref.Name)
+	require.Equal(t, intel.EcosystemPyPI, installs[0].Ref.Ecosystem)
+
+	require.True(t, installs[1].OpaqueRemote)
+	require.Equal(t, "git+https://evil2/other", installs[1].Ref.Name)
+
+	require.True(t, installs[2].OpaqueRemote)
+	require.Equal(t, "git+https://evil3/third", installs[2].Ref.Name)
+
+	// Last is a local path → LocalPath.
+	require.True(t, installs[3].LocalPath, "./local editable must be flagged LocalPath")
+	require.False(t, installs[3].OpaqueRemote)
+	require.Equal(t, "./local/pkg", installs[3].Ref.Name)
+}
+
+// TestExpandIncludeDirectiveStillFollowed: `-r other.txt` must still be
+// treated as an include directive, not a spec.
+func TestExpandIncludeDirectiveStillFollowed(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.txt")
+	otherPath := filepath.Join(dir, "other.txt")
+
+	require.NoError(t, os.WriteFile(mainPath, []byte("-r other.txt\n"), 0o644))
+	require.NoError(t, os.WriteFile(otherPath, []byte("requests==2.31.0\n"), 0o644))
+
+	exp := pyreq.New()
+	installs, err := exp.Expand(packagemanager.ManifestRef{
+		Path: mainPath,
+		Kind: packagemanager.ManifestKindRequirements,
+	})
+	require.NoError(t, err)
+	require.Len(t, installs, 1)
+	require.Equal(t, "requests", installs[0].Ref.Name)
+	require.Equal(t, "2.31.0", installs[0].Ref.Version)
+}
+
 func TestExpandConstraintKindAlsoReadsFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.txt")

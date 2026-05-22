@@ -37,6 +37,7 @@ import (
 
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/jsspec"
 )
 
 // Expander handles npm/pnpm/yarn lockfile kinds. Stateless and safe for
@@ -254,16 +255,30 @@ func appendImporterDeps(deps map[string]pnpmImporterEntry, out *[]packagemanager
 // parsePnpmPackageKey splits a pnpm packages-map key into (name, version).
 // Formats handled:
 //
-//	"/lodash@4.17.21"          → ("lodash", "4.17.21")
-//	"/@scope/pkg@1.0.0"        → ("@scope/pkg", "1.0.0")
-//	"lodash@4.17.21"           → ("lodash", "4.17.21")     (no leading slash)
-//	"/lodash@4.17.21(react@18)" → ("lodash", "4.17.21")    (peer-suffix stripped)
+//	"/lodash@4.17.21"            → ("lodash", "4.17.21")
+//	"/@scope/pkg@1.0.0"          → ("@scope/pkg", "1.0.0")
+//	"lodash@4.17.21"             → ("lodash", "4.17.21")   (no leading slash)
+//	"/lodash@4.17.21(react@18)"  → ("lodash", "4.17.21")   (peer-suffix stripped)
+//	"/lodash@npm:evil@1.0"       → ("evil", "1.0")         (alias unwrapped)
+//
+// npm-style aliases ("alias@npm:realname@version") are unwrapped so the gate
+// looks up the actually-installed package, not the local alias name. pnpm
+// records aliased deps with this shape in its packages map.
 func parsePnpmPackageKey(key string) (string, string) {
 	k := strings.TrimPrefix(key, "/")
 	// Drop any "(peer@version)" suffix.
 	if idx := strings.IndexByte(k, '('); idx > 0 {
 		k = k[:idx]
 	}
+	name, version := splitPnpmKeyBoundary(k)
+	if alias, aliasVer, ok := jsspec.UnwrapNpmAlias(version); ok {
+		return alias, aliasVer
+	}
+	return name, version
+}
+
+// splitPnpmKeyBoundary finds the name@version cut, handling the scoped case.
+func splitPnpmKeyBoundary(k string) (string, string) {
 	// Scoped: "@scope/pkg@version".
 	if strings.HasPrefix(k, "@") {
 		if idx := strings.Index(k[1:], "@"); idx > 0 {
@@ -340,10 +355,9 @@ func expandYarnLock(path string) ([]packagemanager.Install, error) {
 // extractYarnVersion pulls "1.0.5" out of `version "1.0.5"` or `version: 1.0.5`.
 func extractYarnVersion(line string) string {
 	// v1: `version "1.0.5"`
-	if idx := strings.IndexByte(line, '"'); idx >= 0 {
-		rest := line[idx+1:]
-		if end := strings.IndexByte(rest, '"'); end >= 0 {
-			return rest[:end]
+	if _, rest, ok := strings.Cut(line, `"`); ok {
+		if v, _, ok := strings.Cut(rest, `"`); ok {
+			return v
 		}
 	}
 	// berry: `version: 1.0.5`
@@ -358,26 +372,35 @@ func extractYarnVersion(line string) string {
 // nameFromYarnHeader pulls the package name out of a yarn.lock header
 // like `"@scope/pkg@^1.0.0", "@scope/pkg@~1.1":`. The first comma-separated
 // alternative is sufficient (they all share a name).
+//
+// yarn-berry npm aliases ("name@npm:realname@version") are unwrapped to the
+// real package name — the local "name" before the alias is the developer's
+// chosen identifier, not the actually-installed package.
 func nameFromYarnHeader(header string) string {
 	if header == "" {
 		return ""
 	}
 	// Take the first alternative (before any comma).
-	first := header
-	if idx := strings.IndexByte(header, ','); idx >= 0 {
-		first = header[:idx]
-	}
+	first, _, _ := strings.Cut(header, ",")
 	first = strings.TrimSpace(first)
 	first = strings.Trim(first, `"`)
 	// Scoped: "@scope/pkg@^1.0.0" → "@scope/pkg".
 	if strings.HasPrefix(first, "@") {
 		if idx := strings.Index(first[1:], "@"); idx > 0 {
+			rest := first[1+idx+1:]
+			if alias, _, ok := jsspec.UnwrapNpmAlias(rest); ok {
+				return alias
+			}
 			return first[:1+idx]
 		}
 		return first
 	}
-	// Berry-style "name@npm:^1.0.0" or "name@^1.0.0".
+	// Berry-style "name@npm:realname@version" or "name@^1.0.0".
 	if idx := strings.IndexByte(first, '@'); idx > 0 {
+		rest := first[idx+1:]
+		if alias, _, ok := jsspec.UnwrapNpmAlias(rest); ok {
+			return alias
+		}
 		return first[:idx]
 	}
 	return first

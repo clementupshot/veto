@@ -40,6 +40,18 @@ func Parse(spec string) packagemanager.Install {
 			LocalPath: true,
 		}
 	}
+	// npm aliases ("alias@npm:realname[@version]") MUST unwrap before the
+	// opaque-remote shorthand heuristic, because the realname may itself be
+	// scoped (e.g. "compat@npm:@scope/real@1.0") and contain a "/" that the
+	// "user/repo" shorthand check would otherwise misclassify as a github
+	// reference. Aliases are also routed through the gate as the REAL
+	// package — that's the entire point of fixing this class of bug.
+	if name, version, ok := tryParseAlias(spec); ok {
+		return packagemanager.Install{
+			Ref:     intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: name, Version: version},
+			RawSpec: spec,
+		}
+	}
 	if isOpaqueRemoteSpec(spec) {
 		return packagemanager.Install{
 			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: spec},
@@ -53,6 +65,18 @@ func Parse(spec string) packagemanager.Install {
 		Ref:     intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: name, Version: version},
 		RawSpec: spec,
 	}
+}
+
+// tryParseAlias returns (realName, version, true) when spec is an npm alias
+// of the form "alias@npm:realname[@version]". The alias name itself can be
+// scoped or unscoped; the realname can be scoped or unscoped too. Returns
+// (_, _, false) for anything that isn't an alias.
+func tryParseAlias(spec string) (string, string, bool) {
+	name, version := rawSplitNameVersion(spec)
+	if name == "" {
+		return "", "", false
+	}
+	return UnwrapNpmAlias(version)
 }
 
 // isLocalPathSpec recognises filesystem-path specs that the gate cannot
@@ -99,7 +123,23 @@ func isOpaqueRemoteSpec(spec string) bool {
 
 // splitNameVersion handles both scoped (@scope/pkg@ver) and unscoped (pkg@ver)
 // forms. Returns (name, version); version may be empty.
+//
+// npm package aliases ("alias@npm:realname@version") are unwrapped to the
+// real package: e.g. "lodash@npm:evil-pkg@1.0" returns ("evil-pkg", "1.0"),
+// so the gate looks up the actually-installed package rather than the alias
+// the user typed. Without this, an attacker can ship a malicious package and
+// hide it behind a clean-looking local name.
 func splitNameVersion(spec string) (string, string) {
+	name, version := rawSplitNameVersion(spec)
+	if alias, aliasVer, ok := UnwrapNpmAlias(version); ok {
+		return alias, aliasVer
+	}
+	return name, version
+}
+
+// rawSplitNameVersion is the pre-alias-unwrap splitter — it just finds the
+// "name@version" boundary.
+func rawSplitNameVersion(spec string) (string, string) {
 	if strings.HasPrefix(spec, "@") {
 		// Scoped: find the SECOND '@' to split name from version.
 		// "@scope/pkg@1.2.3" → name "@scope/pkg", version "1.2.3"
@@ -112,6 +152,33 @@ func splitNameVersion(spec string) (string, string) {
 		return name, version
 	}
 	return spec, ""
+}
+
+// UnwrapNpmAlias detects npm's `npm:realname@version` alias syntax in the
+// version slot. Returns (realname, version, true) when the version is of the
+// form "npm:<name>[@<version>]". The realname may itself be scoped
+// ("@scope/pkg").
+//
+// Exported so lockfile/manifest readers (jslock, jsmanifest) can unwrap the
+// same alias shape they see in pnpm/yarn-berry headers and package.json
+// values — without each format re-deriving the logic.
+//
+// Examples:
+//
+//	"npm:evil-pkg@1.0"        → ("evil-pkg",   "1.0", true)
+//	"npm:bar"                 → ("bar",        "",    true)
+//	"npm:@scope/pkg@1.0"      → ("@scope/pkg", "1.0", true)
+//	"1.0.0"                   → ("", "", false)
+func UnwrapNpmAlias(version string) (string, string, bool) {
+	rest, ok := strings.CutPrefix(version, "npm:")
+	if !ok {
+		return "", "", false
+	}
+	name, ver := rawSplitNameVersion(rest)
+	if name == "" {
+		return "", "", false
+	}
+	return name, ver, true
 }
 
 // ParseInstallArgs is the shared parser for npm-family CLIs (npm/pnpm/yarn/bun).

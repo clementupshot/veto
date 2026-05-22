@@ -106,6 +106,20 @@ func expandFile(path string, depth int) ([]packagemanager.Install, error) {
 			continue
 		}
 
+		// Editable installs (`-e <spec>` / `--editable <spec>`) carry a real
+		// spec — typically a git+url or local path — and must be parsed
+		// through pyspec so OpaqueRemote / LocalPath get flagged. Without
+		// this, a line like `-e git+https://evil/repo` would fall through
+		// the leading-dash skip below and be silently ignored.
+		if rest, ok := stripEditablePrefix(line); ok {
+			install := pyspec.Parse(rest)
+			if install.Ref.Name == "" {
+				continue
+			}
+			installs = append(installs, install)
+			continue
+		}
+
 		// Skip lines that begin with a flag we don't model. pip allows
 		// per-line flags like "--hash=sha256:...", "--index-url=...", etc.
 		// These never resolve to a package spec.
@@ -125,6 +139,27 @@ func expandFile(path string, depth int) ([]packagemanager.Install, error) {
 		return nil, errors.With(err, "scanning requirements file").Set("path", path)
 	}
 	return installs, nil
+}
+
+// stripEditablePrefix detects pip's editable-install directives (`-e <spec>`
+// and `--editable <spec>`, plus the `=` form `--editable=<spec>`) and returns
+// the spec body with the prefix removed. Returns ("", false) when the line
+// is not an editable directive.
+//
+// Editable specs are typically git+urls or local paths; pyspec.Parse will
+// flag them OpaqueRemote / LocalPath. Without this special case the leading
+// `-` would cause expandFile to silently drop them.
+func stripEditablePrefix(line string) (string, bool) {
+	for _, prefix := range []string{"-e ", "--editable ", "--editable="} {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			rest = strings.TrimSpace(rest)
+			if rest == "" {
+				return "", false
+			}
+			return rest, true
+		}
+	}
+	return "", false
 }
 
 // parseIncludeDirective recognizes the pip include directives inside a
@@ -155,8 +190,6 @@ func parseIncludeDirective(line string) (string, packagemanager.ManifestKind, bo
 // a quoted environment-marker string can be missed by this — we accept that
 // edge case since requirements.txt almost never embeds quoted hashes.
 func stripComment(line string) string {
-	if i := strings.IndexByte(line, '#'); i >= 0 {
-		return line[:i]
-	}
-	return line
+	before, _, _ := strings.Cut(line, "#")
+	return before
 }

@@ -94,8 +94,21 @@ func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Inst
 //
 // An exact pin ("4.17.21") is preserved as Version so the store's exact-match
 // path still applies — those are the common case for pinned monorepos.
+//
+// npm package aliases — values like "npm:realname@version" — are unwrapped to
+// the real package name+version so the gate looks up the actually-installed
+// package, not the local alias the developer typed. Without this, an attacker
+// can hide a malicious package under a benign-looking local name.
 func appendDeps(out []packagemanager.Install, deps map[string]string) []packagemanager.Install {
 	for name, version := range deps {
+		if alias, aliasVer, ok := jsspec.UnwrapNpmAlias(strings.TrimSpace(version)); ok {
+			spec := alias
+			if v := exactPin(aliasVer); v != "" {
+				spec = alias + "@" + v
+			}
+			out = append(out, jsspec.Parse(spec))
+			continue
+		}
 		spec := name
 		if v := exactPin(version); v != "" {
 			spec = name + "@" + v

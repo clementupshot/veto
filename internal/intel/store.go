@@ -155,21 +155,16 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 
 	// Exact-version hits go first so their position in the verdict
 	// reflects "this is the version the upstream feed flagged."
-	exactVersionHits := map[*MalwareReport]struct{}{}
 	if reports, ok := s.byVersion[versionKey{ref.Ecosystem, lookupName, ref.Version}]; ok {
-		for i := range reports {
-			verdict.Reports = append(verdict.Reports, reports[i])
-			exactVersionHits[&reports[i]] = struct{}{}
-		}
+		verdict.Reports = append(verdict.Reports, reports...)
 	}
-	// Name-match: include every other report for this name. Dedups
-	// against the exact-version hits above by report identity so a
-	// single entry doesn't appear twice in the refusal output.
+	// Name-match: include every other report for this name. Dedup by
+	// comparing stored Version against ref.Version — the exact-version
+	// hits above shared that field by construction, so skipping them
+	// here keeps a single entry from appearing twice in the refusal.
 	if reports, ok := s.byName[nameKey{ref.Ecosystem, lookupName}]; ok {
-		for i := range reports {
-			r := reports[i]
+		for _, r := range reports {
 			if r.Version == ref.Version {
-				// This is an exact-version hit; already counted above.
 				continue
 			}
 			verdict.Reports = append(verdict.Reports, r)

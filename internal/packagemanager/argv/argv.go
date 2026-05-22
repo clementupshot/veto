@@ -14,26 +14,11 @@ func IsFlag(tok string) bool { return strings.HasPrefix(tok, "-") }
 // the generic helpers below can be reused across ecosystems.
 type FlagsWithValues map[string]struct{}
 
-// FirstNonFlag returns the first token in args that does not start with '-',
-// the tail after it, and whether one was found.
-//
-// This is the conservative variant: it does not consult any flag table, so
-// the value of a flag-with-value (e.g. "/tmp" in "--prefix /tmp install")
-// will be misread as the verb. Callers that know the PM's flag set should
-// prefer FirstNonFlagWithTable.
-func FirstNonFlag(args []string) (string, []string, bool) {
-	for i, a := range args {
-		if IsFlag(a) {
-			continue
-		}
-		return a, args[i+1:], true
-	}
-	return "", nil, false
-}
-
-// FirstNonFlagWithTable behaves like FirstNonFlag but also skips the value
-// of every flag named in flagsTakingValues. Use this when callers know the
-// PM's flag set; FirstNonFlag remains the conservative default.
+// FirstNonFlagWithTable returns the first token in args that is not a flag
+// (or the value of a flag named in flagsTakingValues), the tail after it,
+// and whether one was found. Pass a nil table when the caller doesn't know
+// the PM's flag set — the result then matches the naive "first non-dash
+// token" reading.
 //
 // A token of the form "--flag=value" is a single argv entry and does NOT
 // consume the next token, regardless of whether "--flag" is in the table.
@@ -68,26 +53,6 @@ func FirstNonFlagWithTable(args []string, flagsTakingValues FlagsWithValues) (st
 		i++
 	}
 	return "", nil, false
-}
-
-// CollectPositionals returns every non-flag token in args, honoring the POSIX
-// `--` separator: tokens after `--` are positional even when they begin with
-// '-'. Without this, package names like `-chalk` (a real typosquat shape)
-// would be silently filtered out.
-func CollectPositionals(args []string) []string {
-	out := make([]string, 0, len(args))
-	positional := false
-	for _, tok := range args {
-		if !positional && tok == "--" {
-			positional = true
-			continue
-		}
-		if !positional && IsFlag(tok) {
-			continue
-		}
-		out = append(out, tok)
-	}
-	return out
 }
 
 // CollectFlagValues returns the value attached to every occurrence of any

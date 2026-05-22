@@ -161,13 +161,10 @@ func TestCollectPositionalsWithTable(t *testing.T) {
 	}
 }
 
-func TestFirstNonFlag_NilTableEquivalent(t *testing.T) {
-	// FirstNonFlagWithTable with nil table should behave identically to
-	// FirstNonFlag for inputs that don't include any flag-value pairs.
+func TestFirstNonFlagWithTable_NilTable(t *testing.T) {
 	args := []string{"--verbose", "install", "foo"}
-	verb1, rest1, ok1 := argv.FirstNonFlag(args)
-	verb2, rest2, ok2 := argv.FirstNonFlagWithTable(args, nil)
-	require.Equal(t, ok1, ok2)
-	require.Equal(t, verb1, verb2)
-	require.Equal(t, rest1, rest2)
+	verb, rest, ok := argv.FirstNonFlagWithTable(args, nil)
+	require.True(t, ok)
+	require.Equal(t, "install", verb)
+	require.Equal(t, []string{"foo"}, rest)
 }

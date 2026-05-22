@@ -8,8 +8,6 @@ import (
 	"github.com/brynbellomy/veto/internal/packagemanager/pyspec"
 )
 
-const binaryName = "pip"
-
 var installVerbs = map[string]struct{}{
 	"install":  {},
 	"download": {},
@@ -61,9 +59,6 @@ var _ packagemanager.PackageManager = (*Manager)(nil)
 // New builds a pip Manager. binName lets callers register both "pip" and
 // "pip3" with the same parser.
 func New(binName string) *Manager {
-	if binName == "" {
-		binName = binaryName
-	}
 	return &Manager{name: binName}
 }
 

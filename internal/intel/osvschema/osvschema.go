@@ -68,9 +68,9 @@ type Event struct {
 	LastAffected string `json:"last_affected,omitempty"`
 }
 
-// Parse decodes one OSV JSON document. Returns ErrNotMalware if the advisory
-// does not look malware-flavored (no MAL- ID and no malicious classification),
-// so callers can filter cheaply.
+// Parse decodes one OSV JSON document. Callers filter to malware findings
+// via IsMalware (cheaper than tagging the verdict here, since most callers
+// already need the full Advisory for reporting).
 func Parse(payload []byte) (Advisory, error) {
 	var adv Advisory
 	if err := json.Unmarshal(payload, &adv); err != nil {
@@ -78,10 +78,6 @@ func Parse(payload []byte) (Advisory, error) {
 	}
 	return adv, nil
 }
-
-// ErrNotMalware indicates an advisory does not represent a malware finding
-// (e.g. it's a regular CVE). Callers use this to skip non-malware entries.
-var ErrNotMalware = errors.New("advisory is not a malware finding")
 
 // IsMalware reports whether an advisory looks like a malware report.
 // True for any advisory whose ID starts with "MAL-" (OSV's malware namespace).

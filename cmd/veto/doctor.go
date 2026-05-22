@@ -30,8 +30,6 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-
-	"github.com/brynbellomy/veto/internal/intel"
 )
 
 // status is the per-check outcome. PASS = green; WARN = yellow; FAIL =
@@ -621,11 +619,6 @@ func newestCacheMtime(dir string) (time.Time, bool) {
 	})
 	return newest, found
 }
-
-// intel.Source — referenced only to keep the import alive across
-// possible future doctor tests that build a Source directly. Safe to
-// remove if it ever surfaces as unused.
-var _ intel.Source = nil
 
 // printVersionManagerFooters emits one recipe block per detected version
 // manager whose shims are shadowing veto. Centralizing this here

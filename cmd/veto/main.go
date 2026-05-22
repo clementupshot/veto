@@ -78,9 +78,89 @@ func main() {
 	// This is the integration path for Codex and any other agent/CI that
 	// doesn't expose a per-tool hook protocol.
 	if self := filepath.Base(os.Args[0]); isShimName(self) {
-		args = append([]string{self}, args...)
+		// Special-case python/python3: the only invocation form we gate
+		// is `python -m {pip,uv,pipx,poetry,pdm,pip3}`. Every other
+		// invocation (running scripts, REPLs, `-c "..."`, `-m
+		// http.server`, `-V`, ...) must dispatch fast and transparently
+		// to the real python. See pythonDashMTarget() for the
+		// classification details, and the python-m branch below for the
+		// rewrite that lets the existing gate logic handle the PM lookup
+		// while still exec'ing python (not the PM directly) on the allow
+		// path.
+		if self == "python" || self == "python3" {
+			if pm, ok := pythonDashMTarget(args); ok {
+				// `python -m pip install foo` → route through veto as if
+				// the user had typed `pip install foo`. We thread the
+				// original (python, -mform, ...) invocation through env
+				// so runGate's allow-path exec rebuilds it instead of
+				// exec'ing the PM directly — `python -m pip` resolves
+				// pip relative to this python interpreter (venv scope),
+				// and exec'ing pip from PATH would break that contract.
+				os.Setenv(pythonDashMEnvOriginal, self)
+				rest := args[2:] // drop "-m" and the PM name
+				args = append([]string{pm}, rest...)
+			} else {
+				// Not a gated invocation — defer to real python without
+				// touching args. We resolve via the same PATH walk used
+				// for PMs (skipping veto-pointing entries) so a python
+				// shim chain doesn't loop.
+				cfg, err := loadConfig()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "veto: load config: %v\n", err)
+					os.Exit(exitInternal)
+				}
+				os.Exit(execReal(cfg, self, args))
+			}
+		} else {
+			args = append([]string{self}, args...)
+		}
 	}
 	os.Exit(run(args))
+}
+
+// pythonDashMEnvOriginal carries the original python basename
+// ("python" or "python3") from main() through runGate into the
+// post-decision exec so the allow path re-invokes `<python> -m <pm>
+// …` instead of `<pm> …` directly. `python -m pip` resolves pip
+// against the running interpreter (matters for venvs and shebangless
+// Dockerfile installs) — exec'ing pip from PATH would silently break
+// that resolution. Env is the simplest threading channel that survives
+// the runGate signature without ballooning it.
+const pythonDashMEnvOriginal = "VETO_PYTHON_M_ORIGINAL"
+
+// pythonDashMTargets is the set of `-m` module names that, when invoked
+// via `python -m <module>`, count as package-manager calls we want to
+// gate. Deliberately small: `-m venv`, `-m http.server`, `-m unittest`,
+// and the many other legitimate uses of `-m` must pass through
+// untouched.
+var pythonDashMTargets = map[string]string{
+	"pip":    "pip",
+	"pip3":   "pip3",
+	"uv":     "uv",
+	"pipx":   "pipx",
+	"poetry": "poetry",
+	"pdm":    "pdm",
+}
+
+// pythonDashMTarget reports whether args describes a `python -m <pm>
+// …` invocation we should gate, returning the resolved PM name. The
+// caller is expected to have already verified the invoking basename is
+// "python" or "python3". `args` here is the python interpreter's own
+// argv tail (everything after argv[0]).
+//
+// We accept the form `-m <pm> …` only when `-m` is the first token —
+// flags like `-I -m pip install foo` are real but vanishingly rare in
+// the install-form footprint, and adding tolerance for arbitrary
+// pre-`-m` flags would also let a malicious crafter slip a non-`-m`
+// invocation past the gate. Keeping the check strict and false-negative
+// here is fine: any python invocation we don't gate at this layer is
+// still caught by the interposer (Layer 3) when present.
+func pythonDashMTarget(args []string) (string, bool) {
+	if len(args) < 2 || args[0] != "-m" {
+		return "", false
+	}
+	pm, ok := pythonDashMTargets[args[1]]
+	return pm, ok
 }
 
 func run(args []string) int {
@@ -137,11 +217,19 @@ func run(args []string) int {
 // isShimName reports whether basename matches one of the package-manager
 // binaries veto shadows via PATH shims. Kept in main.go so shim dispatch
 // stays fast and dependency-free (no config or store touched on the hot path).
+//
+// "python" and "python3" are included because `python -m pip install …`
+// is the canonical install form inside virtualenvs, Dockerfiles, and most
+// CI scripts — without a python shim, that invocation would skip veto
+// entirely. Main()'s dispatch hot-paths every non-`-m {pm}` python call
+// straight to the real interpreter so REPLs, `-V`, `-c`, scripts, and
+// `-m http.server` etc. stay fast and transparent.
 func isShimName(basename string) bool {
 	switch basename {
 	case "npm", "pnpm", "yarn", "bun",
 		"npx", "pnpx", "bunx",
-		"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm":
+		"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm",
+		"python", "python3":
 		return true
 	}
 	return false
@@ -155,14 +243,14 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 	pm, ok := pms[pmName]
 	if !ok {
 		logger.Warn().Str("pm", pmName).Msg("unknown package manager; passing through")
-		return execReal(cfg, pmName, pmArgs)
+		return execPMOrPythonM(cfg, pmName, pmArgs)
 	}
 
 	installs := pm.ParseInstalls(pmArgs)
 	manifestRefs := pm.ManifestRefs(pmArgs)
 	if installs == nil && len(manifestRefs) == 0 {
 		// Not an install verb — pass through immediately, no intel needed.
-		return execReal(cfg, pmName, pmArgs)
+		return execPMOrPythonM(cfg, pmName, pmArgs)
 	}
 
 	store, err := buildStore(logger, cfg)
@@ -211,7 +299,7 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 
 	switch decision.Outcome {
 	case gate.OutcomePassThrough, gate.OutcomeAllow:
-		return execReal(cfg, pmName, pmArgs)
+		return execPMOrPythonM(cfg, pmName, pmArgs)
 	case gate.OutcomeRefuse:
 		printRefusal(os.Stderr, decision)
 		return exitRefused
@@ -289,6 +377,25 @@ func displayVersion(v string) string {
 		return "<any>"
 	}
 	return v
+}
+
+// execPMOrPythonM is the post-gate exec for both the regular PM path
+// and the `python -m <pm>` shim path. When the python-m env marker is
+// set (planted by main()), we reconstruct the original interpreter
+// invocation — `<python> -m <pm> <args…>` — rather than exec'ing the
+// PM directly. That preserves venv-scoped PM resolution, which is the
+// whole reason a user picked the `python -m` form in the first place.
+//
+// The env var is consumed (Unsetenv) so a downstream interposer-driven
+// re-entry into veto doesn't inherit it and double-rewrite.
+func execPMOrPythonM(cfg config, pmName string, pmArgs []string) int {
+	if pyBin := os.Getenv(pythonDashMEnvOriginal); pyBin != "" {
+		os.Unsetenv(pythonDashMEnvOriginal)
+		// Rebuild as `<python> -m <pm> <args…>`.
+		newArgs := append([]string{"-m", pmName}, pmArgs...)
+		return execReal(cfg, pyBin, newArgs)
+	}
+	return execReal(cfg, pmName, pmArgs)
 }
 
 // execReal replaces the current process with the real package-manager binary.

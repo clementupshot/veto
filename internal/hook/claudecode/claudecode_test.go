@@ -75,6 +75,32 @@ func TestAnalyze(t *testing.T) {
 		{"not an install verb", "npm test", ""},
 		{"git is not a PM", "git clone https://example.com/foo", ""},
 		{"unparseable quotes", `npm install "unterminated`, ""},
+
+		// `python -m <pm> …` is the canonical install form inside
+		// virtualenvs, Dockerfiles, and most CI scripts. It MUST gate.
+		// Other `python -m` modules (venv, http.server, unittest, …)
+		// and bare python invocations MUST pass through.
+		{"python -m pip install", "python -m pip install foo", "pip"},
+		{"python3 -m pip install", "python3 -m pip install foo", "pip"},
+		{"python -m pip3 install", "python -m pip3 install foo", "pip3"},
+		{"python -m uv add", "python -m uv add pandas", "uv"},
+		{"python -m pipx install", "python -m pipx install black", "pipx"},
+		{"python -m poetry install", "python -m poetry install", "poetry"},
+		{"python -m pdm add", "python -m pdm add foo", "pdm"},
+		{"python -m pip via absolute path", "/usr/bin/python3 -m pip install foo", "pip"},
+		{"python -m pip with verb-less argv", "python -m pip", ""},
+		{"python -m pip with non-dangerous verb", "python -m pip list", ""},
+		{"python -m http.server is benign", "python -m http.server 8000", ""},
+		{"python -m venv is benign", "python -m venv .venv", ""},
+		{"python -m unittest is benign", "python -m unittest discover", ""},
+		{"plain python script is benign", "python script.py", ""},
+		{"python -c snippet is benign", `python -c "print('hi')"`, ""},
+		{"python -V is benign", "python -V", ""},
+		{"python REPL is benign", "python", ""},
+		{"python -m pip inside bash -c", `bash -c "python -m pip install foo"`, "pip"},
+		{"python -m pip with wrapper", "timeout 30 python -m pip install foo", "pip"},
+		{"python -m pip with env assignment", "FOO=bar python -m pip install foo", "pip"},
+		{"python -m pip chained", "cd /tmp && python -m pip install foo", "pip"},
 	}
 
 	for _, tc := range cases {
@@ -122,4 +148,17 @@ func TestTokensSurfacedForRefusalMessage(t *testing.T) {
 	finding, ok := Analyze("timeout 30 npm install --save-dev lodash")
 	require.True(t, ok)
 	require.Equal(t, []string{"npm", "install", "--save-dev", "lodash"}, finding.Tokens)
+}
+
+// TestPythonDashMTokensPreserveOriginalInvocation confirms the
+// corrected command the agent gets back is `veto python -m pip install
+// foo`, not `veto pip install foo`. The interpreter prefix is
+// load-bearing: `python -m pip` resolves pip against the running
+// interpreter (venv scope), so dropping it would silently break the
+// install.
+func TestPythonDashMTokensPreserveOriginalInvocation(t *testing.T) {
+	finding, ok := Analyze("python -m pip install foo")
+	require.True(t, ok)
+	require.Equal(t, "pip", finding.PM)
+	require.Equal(t, []string{"python", "-m", "pip", "install", "foo"}, finding.Tokens)
 }

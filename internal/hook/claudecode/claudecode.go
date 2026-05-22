@@ -38,6 +38,23 @@ var shimmedPMs = map[string]struct{}{
 	"pip": {}, "pip3": {}, "uv": {}, "uvx": {}, "poetry": {}, "pipx": {}, "pdm": {},
 }
 
+// pythonDashMTargets is the set of `-m <module>` names that, when
+// invoked via `python -m <module> …`, are gated as package-manager
+// calls. Bare python invocations (scripts, REPLs, `-c`, `-V`,
+// `-m http.server`, `-m venv`, `-m unittest`, …) are not risky and
+// pass through unchanged.
+//
+// Kept in sync with cmd/veto/main.go::pythonDashMTargets.
+var pythonDashMTargets = map[string]struct{}{
+	"pip": {}, "pip3": {}, "uv": {}, "pipx": {}, "poetry": {}, "pdm": {},
+}
+
+// pythonInterpreters is the set of basenames that map to the CPython
+// interpreter for `-m` dispatch purposes.
+var pythonInterpreters = map[string]struct{}{
+	"python": {}, "python3": {},
+}
+
 // dangerousVerbs maps each PM to the verbs that resolve and fetch remote
 // packages. A non-listed verb (e.g. `npm run`) is not an install and the
 // hook lets it through.
@@ -446,6 +463,10 @@ func stripWrappers(tokens []string) []string {
 // otherwise ("", false). The decision rules match the Python original:
 //
 //   - already prefixed with `veto` → not risky (already guarded)
+//   - `python -m <pm> …` where <pm> is one of pythonDashMTargets →
+//     unwrap to `<pm> …` and recurse (the canonical install form
+//     inside virtualenvs and Dockerfiles). Other python invocations
+//     pass through.
 //   - exec-style PM (npx/bunx/...) with any non-help argv → risky
 //   - regular PM whose first non-flag argv is a dangerous verb → risky
 func isRisky(tokens []string) (string, bool) {
@@ -454,6 +475,18 @@ func isRisky(tokens []string) (string, bool) {
 	}
 	b := base(tokens[0])
 	if b == "veto" {
+		return "", false
+	}
+	// `python -m <pm> …` — gate when <pm> is a known PM module. We
+	// unwrap by re-running isRisky on `<pm> …` so the existing per-PM
+	// logic (dangerous-verb lookup, exec-PM rule) decides risk. Other
+	// `-m` modules and non-`-m` python invocations are not risky.
+	if _, isPy := pythonInterpreters[b]; isPy {
+		if len(tokens) >= 3 && tokens[1] == "-m" {
+			if _, ok := pythonDashMTargets[tokens[2]]; ok {
+				return isRisky(tokens[2:])
+			}
+		}
 		return "", false
 	}
 	if _, ok := shimmedPMs[b]; !ok {

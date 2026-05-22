@@ -112,6 +112,125 @@ func TestInterposerEndToEnd_PassesThroughNonPM(t *testing.T) {
 	require.NoError(t, err, "target program did not run — interposer rewrote a non-PM call (false positive)")
 }
 
+// TestInterposerEndToEnd_RewritesPythonDashMPipInstall confirms the
+// canonical install form `python -m pip install …` — which would
+// otherwise skip every veto layer except this one — gets rewritten
+// to a veto-gated invocation. The expected rewritten argv drops
+// `python` and `-m` from the front, replacing them with [veto, pip],
+// so the existing per-PM gate logic in main.go handles the rest.
+// VETO_PYTHON_M_ORIGINAL gets set on the child so the allow-path
+// exec rebuilds the `python -m pip` invocation rather than exec'ing
+// pip directly.
+func TestInterposerEndToEnd_RewritesPythonDashMPipInstall(t *testing.T) {
+	libPath := interposerLibPath(t)
+	if libPath == "" {
+		t.Skip("interposer artifact not built; run `make interposer` to enable this test")
+	}
+
+	dir := t.TempDir()
+	argLog := filepath.Join(dir, "argv.log")
+	envLog := filepath.Join(dir, "env.log")
+
+	// Fake veto: log argv (one arg per line) AND the threading env var
+	// so we can assert both the rewrite shape and the env-channel hint.
+	fakeVeto := filepath.Join(dir, "veto")
+	vetoScript := "#!/bin/sh\n" +
+		"for a in \"$@\"; do printf '%s\\n' \"$a\"; done > " + argLog + "\n" +
+		"printf '%s\\n' \"${VETO_PYTHON_M_ORIGINAL:-<unset>}\" > " + envLog + "\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(fakeVeto, []byte(vetoScript), 0o755))
+
+	// Fake python: must NEVER run on this path; sentinel exit code so
+	// a false-negative (interposer fails to intercept) produces a
+	// clearly distinct failure.
+	fakePython := filepath.Join(dir, "python3")
+	require.NoError(t, os.WriteFile(fakePython, []byte("#!/bin/sh\nexit 77\n"), 0o755))
+
+	spawnerSrc := filepath.Join("testdata", "interpose_spawner", "main.go")
+	spawnerBin := filepath.Join(dir, "spawner")
+	build := exec.Command("go", "build", "-o", spawnerBin, spawnerSrc)
+	build.Stderr = os.Stderr
+	require.NoError(t, build.Run(), "build interpose_spawner helper")
+
+	cmd := exec.Command(spawnerBin, fakePython, "-m", "pip", "install", "foo")
+	cmd.Env = withPreloadEnv(libPath, fakeVeto)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "spawner exit error; stderr=%s", stderr.String())
+
+	data, err := os.ReadFile(argLog)
+	require.NoError(t, err, "fakeVeto did not write argv.log — interposer may not have rewritten")
+	lines := splitLines(string(data))
+	// Interposer rewrites to [veto, pip, install, foo] — python AND -m
+	// drop out; the gate sees `pip install foo`.
+	require.Equal(t, []string{"pip", "install", "foo"}, lines)
+
+	envData, err := os.ReadFile(envLog)
+	require.NoError(t, err)
+	require.Equal(t, "python3", strings.TrimSpace(string(envData)),
+		"VETO_PYTHON_M_ORIGINAL must be propagated so the allow-path exec rebuilds the python -m form")
+}
+
+// TestInterposerEndToEnd_PassesThroughPythonScript covers the
+// fast-path: a plain `python script.py` invocation MUST exec the real
+// interpreter, not get rewritten. Without this guarantee veto would
+// inject itself into every script run — an unacceptable hot path.
+func TestInterposerEndToEnd_PassesThroughPythonScript(t *testing.T) {
+	libPath := interposerLibPath(t)
+	if libPath == "" {
+		t.Skip("interposer artifact not built; run `make interposer`")
+	}
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	fakePython := filepath.Join(dir, "python")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
+	require.NoError(t, os.WriteFile(fakePython, []byte(script), 0o755))
+
+	fakeVeto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(fakeVeto, []byte("#!/bin/sh\nexit 99\n"), 0o755))
+
+	spawnerSrc := filepath.Join("testdata", "interpose_spawner", "main.go")
+	spawnerBin := filepath.Join(dir, "spawner")
+	require.NoError(t, exec.Command("go", "build", "-o", spawnerBin, spawnerSrc).Run())
+
+	cmd := exec.Command(spawnerBin, fakePython, "script.py")
+	cmd.Env = withPreloadEnv(libPath, fakeVeto)
+	require.NoError(t, cmd.Run())
+	_, err := os.Stat(marker)
+	require.NoError(t, err, "fake python did not run — `python script.py` was incorrectly rewritten")
+}
+
+// TestInterposerEndToEnd_PassesThroughPythonMHttpServer covers the
+// other fast-path: `python -m http.server` (or any non-PM `-m` target)
+// MUST pass through. The interposer must distinguish gated `-m`
+// modules (pip/uv/pipx/poetry/pdm) from benign ones.
+func TestInterposerEndToEnd_PassesThroughPythonMHttpServer(t *testing.T) {
+	libPath := interposerLibPath(t)
+	if libPath == "" {
+		t.Skip("interposer artifact not built; run `make interposer`")
+	}
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	fakePython := filepath.Join(dir, "python3")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
+	require.NoError(t, os.WriteFile(fakePython, []byte(script), 0o755))
+
+	fakeVeto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(fakeVeto, []byte("#!/bin/sh\nexit 99\n"), 0o755))
+
+	spawnerSrc := filepath.Join("testdata", "interpose_spawner", "main.go")
+	spawnerBin := filepath.Join(dir, "spawner")
+	require.NoError(t, exec.Command("go", "build", "-o", spawnerBin, spawnerSrc).Run())
+
+	cmd := exec.Command(spawnerBin, fakePython, "-m", "http.server", "8000")
+	cmd.Env = withPreloadEnv(libPath, fakeVeto)
+	require.NoError(t, cmd.Run())
+	_, err := os.Stat(marker)
+	require.NoError(t, err, "fake python did not run — `python -m http.server` was incorrectly rewritten")
+}
+
 func TestInterposerEndToEnd_AllowsNpmRunDev(t *testing.T) {
 	// `npm run dev` is a PM invocation with a NON-dangerous verb; the
 	// interposer must let it through unchanged.

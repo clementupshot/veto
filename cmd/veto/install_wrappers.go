@@ -79,9 +79,16 @@ type wrapperEntry struct {
 	Source string `json:"source"`
 }
 
-// wrappedManagers is the set of PM names we wrap. Same list as
-// shimmedManagers (defined in shims.go); duplicated here as a guard
-// against the two ever drifting silently.
+// wrappedManagers is the set of PM names we wrap. A near-mirror of
+// shimmedManagers (defined in shims.go) — the deliberate divergence is
+// `python` and `python3`: they're shimmed (Layer 2) so the canonical
+// `python -m pip install …` form is caught, but NOT wrapped (Layer 4)
+// because Layer 4 replaces the real interpreter on disk, which would
+// route EVERY python invocation (every script run, every REPL) through
+// veto. That's an unacceptable hot path for a tool whose value sits on
+// install-style verbs only. main()'s dispatch fast-paths non-`-m {pm}`
+// python calls to the real interpreter, so Layer 2 alone gets full
+// install coverage without the per-script overhead.
 var wrappedManagers = []string{
 	"npm", "pnpm", "yarn", "bun",
 	"npx", "pnpx", "bunx",

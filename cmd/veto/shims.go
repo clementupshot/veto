@@ -34,10 +34,18 @@ import (
 // shimmedManagers lists every binary name we install a shim for. Matches the
 // set in isShimName (main.go) — duplicated here as a slice because order
 // matters for stable install output.
+//
+// python/python3 are included to close the `python -m pip install …`
+// hole. Layer 4 wrappers deliberately DO NOT cover python (see
+// wrappedManagers in install_wrappers.go): wrapping the real interpreter
+// would route every script execution through veto, an unacceptable hot
+// path. Layer 2 shims are fine because main()'s dispatch fast-paths every
+// non-`-m {pm}` python invocation straight to the real interpreter.
 var shimmedManagers = []string{
 	"npm", "pnpm", "yarn", "bun",
 	"npx", "pnpx", "bunx",
 	"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm",
+	"python", "python3",
 }
 
 // runInstallShims implements `veto install-shims [--dir DIR] [--force]`.

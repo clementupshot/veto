@@ -79,7 +79,15 @@ func Parse(spec string) packagemanager.Install {
 
 // isLocalPathSpec reports whether spec is a filesystem path the gate
 // can't look up but that doesn't fetch remote code on its own.
+//
+// The bare strings "." and "..", as used by `pip install .` and
+// `pip install ..`, are filesystem paths in their own right (pwd /
+// parent dir) and would otherwise fall through to PyPI lookup as
+// literal "name == .", which always misses and silently allows.
 func isLocalPathSpec(spec string) bool {
+	if spec == "." || spec == ".." {
+		return true
+	}
 	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/") {
 		return true
 	}

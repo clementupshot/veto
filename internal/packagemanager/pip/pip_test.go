@@ -60,6 +60,50 @@ func TestParseInstalls(t *testing.T) {
 			args: []string{"install", "-r", "requirements.txt"},
 			want: []packagemanager.Install{},
 		},
+		{
+			name: "-e captures editable local-path spec as a positional",
+			args: []string{"install", "-e", "./local-pkg"},
+			want: []packagemanager.Install{
+				{
+					Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "./local-pkg"},
+					RawSpec:   "./local-pkg",
+					LocalPath: true,
+				},
+			},
+		},
+		{
+			name: "--editable captures editable local-path spec as a positional",
+			args: []string{"install", "--editable", "./local-pkg"},
+			want: []packagemanager.Install{
+				{
+					Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "./local-pkg"},
+					RawSpec:   "./local-pkg",
+					LocalPath: true,
+				},
+			},
+		},
+		{
+			name: "bare dot (pip install .) captured as LocalPath spec",
+			args: []string{"install", "."},
+			want: []packagemanager.Install{
+				{
+					Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "."},
+					RawSpec:   ".",
+					LocalPath: true,
+				},
+			},
+		},
+		{
+			name: "bare dot-dot (pip install ..) captured as LocalPath spec",
+			args: []string{"install", ".."},
+			want: []packagemanager.Install{
+				{
+					Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: ".."},
+					RawSpec:   "..",
+					LocalPath: true,
+				},
+			},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

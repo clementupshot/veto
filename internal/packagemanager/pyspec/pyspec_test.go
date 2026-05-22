@@ -122,6 +122,24 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name: "bare dot (pip install .) marked LocalPath",
+			spec: ".",
+			want: packagemanager.Install{
+				Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "."},
+				RawSpec:   ".",
+				LocalPath: true,
+			},
+		},
+		{
+			name: "bare dot-dot (pip install ..) marked LocalPath",
+			spec: "..",
+			want: packagemanager.Install{
+				Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: ".."},
+				RawSpec:   "..",
+				LocalPath: true,
+			},
+		},
+		{
 			name: "git URL marked OpaqueRemote",
 			spec: "git+https://github.com/foo/bar.git",
 			want: packagemanager.Install{

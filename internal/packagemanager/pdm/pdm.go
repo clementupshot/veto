@@ -17,26 +17,31 @@ var installVerbs = map[string]struct{}{
 // flagsWithValues lists PDM flags whose next argv token is the value.
 // Covers global routing (--project, --config) and `pdm add` value-taking
 // options (--group, --venv, --python).
+//
+// NOTE: `--editable` / `-e` are pdm booleans (they toggle editable mode
+// for the following positional spec; they do NOT consume the next token
+// as a value). They must not appear here — listing them caused
+// `pdm add --editable ./local-pkg` to silently swallow ./local-pkg as
+// a flag value, bypassing the gate. See pdm docs:
+// https://pdm-project.org/en/latest/reference/cli/#add
 var flagsWithValues = argv.FlagsWithValues{
-	"--project":         {},
-	"-p":                {},
-	"--config":          {},
-	"-c":                {},
-	"--python":          {},
-	"--venv":            {},
-	"--group":           {},
-	"-G":                {},
-	"--dev-group":       {},
-	"--editable":        {},
-	"-e":                {},
-	"--extras":          {},
-	"--platform":        {},
-	"--lockfile":        {},
-	"-L":                {},
-	"--strategy":        {},
-	"-S":                {},
-	"--update":          {},
-	"--save":            {},
+	"--project":   {},
+	"-p":          {},
+	"--config":    {},
+	"-c":          {},
+	"--python":    {},
+	"--venv":      {},
+	"--group":     {},
+	"-G":          {},
+	"--dev-group": {},
+	"--extras":    {},
+	"--platform":  {},
+	"--lockfile":  {},
+	"-L":          {},
+	"--strategy":  {},
+	"-S":          {},
+	"--update":    {},
+	"--save":      {},
 }
 
 // Manager parses pdm install commands.

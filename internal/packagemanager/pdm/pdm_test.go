@@ -48,6 +48,39 @@ func TestParseInstalls(t *testing.T) {
 				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "pytest"}, RawSpec: "pytest"},
 			},
 		},
+		{
+			name: "--editable is boolean: does not consume following local-path spec",
+			args: []string{"add", "--editable", "./local-pkg"},
+			want: []packagemanager.Install{
+				{
+					Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "./local-pkg"},
+					RawSpec:   "./local-pkg",
+					LocalPath: true,
+				},
+			},
+		},
+		{
+			name: "-e is boolean: does not consume following local-path spec",
+			args: []string{"add", "-e", "./local-pkg"},
+			want: []packagemanager.Install{
+				{
+					Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "./local-pkg"},
+					RawSpec:   "./local-pkg",
+					LocalPath: true,
+				},
+			},
+		},
+		{
+			name: "--editable with bare dot spec",
+			args: []string{"add", "--editable", "."},
+			want: []packagemanager.Install{
+				{
+					Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "."},
+					RawSpec:   ".",
+					LocalPath: true,
+				},
+			},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

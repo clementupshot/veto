@@ -96,7 +96,7 @@ func TestFetchEtagShortCircuit(t *testing.T) {
 }
 
 // TestFetchRejectsOversizedPayload: a MITM'd or compromised upstream
-// cannot OOM the daemon by serving a multi-GB body. The fetcher caps
+// cannot OOM veto by serving a multi-GB body. The fetcher caps
 // payloads with io.LimitReader; reads past the cap are an error.
 //
 // Defends against C2 from the audit. The handler streams JSON-shaped

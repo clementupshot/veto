@@ -252,7 +252,7 @@ these):
 - **Oversized intel payload**: any single feed body exceeding its
   per-source size cap (256 MiB for aikido/osv, 512 MiB for
   openssf/pypa) is rejected for that refresh — a compromised upstream
-  cannot OOM the daemon by streaming a multi-GB body.
+  cannot OOM veto by streaming a multi-GB body.
 - **Manifest file present but unreadable / malformed** (`package.json`,
   `pyproject.toml`, `requirements.txt`, lockfiles): exit 70, "INTERNAL
   ERROR — install aborted fail-closed"

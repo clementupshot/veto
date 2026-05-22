@@ -192,7 +192,7 @@ func (s *Source) fetchWithCacheBounded(ctx context.Context, payloadPath, etagPat
 	}
 
 	// Cap the body at maxFeedBytes so a compromised or MITM'd upstream
-	// can't OOM the daemon by serving a multi-GB tarball. The +1 sentinel
+	// can't OOM veto by serving a multi-GB tarball. The +1 sentinel
 	// lets us tell "exactly at limit" from "tried to exceed limit."
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
 	if err != nil {

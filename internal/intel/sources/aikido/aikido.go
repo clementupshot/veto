@@ -33,7 +33,7 @@ const (
 	// single fetch. Sized generously above the current observed feed
 	// size (~20 MB for npm, ~5 MB for pypi as of 2026-05) so legitimate
 	// growth doesn't trip it, but bounded so a MITM'd or compromised
-	// upstream cannot OOM the long-lived daemon by serving a multi-GB
+	// upstream cannot OOM the veto process by serving a multi-GB
 	// body. Pair with io.LimitReader(maxFeedBytes+1) and detect the
 	// truncation by checking len(body) > maxFeedBytes.
 	maxFeedBytes = 256 << 20 // 256 MiB
@@ -200,7 +200,7 @@ func (s *Source) fetchWithCacheBounded(ctx context.Context, url, payloadPath, et
 	}
 
 	// Bound the payload size so a compromised or MITM'd upstream cannot
-	// OOM the daemon by serving a gigantic body. The +1 lets us detect
+	// OOM veto by serving a gigantic body. The +1 lets us detect
 	// truncation: if we read more than maxFeedBytes we know upstream was
 	// over the limit and the read was cut short.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))

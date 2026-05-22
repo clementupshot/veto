@@ -41,7 +41,7 @@ const (
 	// OSV's all.zip payloads currently sit around 30–60 MB across the
 	// covered ecosystems; the 256 MiB ceiling leaves plenty of room for
 	// growth while keeping a MITM'd or compromised upstream from OOMing
-	// the daemon by streaming a multi-GB body.
+	// veto by streaming a multi-GB body.
 	maxFeedBytes = 256 << 20
 
 	// maxAdvisoryBytes bounds each per-advisory JSON we read out of the

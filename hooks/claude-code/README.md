@@ -26,19 +26,6 @@ To uninstall:
 veto uninstall-claude-hook
 ```
 
-## Why the hook lives in the veto binary
-
-The previous design used a Python script via shebang
-(`veto-hook.py`). That script had a documented fail-OPEN: if
-`python3` was missing at hook-invocation time, Claude Code would let
-the unguarded tool call through. Compiling the hook into the same
-binary the agent's corrected command must already invoke removes that
-failure mode entirely — if `veto` is on PATH, the hook is too.
-
-The legacy `veto-hook.py` is kept in this directory for reference
-during the transition. `install-claude-hook` recognises old shebang
-wiring and migrates it to the Go subcommand in place.
-
 ## Coverage
 
 All sixteen package managers `veto` supports:

@@ -6,14 +6,14 @@ _anchors:
     with-expecter: true
 
 packages:
-  github.com/brynbellomy/package-bouncer/internal/intel:
+  github.com/brynbellomy/veto/internal/intel:
     config:
       <<: *defaults
       dir: "internal/intel/mocks"
     interfaces:
       Source:
       Store:
-  github.com/brynbellomy/package-bouncer/internal/packagemanager:
+  github.com/brynbellomy/veto/internal/packagemanager:
     config:
       <<: *defaults
       dir: "internal/packagemanager/mocks"

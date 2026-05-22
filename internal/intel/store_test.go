@@ -347,3 +347,56 @@ func TestStoreReportCount(t *testing.T) {
 		require.Equal(t, 3, store.ReportCount())
 	})
 }
+
+// TestStoreLookupPyPINameNormalization: an attacker republishing a flagged
+// PyPI distribution under a typo-equivalent capitalization (`Evil_Pkg` vs
+// the registry-canonical `evil-pkg`) must still be refused. The store
+// keys both the feed-side insert and the lookup-side query through PEP
+// 503 normalization, so every equivalent shape resolves to the same
+// indexed name. Closes B3 in the audit.
+func TestStoreLookupPyPINameNormalization(t *testing.T) {
+	logger := zerolog.Nop()
+	src := &fakeSource{
+		id: "alpha",
+		per: map[intel.Ecosystem][]intel.MalwareReport{
+			// Feed ships the un-normalized shape; index-build normalizes it.
+			intel.EcosystemPyPI: {
+				{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "Evil_Pkg", Version: "1.0.0"}, SourceID: "alpha"},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+
+	// Each of these is PEP 503-equivalent to "evil-pkg" and must hit.
+	for _, name := range []string{"Evil_Pkg", "evil-pkg", "EVIL.pkg", "evil_pkg", "evil.pkg", "evil___pkg"} {
+		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: name, Version: "1.0.0"})
+		require.True(t, v.Flagged(), "PEP 503 equivalence: %q must hit the same report as Evil_Pkg", name)
+	}
+
+	// Unversioned lookup also flows through normalization.
+	v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "EVIL.pkg"})
+	require.True(t, v.Flagged(), "unversioned PyPI lookup must also normalize")
+}
+
+// TestStoreLookupNPMNameNormalization: npm names are case-insensitive at
+// the registry. A feed publishing a capitalized name (or a user typing
+// one) must still match. Defensive ToLower at both boundaries.
+func TestStoreLookupNPMNameNormalization(t *testing.T) {
+	logger := zerolog.Nop()
+	src := &fakeSource{
+		id: "alpha",
+		per: map[intel.Ecosystem][]intel.MalwareReport{
+			intel.EcosystemNPM: {
+				{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "React", Version: "1.0.0"}, SourceID: "alpha"},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+
+	for _, name := range []string{"React", "react", "REACT", "ReAcT"} {
+		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: name, Version: "1.0.0"})
+		require.True(t, v.Flagged(), "npm case-insensitive: %q must hit the same report as React", name)
+	}
+}

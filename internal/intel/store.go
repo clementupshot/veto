@@ -3,6 +3,7 @@ package intel
 import (
 	"context"
 	stderrors "errors"
+	"maps"
 	"sync"
 
 	"github.com/brynbellomy/go-utils/errors"
@@ -137,10 +138,16 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Preserve the caller's view of the ref in the returned Verdict so
+	// downstream UI can display the name the user typed. Normalize a
+	// separate lookupName for indexing so an attacker can't bypass the
+	// gate by typo-equivalent capitalization (PEP 503 PyPI, lowercased
+	// npm). See internal/intel/normalize.go.
 	verdict := Verdict{Ref: ref}
+	lookupName := NormalizeName(ref.Ecosystem, ref.Name)
 
 	if ref.Version == "" {
-		if reports, ok := s.byName[nameKey{ref.Ecosystem, ref.Name}]; ok {
+		if reports, ok := s.byName[nameKey{ref.Ecosystem, lookupName}]; ok {
 			verdict.Reports = append(verdict.Reports, reports...)
 		}
 		return verdict
@@ -149,7 +156,7 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 	// Exact-version hits go first so their position in the verdict
 	// reflects "this is the version the upstream feed flagged."
 	exactVersionHits := map[*MalwareReport]struct{}{}
-	if reports, ok := s.byVersion[versionKey{ref.Ecosystem, ref.Name, ref.Version}]; ok {
+	if reports, ok := s.byVersion[versionKey{ref.Ecosystem, lookupName, ref.Version}]; ok {
 		for i := range reports {
 			verdict.Reports = append(verdict.Reports, reports[i])
 			exactVersionHits[&reports[i]] = struct{}{}
@@ -158,7 +165,7 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 	// Name-match: include every other report for this name. Dedups
 	// against the exact-version hits above by report identity so a
 	// single entry doesn't appear twice in the refusal output.
-	if reports, ok := s.byName[nameKey{ref.Ecosystem, ref.Name}]; ok {
+	if reports, ok := s.byName[nameKey{ref.Ecosystem, lookupName}]; ok {
 		for i := range reports {
 			r := reports[i]
 			if r.Version == ref.Version {
@@ -210,9 +217,7 @@ func (s *memStore) Refresh(ctx context.Context) error {
 	// decisions. Slice contents are never mutated post-publication.
 	s.mu.RLock()
 	prevBySourceEco := make(map[sourceEcoKey][]MalwareReport, len(s.bySourceEco))
-	for k, v := range s.bySourceEco {
-		prevBySourceEco[k] = v
-	}
+	maps.Copy(prevBySourceEco, s.bySourceEco)
 	s.mu.RUnlock()
 
 	resolved, retentionInfo, fetchErrs := s.applyRetention(results, prevBySourceEco)
@@ -379,10 +384,17 @@ func buildIndices(resolved map[sourceEcoKey][]MalwareReport) (
 	total := 0
 	for _, reports := range resolved {
 		for _, report := range reports {
+			// Normalize the indexed name to its ecosystem-canonical form
+			// so an attacker can't republish under a typo-equivalent
+			// capitalization (PEP 503 PyPI, lowercased npm) and slip past
+			// Lookup. The report's own Name field stays as the feed
+			// reported it so the verdict surface still shows the upstream
+			// spelling. See internal/intel/normalize.go.
+			indexName := NormalizeName(report.Ecosystem, report.Name)
 			k := dedupKey{
 				SourceID:  report.SourceID,
 				Ecosystem: report.Ecosystem,
-				Name:      report.Name,
+				Name:      indexName,
 				Version:   report.Version,
 			}
 			if _, ok := seen[k]; ok {
@@ -390,10 +402,10 @@ func buildIndices(resolved map[sourceEcoKey][]MalwareReport) (
 			}
 			seen[k] = struct{}{}
 			if report.Version != "" {
-				vk := versionKey{report.Ecosystem, report.Name, report.Version}
+				vk := versionKey{report.Ecosystem, indexName, report.Version}
 				byVersion[vk] = append(byVersion[vk], report)
 			}
-			nk := nameKey{report.Ecosystem, report.Name}
+			nk := nameKey{report.Ecosystem, indexName}
 			byName[nk] = append(byName[nk], report)
 			total++
 		}

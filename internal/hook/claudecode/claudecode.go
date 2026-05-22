@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"github.com/google/shlex"
+
+	"github.com/brynbellomy/veto/internal/packagemanager/pmlist"
 )
 
 // Finding is the analyzer's verdict on a single Bash command. Empty PM
@@ -30,12 +32,18 @@ type Finding struct {
 	Tokens []string // tokens of the leaf command, after wrapper-stripping
 }
 
-// shimmedPMs is the set of package-manager binary names the hook intercepts.
-// Kept in sync with cmd/veto/shims.go::shimmedManagers.
-var shimmedPMs = map[string]struct{}{
-	"npm": {}, "npx": {}, "yarn": {}, "pnpm": {}, "pnpx": {},
-	"rush": {}, "rushx": {}, "bun": {}, "bunx": {},
-	"pip": {}, "pip3": {}, "uv": {}, "uvx": {}, "poetry": {}, "pipx": {}, "pdm": {},
+// isInterposerPM reports whether the basename is a PM name the hook /
+// Layer-3 interposer recognises. Backed by pmlist.IsInterposerPM so
+// the hook, the C interposer (via the generated pm_names.h), the
+// Layer-2 install-shims set, and the Layer-4 install-wrappers set all
+// consume one source of truth — see internal/packagemanager/pmlist.
+//
+// The hook's set is a superset of install-shims' (it also recognises
+// rush/rushx) because the hook just classifies "is this command
+// risky?"; we don't install shims/wrappers for rush, but if a user's
+// agent invokes rush directly we still want the install verbs gated.
+func isInterposerPM(name string) bool {
+	return pmlist.IsInterposerPM(name)
 }
 
 // pythonDashMTargets is the set of `-m <module>` names that, when
@@ -489,7 +497,7 @@ func isRisky(tokens []string) (string, bool) {
 		}
 		return "", false
 	}
-	if _, ok := shimmedPMs[b]; !ok {
+	if !isInterposerPM(b) {
 		return "", false
 	}
 	if _, exec := execPMs[b]; exec {

@@ -40,6 +40,7 @@ import (
 	"github.com/brynbellomy/veto/internal/packagemanager/npm"
 	"github.com/brynbellomy/veto/internal/packagemanager/pdm"
 	"github.com/brynbellomy/veto/internal/packagemanager/pip"
+	"github.com/brynbellomy/veto/internal/packagemanager/pmlist"
 	"github.com/brynbellomy/veto/internal/packagemanager/pnpm"
 	"github.com/brynbellomy/veto/internal/packagemanager/poetry"
 	"github.com/brynbellomy/veto/internal/packagemanager/pylock"
@@ -215,24 +216,19 @@ func run(args []string) int {
 }
 
 // isShimName reports whether basename matches one of the package-manager
-// binaries veto shadows via PATH shims. Kept in main.go so shim dispatch
-// stays fast and dependency-free (no config or store touched on the hot path).
+// binaries veto shadows via PATH shims. Delegates to the canonical
+// pmlist.IsShimmed so this hot path and `veto install-shims` consume
+// one source of truth — see internal/packagemanager/pmlist for why.
 //
-// "python" and "python3" are included because `python -m pip install …`
-// is the canonical install form inside virtualenvs, Dockerfiles, and most
-// CI scripts — without a python shim, that invocation would skip veto
-// entirely. Main()'s dispatch hot-paths every non-`-m {pm}` python call
-// straight to the real interpreter so REPLs, `-V`, `-c`, scripts, and
-// `-m http.server` etc. stay fast and transparent.
+// "python" and "python3" are in the canonical list because
+// `python -m pip install …` is the canonical install form inside
+// virtualenvs, Dockerfiles, and most CI scripts — without a python
+// shim, that invocation would skip veto entirely. Main()'s dispatch
+// hot-paths every non-`-m {pm}` python call straight to the real
+// interpreter so REPLs, `-V`, `-c`, scripts, and `-m http.server` etc.
+// stay fast and transparent.
 func isShimName(basename string) bool {
-	switch basename {
-	case "npm", "pnpm", "yarn", "bun",
-		"npx", "pnpx", "bunx",
-		"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm",
-		"python", "python3":
-		return true
-	}
-	return false
+	return pmlist.IsShimmed(basename)
 }
 
 // vetoBypassEnabled reports whether the VETO_BYPASS escape hatch is

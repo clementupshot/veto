@@ -41,6 +41,8 @@ import (
 
 	"github.com/brynbellomy/go-utils/errors"
 	"github.com/rs/zerolog"
+
+	"github.com/brynbellomy/veto/internal/packagemanager/pmlist"
 )
 
 // wrapperSuffix is the rename target. `.veto-original` is verbose on
@@ -79,8 +81,8 @@ type wrapperEntry struct {
 	Source string `json:"source"`
 }
 
-// wrappedManagers is the set of PM names we wrap. A near-mirror of
-// shimmedManagers (defined in shims.go) — the deliberate divergence is
+// wrappedManagers is an alias for the canonical pmlist.Wrapped slice.
+// A near-mirror of pmlist.Shimmed — the deliberate divergence is
 // `python` and `python3`: they're shimmed (Layer 2) so the canonical
 // `python -m pip install …` form is caught, but NOT wrapped (Layer 4)
 // because Layer 4 replaces the real interpreter on disk, which would
@@ -89,11 +91,12 @@ type wrapperEntry struct {
 // install-style verbs only. main()'s dispatch fast-paths non-`-m {pm}`
 // python calls to the real interpreter, so Layer 2 alone gets full
 // install coverage without the per-script overhead.
-var wrappedManagers = []string{
-	"npm", "pnpm", "yarn", "bun",
-	"npx", "pnpx", "bunx",
-	"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm",
-}
+//
+// The divergence is encoded in pmlist (Shimmed has python/python3,
+// Wrapped does not). See internal/packagemanager/pmlist for why one
+// canonical source kills the drift hazard that used to live across
+// five hand-edited lists.
+var wrappedManagers = pmlist.Wrapped
 
 // runInstallWrappers implements `veto install-wrappers [--dry-run] [--force]`.
 //

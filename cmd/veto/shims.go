@@ -29,24 +29,25 @@ import (
 
 	"github.com/brynbellomy/go-utils/errors"
 	"github.com/rs/zerolog"
+
+	"github.com/brynbellomy/veto/internal/packagemanager/pmlist"
 )
 
-// shimmedManagers lists every binary name we install a shim for. Matches the
-// set in isShimName (main.go) — duplicated here as a slice because order
-// matters for stable install output.
+// shimmedManagers is an alias for the canonical pmlist.Shimmed slice.
+// Kept as a package-local name so the existing call sites read
+// naturally; the source of truth lives in
+// internal/packagemanager/pmlist so isShimName, install-shims,
+// install-wrappers, the claudecode hook, and the C interposer all
+// consume the same list.
 //
-// python/python3 are included to close the `python -m pip install …`
-// hole. Layer 4 wrappers deliberately DO NOT cover python (see
-// wrappedManagers in install_wrappers.go): wrapping the real interpreter
-// would route every script execution through veto, an unacceptable hot
-// path. Layer 2 shims are fine because main()'s dispatch fast-paths every
-// non-`-m {pm}` python invocation straight to the real interpreter.
-var shimmedManagers = []string{
-	"npm", "pnpm", "yarn", "bun",
-	"npx", "pnpx", "bunx",
-	"pip", "pip3", "uv", "uvx", "poetry", "pipx", "pdm",
-	"python", "python3",
-}
+// python/python3 are part of the canonical list to close the
+// `python -m pip install …` hole. Layer 4 wrappers deliberately DO NOT
+// cover python (see wrappedManagers in install_wrappers.go): wrapping
+// the real interpreter would route every script execution through
+// veto, an unacceptable hot path. Layer 2 shims are fine because
+// main()'s dispatch fast-paths every non-`-m {pm}` python invocation
+// straight to the real interpreter.
+var shimmedManagers = pmlist.Shimmed
 
 // runInstallShims implements `veto install-shims [--dir DIR] [--force]`.
 //
@@ -240,8 +241,8 @@ func parseShimFlags(args []string) (string, bool, error) {
 			force = true
 			i++
 		default:
-			if strings.HasPrefix(args[i], "--dir=") {
-				dir = strings.TrimPrefix(args[i], "--dir=")
+			if v, ok := strings.CutPrefix(args[i], "--dir="); ok {
+				dir = v
 				i++
 				continue
 			}

@@ -77,8 +77,16 @@ func New(opts Options) (*Source, error) {
 	if opts.CacheDir == "" {
 		return nil, errors.New("aikido: CacheDir is required")
 	}
-	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
+	if err := os.MkdirAll(opts.CacheDir, 0o700); err != nil {
 		return nil, errors.With(err, "aikido: create cache dir").Set("path", opts.CacheDir)
+	}
+	// Tighten perms even if the dir pre-existed with looser bits — MkdirAll
+	// doesn't touch existing dirs. Cache files are internal to veto; a
+	// world-readable ~/.cache/veto/ lets any local UID inspect the on-disk
+	// shape of an attack surface, and a world-writable one is a poisoning
+	// vector for same-host attackers across UIDs.
+	if err := os.Chmod(opts.CacheDir, 0o700); err != nil {
+		return nil, errors.With(err, "aikido: tighten cache dir perms").Set("path", opts.CacheDir)
 	}
 
 	baseURL := opts.BaseURL

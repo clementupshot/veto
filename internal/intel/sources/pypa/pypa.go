@@ -94,8 +94,11 @@ func New(opts Options) (*Source, error) {
 	if opts.CacheDir == "" {
 		return nil, errors.New("pypa: CacheDir is required")
 	}
-	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
+	if err := os.MkdirAll(opts.CacheDir, 0o700); err != nil {
 		return nil, errors.With(err, "pypa: create cache dir").Set("path", opts.CacheDir)
+	}
+	if err := os.Chmod(opts.CacheDir, 0o700); err != nil {
+		return nil, errors.With(err, "pypa: tighten cache dir perms").Set("path", opts.CacheDir)
 	}
 	url := opts.URL
 	if url == "" {

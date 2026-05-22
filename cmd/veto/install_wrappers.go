@@ -696,8 +696,11 @@ func loadWrapperState(cfg config) (wrapperState, error) {
 // saveWrapperState writes state atomically (tmp + rename) so a crash
 // can't strand a half-written JSON.
 func saveWrapperState(cfg config, state wrapperState) error {
-	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.CacheDir, 0o700); err != nil {
 		return errors.With(err, "mkdir cache dir")
+	}
+	if err := os.Chmod(cfg.CacheDir, 0o700); err != nil {
+		return errors.With(err, "tighten cache dir perms")
 	}
 	path := filepath.Join(cfg.CacheDir, stateFileName)
 	buf, err := json.MarshalIndent(state, "", "  ")

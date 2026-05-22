@@ -318,28 +318,147 @@ func TestUnwrap_BailsIfSymlinkRetargeted(t *testing.T) {
 
 // TestFindWrappedOriginal exercises the resolver used by execReal. When
 // veto is invoked through a wrapper symlink, argv[0] is the wrapper
-// path; we want to find the sibling `.veto-original`.
+// path; we want to find the sibling `.veto-original` — but ONLY if the
+// wrapper site appears in wrappers.json. Without the provenance check
+// any same-UID attacker could plant a sibling and hijack execution
+// (see TestFindWrappedOriginal_RejectsUnregisteredSibling below).
 func TestFindWrappedOriginal(t *testing.T) {
 	dir := t.TempDir()
 	pip := filepath.Join(dir, "pip")
 	original := pip + ".veto-original"
 	require.NoError(t, os.WriteFile(original, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 
-	got, ok := findWrappedOriginal(pip)
+	// Registry says: yes, this wrapper site was installed by veto.
+	registered := func(p string) bool { return p == pip }
+
+	got, ok := findWrappedOriginal(pip, registered)
 	require.True(t, ok, "should find sibling .veto-original")
 	require.Equal(t, original, got)
 
 	// Path with no separator (bare name) — must NOT match. Bare names
 	// don't reach the wrapper-resolver; they go through PATH lookup.
-	got, ok = findWrappedOriginal("pip")
+	got, ok = findWrappedOriginal("pip", registered)
 	require.False(t, ok)
 	require.Empty(t, got)
 
 	// Sibling missing — must return false.
 	noOriginal := filepath.Join(dir, "yarn")
 	require.NoError(t, os.WriteFile(noOriginal, []byte(""), 0o755))
-	_, ok = findWrappedOriginal(noOriginal)
+	registeredYarn := func(p string) bool { return p == noOriginal }
+	_, ok = findWrappedOriginal(noOriginal, registeredYarn)
 	require.False(t, ok, "no .veto-original sibling means no wrapper")
+}
+
+// TestFindWrappedOriginal_RejectsUnregisteredSibling demonstrates the
+// attack described in B1 and proves the provenance check stops it.
+//
+// Attack: a same-UID attacker plants <argv0>.veto-original at a path
+// that is NOT in wrappers.json (e.g. ~/.local/bin/npm.veto-original).
+// Before the fix, findWrappedOriginal accepted any executable file at
+// that location, so the planted binary would be exec'd in place of the
+// real npm.
+//
+// Fix: refuse the sibling unless the parent path appears in
+// wrappers.json. Here we simulate "registry says no" with a predicate
+// that returns false; findWrappedOriginal must NOT honor the planted
+// sibling.
+func TestFindWrappedOriginal_RejectsUnregisteredSibling(t *testing.T) {
+	dir := t.TempDir()
+	npm := filepath.Join(dir, "npm")
+	// Attacker-planted sibling.
+	require.NoError(t, os.WriteFile(npm+".veto-original", []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	notRegistered := func(string) bool { return false }
+	got, ok := findWrappedOriginal(npm, notRegistered)
+	require.False(t, ok, "unregistered .veto-original must NOT be honored")
+	require.Empty(t, got)
+
+	// And with a nil predicate (defensive — e.g. caller forgot to pass one):
+	got, ok = findWrappedOriginal(npm, nil)
+	require.False(t, ok, "nil registry predicate must fail closed")
+	require.Empty(t, got)
+}
+
+// TestFindRealBinary_RejectsUnregisteredSiblingInPathWalk covers the
+// PATH-walk branch of B1. When veto walks PATH and a candidate is
+// `selfReal` (i.e. a wrapper at that PATH entry IS veto), the loop
+// historically accepted ANY executable `<candidate>.veto-original`
+// sibling. The fix gates that on wrappers.json membership.
+//
+// We exercise this branch by putting the temp dir on PATH, populating
+// it with both veto and a planted unregistered sibling. With registry
+// disagreement, the resolver must fall through and either find another
+// PATH entry or return "not found in PATH".
+func TestFindRealBinary_RejectsUnregisteredSiblingInPathWalk(t *testing.T) {
+	dir := t.TempDir()
+
+	// Make the test's own binary look like "veto" inside dir, so the
+	// resolver's "candidate resolves to selfReal" branch fires. We
+	// achieve that by symlinking `dir/npm` to the test executable
+	// itself, so EvalSymlinks(candidate) == EvalSymlinks(self).
+	self, err := os.Executable()
+	require.NoError(t, err)
+	npm := filepath.Join(dir, "npm")
+	require.NoError(t, os.Symlink(self, npm))
+
+	// Attacker plants a sibling with no entry in wrappers.json.
+	require.NoError(t, os.WriteFile(npm+".veto-original", []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	t.Setenv("PATH", dir)
+
+	notRegistered := func(string) bool { return false }
+	_, err = findRealBinary("npm", notRegistered)
+	require.Error(t, err, "PATH-walk must refuse unregistered planted sibling")
+	require.Contains(t, err.Error(), "not found in PATH")
+}
+
+// TestFindRealBinary_HonorsRegisteredSibling proves the legitimate
+// install case still works: when the wrapper site IS in wrappers.json
+// (i.e. veto install-wrappers planted the symlink), the sibling is
+// honored. This is the success path the security fix MUST NOT break.
+func TestFindRealBinary_HonorsRegisteredSibling(t *testing.T) {
+	dir := t.TempDir()
+
+	self, err := os.Executable()
+	require.NoError(t, err)
+	npm := filepath.Join(dir, "npm")
+	require.NoError(t, os.Symlink(self, npm))
+
+	original := npm + ".veto-original"
+	require.NoError(t, os.WriteFile(original, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	t.Setenv("PATH", dir)
+
+	registered := func(p string) bool { return p == npm }
+	got, err := findRealBinary("npm", registered)
+	require.NoError(t, err)
+	require.Equal(t, original, got)
+}
+
+// TestWrapperRegisteredFunc_MissingStateFailsClosed: when wrappers.json
+// is missing or unreadable, the predicate must report "not registered"
+// for every path. This collapses the resolver to PATH-walk-only,
+// which is the safe behavior (see findWrappedOriginal docstring).
+func TestWrapperRegisteredFunc_MissingStateFailsClosed(t *testing.T) {
+	cfg := config{CacheDir: t.TempDir()} // empty dir, no wrappers.json
+	pred := wrapperRegisteredFunc(cfg)
+	require.NotNil(t, pred)
+	require.False(t, pred("/opt/homebrew/bin/npm"), "missing state must report not-registered")
+	require.False(t, pred("/anything"))
+}
+
+// TestWrapperRegisteredFunc_LoadsRegisteredPaths: with a populated
+// wrappers.json the predicate returns true for registered paths and
+// false for everything else.
+func TestWrapperRegisteredFunc_LoadsRegisteredPaths(t *testing.T) {
+	cfg := config{CacheDir: t.TempDir()}
+	state := wrapperState{}
+	state.add(wrapperEntry{Path: "/opt/homebrew/bin/npm", OriginalPath: "/opt/homebrew/bin/npm.veto-original", PM: "npm"})
+	require.NoError(t, saveWrapperState(cfg, state))
+
+	pred := wrapperRegisteredFunc(cfg)
+	require.True(t, pred("/opt/homebrew/bin/npm"))
+	require.False(t, pred("/opt/homebrew/bin/pip"))
 }
 
 // TestWrapperState_RoundTrip: state file survives a save/load cycle.

@@ -26,7 +26,6 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 
-	"github.com/brynbellomy/veto/internal/daemon"
 	"github.com/brynbellomy/veto/internal/gate"
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/intel/sources/aikido"
@@ -130,8 +129,6 @@ func run(args []string) int {
 		return runUninstallWrappers(logger, cfg, args[1:])
 	case "doctor":
 		return runDoctor(logger, cfg, args[1:])
-	case "daemon":
-		return runDaemon(logger, cfg, args[1:])
 	}
 
 	return runGate(logger, cfg, args)
@@ -150,38 +147,22 @@ func isShimName(basename string) bool {
 	return false
 }
 
-// runGate handles the `veto <pm> <args...>` path. When the veto
-// daemon is reachable on its Unix socket, the request is forwarded to it
-// — that's the kernel-enforcement path inside a sandbox-exec'd agent.
-// Otherwise we fall back to running the gate in-process and exec'ing the
-// real PM ourselves, which is the "daemon-less courtesy mode" for users
-// who haven't set up launchd yet but still want their interactive shell
-// to be soft-gated via PATH shims.
+// runGate handles the `veto <pm> <args...>` path: parse the invocation,
+// refresh and consult the intel store, then exec the real PM (or refuse).
 func runGate(logger zerolog.Logger, cfg config, args []string) int {
-	if socketPath, err := daemon.SocketPath(); err == nil && daemonSocketExists(socketPath) {
-		return daemonClient(logger, socketPath, args[0], args[1:])
-	}
-	return runGateInProcess(logger, cfg, args)
-}
-
-// runGateInProcess is the legacy in-process gate path. Used when the
-// daemon socket isn't reachable (no launchd install, or development
-// without the daemon running). Same gate logic, same intel store, just
-// invoked in the veto CLI process directly.
-func runGateInProcess(logger zerolog.Logger, cfg config, args []string) int {
 	pmName, pmArgs := args[0], args[1:]
 	pms := buildPackageManagers()
 	pm, ok := pms[pmName]
 	if !ok {
 		logger.Warn().Str("pm", pmName).Msg("unknown package manager; passing through")
-		return execReal(pmName, pmArgs)
+		return execReal(cfg, pmName, pmArgs)
 	}
 
 	installs := pm.ParseInstalls(pmArgs)
 	manifestRefs := pm.ManifestRefs(pmArgs)
 	if installs == nil && len(manifestRefs) == 0 {
 		// Not an install verb — pass through immediately, no intel needed.
-		return execReal(pmName, pmArgs)
+		return execReal(cfg, pmName, pmArgs)
 	}
 
 	store, err := buildStore(logger, cfg)
@@ -230,7 +211,7 @@ func runGateInProcess(logger zerolog.Logger, cfg config, args []string) int {
 
 	switch decision.Outcome {
 	case gate.OutcomePassThrough, gate.OutcomeAllow:
-		return execReal(pmName, pmArgs)
+		return execReal(cfg, pmName, pmArgs)
 	case gate.OutcomeRefuse:
 		printRefusal(os.Stderr, decision)
 		return exitRefused
@@ -326,8 +307,17 @@ func displayVersion(v string) string {
 //
 // The sibling check happens first so an attacker can't bypass Layer 4
 // by manipulating PATH inside the process.
-func execReal(name string, args []string) int {
-	realPath, err := findRealBinary(name)
+//
+// Provenance: before honoring any `.veto-original` sibling we consult
+// wrappers.json (loaded once here) to confirm the wrapper site at the
+// parent path was installed by `veto install-wrappers`. Without this
+// check a same-UID attacker could plant `~/.local/bin/npm.veto-original`
+// and hijack every gated invocation. If wrappers.json is missing or
+// unreadable we fail closed: no sibling is trusted, and resolution
+// continues with the PATH walk.
+func execReal(cfg config, name string, args []string) int {
+	registered := wrapperRegisteredFunc(cfg)
+	realPath, err := findRealBinary(name, registered)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "veto: cannot find real %s: %v\n", name, err)
 		return exitInternal
@@ -340,6 +330,24 @@ func execReal(name string, args []string) int {
 	return exitInternal
 }
 
+// wrapperRegisteredFunc loads wrappers.json once and returns a predicate
+// reporting whether a given path is in the registry. The closure form
+// keeps state out of execReal's signature and lets tests substitute their
+// own predicate.
+//
+// Fail-closed policy: if wrappers.json is missing or fails to parse, the
+// predicate returns false for every path. That collapses the resolver
+// down to the PATH walk, which either finds an unwrapped real binary
+// (the legitimate first-install state) or returns "not found in PATH".
+// Either outcome is safer than honoring an attacker-planted sibling.
+func wrapperRegisteredFunc(cfg config) func(string) bool {
+	state, err := loadWrapperState(cfg)
+	if err != nil {
+		return func(string) bool { return false }
+	}
+	return state.has
+}
+
 // findWrappedOriginal returns the path to a `.veto-original` sibling
 // of argv[0] when veto was invoked through a real-binary wrapper, or
 // ("", false) otherwise. Layer 4 (`veto install-wrappers`) plants
@@ -350,12 +358,23 @@ func execReal(name string, args []string) int {
 // at a real-binary wrapper site, even though os.Args[0] may be the
 // resolved absolute path on some platforms. We err on the side of
 // false-negative here and let the PATH walk handle bare names.
-func findWrappedOriginal(argv0 string) (string, bool) {
+//
+// `registered` reports whether the wrapper site at argv[0] is recorded
+// in wrappers.json. We refuse to trust any sibling whose parent path
+// isn't registered, since a same-UID attacker could otherwise plant
+// `~/.local/bin/npm.veto-original` and have every gated `npm` call
+// exec their payload. If wrappers.json is missing or unreadable the
+// caller supplies a predicate that returns false for everything; that
+// collapses to PATH-walk-only resolution (fail closed).
+func findWrappedOriginal(argv0 string, registered func(string) bool) (string, bool) {
 	if argv0 == "" || !strings.ContainsRune(argv0, '/') {
 		return "", false
 	}
 	abs, err := filepath.Abs(argv0)
 	if err != nil {
+		return "", false
+	}
+	if registered == nil || !registered(abs) {
 		return "", false
 	}
 	original := abs + ".veto-original"
@@ -369,8 +388,11 @@ func findWrappedOriginal(argv0 string) (string, bool) {
 // findRealBinary returns the path veto should exec to satisfy a
 // gated install. Prefers a wrapped-original sibling (Layer 4), then
 // falls back to a PATH walk that skips any veto-pointing entries.
-func findRealBinary(name string) (string, error) {
-	if wrapped, ok := findWrappedOriginal(os.Args[0]); ok {
+//
+// `registered` is a wrappers.json membership predicate; see
+// findWrappedOriginal for the provenance rationale.
+func findRealBinary(name string, registered func(string) bool) (string, error) {
+	if wrapped, ok := findWrappedOriginal(os.Args[0], registered); ok {
 		return wrapped, nil
 	}
 	self, err := os.Executable()
@@ -404,13 +426,21 @@ func findRealBinary(name string) (string, error) {
 		}
 		if resolved == selfReal {
 			// This PATH entry IS veto (either a Layer 2 shim or a
-			// Layer 4 wrapper). If a `.veto-original` sibling exists,
+			// Layer 4 wrapper). If a `.veto-original` sibling exists
+			// AND the wrapper site is registered in wrappers.json,
 			// that's the wrapped real binary — use it instead of
 			// continuing the PATH walk. Without this check, a system
 			// where every PATH entry has been wrapped would yield
 			// "not found in PATH" because every candidate gets skipped.
-			if sibling := candidate + ".veto-original"; isExecutableRegularOrSymlink(sibling) {
-				return sibling, nil
+			//
+			// Provenance gate: same as findWrappedOriginal — an
+			// attacker planting `<dir>/<name>.veto-original` at any
+			// PATH entry would otherwise hijack execution. Unregistered
+			// siblings are ignored; the loop continues.
+			if registered != nil && registered(candidate) {
+				if sibling := candidate + ".veto-original"; isExecutableRegularOrSymlink(sibling) {
+					return sibling, nil
+				}
 			}
 			continue
 		}

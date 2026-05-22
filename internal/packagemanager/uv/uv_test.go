@@ -62,6 +62,68 @@ func TestParseInstalls(t *testing.T) {
 				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "requests"}, RawSpec: "requests"},
 			},
 		},
+		// `uv tool {install,run,upgrade}` fetch a package into an isolated
+		// environment; uninstall does not. `uv run --with X` similarly
+		// pulls X for that invocation. Regressions here silently route
+		// fetch-y verbs to the gate and then drop the package on the floor.
+		{
+			name: "uv tool install gates the package",
+			args: []string{"tool", "install", "evil"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "uv tool run gates the package",
+			args: []string{"tool", "run", "evil"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "uv tool upgrade gates the package",
+			args: []string{"tool", "upgrade", "evil"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "uv tool uninstall does not fetch — returns nil",
+			args: []string{"tool", "uninstall", "evil"},
+			want: nil,
+		},
+		{
+			name: "uv tool install with --with gates both",
+			args: []string{"tool", "install", "ruff", "--with", "evil"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ruff"}, RawSpec: "ruff"},
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "uv run --with gates the spec, not the script",
+			args: []string{"run", "--with", "evil", "python", "-c", "x"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "uv run --with=value form",
+			args: []string{"run", "--with=evil", "script.py"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "bare uv run passes through (no --with)",
+			args: []string{"run", "script.py"},
+			want: nil,
+		},
+		{
+			name: "uv run --with-requirements does not yield argv specs",
+			args: []string{"run", "--with-requirements", "reqs.txt", "script.py"},
+			want: nil,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -116,6 +178,18 @@ func TestManifestRefs(t *testing.T) {
 			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindUvLock},
 		},
 		{name: "uv pip install with no -r and no specs emits nothing (pip semantics)", args: []string{"pip", "install"}, wantNil: true},
+		{
+			name:      "uv run --with-requirements emits a Requirements ref",
+			args:      []string{"run", "--with-requirements", "reqs.txt", "script.py"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindRequirements},
+		},
+		{
+			name:      "uv tool run --with-requirements emits a Requirements ref",
+			args:      []string{"tool", "run", "--with-requirements", "reqs.txt", "ruff"},
+			wantKinds: []packagemanager.ManifestKind{packagemanager.ManifestKindRequirements},
+		},
+		{name: "uv tool install with explicit spec emits no manifest refs", args: []string{"tool", "install", "ruff"}, wantNil: true},
+		{name: "uv run script (no --with) emits nothing", args: []string{"run", "script.py"}, wantNil: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

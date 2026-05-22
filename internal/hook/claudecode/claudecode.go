@@ -59,7 +59,7 @@ var pythonInterpreters = map[string]struct{}{
 // packages. A non-listed verb (e.g. `npm run`) is not an install and the
 // hook lets it through.
 var dangerousVerbs = map[string]map[string]struct{}{
-	"npm":    setOf("install", "i", "add", "ci", "update", "up", "upgrade"),
+	"npm":    setOf("install", "i", "add", "ci", "update", "up", "upgrade", "exec"),
 	"yarn":   setOf("install", "add", "upgrade", "up", "dlx"),
 	"pnpm":   setOf("install", "i", "add", "update", "up", "upgrade", "dlx"),
 	"bun":    setOf("install", "i", "add", "update", "upgrade", "x", "create"),

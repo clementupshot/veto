@@ -94,7 +94,7 @@ static const char *const EXEC_PMS[] = {
 // Verb tables. Kept compact at the cost of one strcmp loop per call;
 // these only run on the rewrite hot path, which is rare relative to
 // total execve traffic.
-static const char *const NPM_VERBS[]    = {"install","i","add","ci","update","up","upgrade",NULL};
+static const char *const NPM_VERBS[]    = {"install","i","add","ci","update","up","upgrade","exec",NULL};
 static const char *const YARN_VERBS[]   = {"install","add","upgrade","up","dlx",NULL};
 static const char *const PNPM_VERBS[]   = {"install","i","add","update","up","upgrade","dlx",NULL};
 static const char *const BUN_VERBS[]    = {"install","i","add","update","upgrade","x","create",NULL};

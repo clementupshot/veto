@@ -76,11 +76,54 @@ var constraintFlags = argv.FlagsWithValues{
 	"--constraint": {},
 }
 
+// withFlags is the subset of flagsWithValues whose VALUE is itself a
+// package spec that fetches code: `uv run --with X` and the multi-arg
+// `uv run --with=X`. Mirrors NpxSpecFlags / PipxSpecFlags in spirit.
+var withFlags = argv.FlagsWithValues{
+	"--with": {},
+}
+
+// withRequirementsFlags points at a requirements file — same shape as
+// pip's `-r`, but exposed via `uv run --with-requirements`.
+var withRequirementsFlags = argv.FlagsWithValues{
+	"--with-requirements": {},
+}
+
 // ParseInstalls implements packagemanager.PackageManager.
 func (Manager) ParseInstalls(args []string) []packagemanager.Install {
-	rest, ok := installArgs(args)
+	verb, rest, ok := installVerbAndRest(args)
 	if !ok {
 		return nil
+	}
+	switch verb {
+	case "tool-install", "tool-run", "tool-upgrade":
+		// `uv tool {install,run,upgrade} <pkg>`: the first positional after
+		// the sub-verb is the package to fetch. uv tool itself accepts a
+		// `--with` flag too; gate those as well so `uv tool run --with evil
+		// ruff` doesn't slip through.
+		specs := argv.CollectPositionalsWithTable(rest, flagsWithValues)
+		withSpecs := argv.CollectFlagValues(rest, withFlags, flagsWithValues)
+		out := make([]packagemanager.Install, 0, len(specs)+len(withSpecs))
+		if len(specs) > 0 {
+			out = append(out, pyspec.Parse(specs[0]))
+		}
+		for _, s := range withSpecs {
+			out = append(out, pyspec.Parse(s))
+		}
+		return out
+	case "run":
+		// `uv run` ONLY fetches a package when `--with X` is present
+		// (or `--with-requirements file`, which is a manifest ref, not
+		// argv specs). Bare `uv run script.py` passes through unchecked.
+		withSpecs := argv.CollectFlagValues(rest, withFlags, flagsWithValues)
+		if len(withSpecs) == 0 {
+			return nil
+		}
+		out := make([]packagemanager.Install, 0, len(withSpecs))
+		for _, s := range withSpecs {
+			out = append(out, pyspec.Parse(s))
+		}
+		return out
 	}
 	return parseSpecs(rest)
 }
@@ -106,14 +149,22 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 
 	reqs := argv.CollectFlagValues(rest, requirementFlags, flagsWithValues)
 	cons := argv.CollectFlagValues(rest, constraintFlags, flagsWithValues)
-	hasReqRefs := len(reqs) > 0 || len(cons) > 0
+	withReqs := argv.CollectFlagValues(rest, withRequirementsFlags, flagsWithValues)
+	hasReqRefs := len(reqs) > 0 || len(cons) > 0 || len(withReqs) > 0
 
-	refs := make([]packagemanager.ManifestRef, 0, len(reqs)+len(cons)+1)
+	refs := make([]packagemanager.ManifestRef, 0, len(reqs)+len(cons)+len(withReqs)+1)
 	for _, p := range reqs {
 		refs = append(refs, packagemanager.ManifestRef{Path: p, Kind: packagemanager.ManifestKindRequirements})
 	}
 	for _, p := range cons {
 		refs = append(refs, packagemanager.ManifestRef{Path: p, Kind: packagemanager.ManifestKindConstraint})
+	}
+	// `uv run --with-requirements reqs.txt` and `uv tool {run,install,upgrade}
+	// --with-requirements reqs.txt` reference a requirements-file the same
+	// way `uv pip install -r reqs.txt` does. Same manifest kind so the
+	// existing pyreq expander walks it.
+	for _, p := range withReqs {
+		refs = append(refs, packagemanager.ManifestRef{Path: p, Kind: packagemanager.ManifestKindRequirements})
 	}
 
 	if shouldReadPyProject(verb, rest, hasReqRefs) {
@@ -138,6 +189,9 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 // installVerbAndRest returns the canonical install verb and the argv tail to
 // scan for flag values / positionals. `uv pip install ...` collapses to verb
 // "pip-install" so callers can distinguish it from the project-aware shapes.
+// `uv tool {install,run,upgrade}` collapses to "tool-install" / "tool-run" /
+// "tool-upgrade" so ParseInstalls can branch on the fetch-y subverbs while
+// `uv tool uninstall` (which never fetches) bails out.
 func installVerbAndRest(args []string) (string, []string, bool) {
 	verb, rest, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
 	if !ok {
@@ -150,8 +204,19 @@ func installVerbAndRest(args []string) (string, []string, bool) {
 		}
 		return "pip-install", subRest, true
 	}
+	if verb == "tool" {
+		subVerb, subRest, subOK := argv.FirstNonFlagWithTable(rest, flagsWithValues)
+		if !subOK {
+			return "", nil, false
+		}
+		switch subVerb {
+		case "install", "run", "upgrade":
+			return "tool-" + subVerb, subRest, true
+		}
+		return "", nil, false
+	}
 	switch verb {
-	case "add", "sync", "install":
+	case "add", "sync", "install", "run":
 		return verb, rest, true
 	}
 	return "", nil, false
@@ -173,29 +238,6 @@ func shouldReadPyProject(verb string, rest []string, hasReqRefs bool) bool {
 		// "pip-install" follows pip semantics: no pyproject involvement.
 		return false
 	}
-}
-
-// installArgs strips uv's command/subcommand prefix and returns the remaining
-// argv for a recognized install verb. `uv pip install ...` and `uv add` /
-// `uv sync` / `uv install` are all install-shaped. Returns ok=false when the
-// command is not an install.
-func installArgs(args []string) ([]string, bool) {
-	verb, rest, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
-	if !ok {
-		return nil, false
-	}
-	if verb == "pip" {
-		subVerb, subRest, subOK := argv.FirstNonFlagWithTable(rest, flagsWithValues)
-		if !subOK || subVerb != "install" {
-			return nil, false
-		}
-		return subRest, true
-	}
-	switch verb {
-	case "add", "sync", "install":
-		return rest, true
-	}
-	return nil, false
 }
 
 func parseSpecs(rest []string) []packagemanager.Install {

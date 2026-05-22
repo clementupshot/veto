@@ -29,6 +29,13 @@ func TestAnalyze(t *testing.T) {
 		{"uv add", "uv add pandas", "uv"},
 		{"poetry install", "poetry install", "poetry"},
 
+		// `npm exec` is the npx-equivalent built into npm 7+. The hook
+		// only checks the verb (real spec-resolution happens at the
+		// veto-Go-parser layer), so any `npm exec` invocation must
+		// route through veto — even `npm exec --help`. The Go parser
+		// then sees the help flag and emits no installs.
+		{"npm exec is risky", "npm exec evil-pkg", "npm"},
+		{"npm exec with -- separator", "npm exec -- evil-pkg", "npm"},
 		{"npx with any arg is risky", "npx create-react-app foo", "npx"},
 		{"npx help is fine", "npx --help", ""},
 		{"npx -h is fine", "npx -h", ""},

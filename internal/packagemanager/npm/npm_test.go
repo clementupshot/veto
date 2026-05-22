@@ -137,6 +137,47 @@ func TestParseInstalls(t *testing.T) {
 				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "typescript"}, RawSpec: "typescript"},
 			},
 		},
+		// `npm exec` is the npx-equivalent built into npm 7+. The first
+		// non-flag positional is the package spec to fetch and run; a
+		// `--package` flag overrides that.
+		{
+			name: "npm exec with positional fetches package",
+			args: []string{"exec", "evil"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "npm exec with -- separator",
+			args: []string{"exec", "--", "evil"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "npm exec --package=value wins over positional",
+			args: []string{"exec", "--package=evil", "--", "some-cmd"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "npm exec -p value wins over positional",
+			args: []string{"exec", "-p", "evil", "some-cmd"},
+			want: []packagemanager.Install{
+				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil"}, RawSpec: "evil"},
+			},
+		},
+		{
+			name: "npm exec with no positional and no --package returns nil",
+			args: []string{"exec"},
+			want: nil,
+		},
+		{
+			name: "npm exec --help is not risky",
+			args: []string{"exec", "--help"},
+			want: nil,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

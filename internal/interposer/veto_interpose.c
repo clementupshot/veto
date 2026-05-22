@@ -40,12 +40,23 @@
 // These mirror the README's "command-layer scanner, not kernel-level
 // interposer" caveats — `veto install-preload` prints them.
 
+// Must precede every system header: glibc gates execvpe / fexecve /
+// execveat (plus RTLD_NEXT in dlfcn.h) on _GNU_SOURCE. We define it
+// unconditionally — macOS headers ignore it.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <spawn.h>
 #include <errno.h>
+#include <stdarg.h>
+#ifdef __linux__
+  #include <fcntl.h> // AT_EMPTY_PATH for execveat()
+#endif
 
 #ifdef __APPLE__
   // Tell the macOS dyld interposer machinery to swap our function for the
@@ -355,6 +366,49 @@ static invocation_t classify_invocation(const char *path, char *const argv[]) {
   return r;
 }
 
+// marshal_execl_va walks the variadic arg list of an execl/execlp/execle
+// call — starting with arg0, terminated by NULL — and returns a freshly
+// allocated NULL-terminated argv array. For execle the trailing envp
+// pointer is NOT part of argv; the caller passes `want_envp=1` to
+// receive that pointer back via *out_envp (the same pointer the caller
+// would otherwise read from va_arg). Returns NULL on allocation
+// failure; out_envp is left untouched in that case.
+//
+// The returned array's element pointers alias the original arg
+// strings — they are NOT duplicated. The caller owns only the outer
+// array (free() it after exec returns, just like rewrite_argv's output).
+//
+// Memory note: we cannot read the same va_list twice on platforms
+// where va_list is an array type (notably x86_64 Linux). We therefore
+// va_copy the input list, count entries in the copy, then walk the
+// original to fill the array. Both ends are closed with va_end().
+static char **marshal_execl_va(const char *arg0, va_list ap, int want_envp,
+                               char ***out_envp) {
+  // Two-pass: count first, then fill. We use va_copy to walk the same
+  // sequence twice without consuming the caller's va_list.
+  va_list ap_count;
+  va_copy(ap_count, ap);
+  int n = 1; // arg0 always counts as one
+  while (va_arg(ap_count, char *) != NULL) {
+    n++;
+  }
+  va_end(ap_count);
+
+  char **argv = (char **)calloc((size_t)n + 1, sizeof(char *));
+  if (!argv) return NULL;
+  argv[0] = (char *)arg0;
+  for (int i = 1; i < n; i++) {
+    argv[i] = va_arg(ap, char *);
+  }
+  // Consume the NULL terminator we already counted past.
+  (void)va_arg(ap, char *);
+  argv[n] = NULL;
+  if (want_envp && out_envp) {
+    *out_envp = va_arg(ap, char **);
+  }
+  return argv;
+}
+
 #ifdef __APPLE__
 // macOS interpose mechanism: define a same-signature function and a
 // __DATA,__interpose entry that tells dyld to swap call sites.
@@ -480,20 +534,83 @@ static int veto_posix_spawnp(pid_t *pid, const char *file,
   return rc;
 }
 
+// execl / execlp / execle: variadic wrappers. macOS's dyld interpose
+// mechanism only swaps call sites for the exact named symbol — so a
+// user-code call to execl() bypasses our execve/execv/execvp shadows
+// because libc's internal execl-to-execve hop is not on the interposable
+// surface. We therefore add explicit shadows for the variadic trio.
+//
+// Each marshals the va_list into a NULL-terminated argv array (alias
+// pointers, not copies) and then calls our veto_* gate, which performs
+// the is_risky check, rewrite, and exec. On exec-success the array's
+// allocation is dropped by the kernel along with the rest of the
+// address space; on exec-failure we free it before returning so the
+// caller's errno still reflects the underlying syscall's failure.
+
+static int veto_execl(const char *path, const char *arg0, ...) {
+  va_list ap;
+  va_start(ap, arg0);
+  char **argv = marshal_execl_va(arg0, ap, 0, NULL);
+  va_end(ap);
+  if (!argv) { errno = ENOMEM; return -1; }
+  int rc = veto_execv(path, argv);
+  int saved = errno;
+  free(argv);
+  errno = saved;
+  return rc;
+}
+
+static int veto_execlp(const char *file, const char *arg0, ...) {
+  va_list ap;
+  va_start(ap, arg0);
+  char **argv = marshal_execl_va(arg0, ap, 0, NULL);
+  va_end(ap);
+  if (!argv) { errno = ENOMEM; return -1; }
+  int rc = veto_execvp(file, argv);
+  int saved = errno;
+  free(argv);
+  errno = saved;
+  return rc;
+}
+
+static int veto_execle(const char *path, const char *arg0, ...) {
+  va_list ap;
+  va_start(ap, arg0);
+  char **envp = NULL;
+  char **argv = marshal_execl_va(arg0, ap, 1, &envp);
+  va_end(ap);
+  if (!argv) { errno = ENOMEM; return -1; }
+  int rc = veto_execve(path, argv, envp);
+  int saved = errno;
+  free(argv);
+  errno = saved;
+  return rc;
+}
+
 VETO_INTERPOSE(veto_execve,        execve);
 VETO_INTERPOSE(veto_execvp,        execvp);
 VETO_INTERPOSE(veto_execv,         execv);
+VETO_INTERPOSE(veto_execl,         execl);
+VETO_INTERPOSE(veto_execlp,        execlp);
+VETO_INTERPOSE(veto_execle,        execle);
 VETO_INTERPOSE(veto_posix_spawn,   posix_spawn);
 VETO_INTERPOSE(veto_posix_spawnp,  posix_spawnp);
 
+// macOS doesn't ship execvpe, fexecve, or execveat — they're
+// Linux/glibc extensions. Nothing to shadow here. If a future
+// macOS release exposes them, add VETO_INTERPOSE entries mirroring
+// the Linux branch.
+
 #else // Linux / glibc: LD_PRELOAD symbol-shadowing pattern.
 
-#define _GNU_SOURCE
 #include <dlfcn.h>
 
 typedef int (*execve_fn)(const char *, char *const[], char *const[]);
 typedef int (*execvp_fn)(const char *, char *const[]);
 typedef int (*execv_fn)(const char *, char *const[]);
+typedef int (*execvpe_fn)(const char *, char *const[], char *const[]);
+typedef int (*fexecve_fn)(int, char *const[], char *const[]);
+typedef int (*execveat_fn)(int, const char *, char *const[], char *const[], int);
 typedef int (*posix_spawn_fn)(pid_t *, const char *,
                               const posix_spawn_file_actions_t *,
                               const posix_spawnattr_t *,
@@ -502,6 +619,9 @@ typedef int (*posix_spawn_fn)(pid_t *, const char *,
 static execve_fn      real_execve;
 static execvp_fn      real_execvp;
 static execv_fn       real_execv;
+static execvpe_fn     real_execvpe;
+static fexecve_fn     real_fexecve;
+static execveat_fn    real_execveat;
 static posix_spawn_fn real_posix_spawn;
 static posix_spawn_fn real_posix_spawnp;
 
@@ -509,6 +629,13 @@ static void __attribute__((constructor)) veto_init(void) {
   real_execve       = (execve_fn)      dlsym(RTLD_NEXT, "execve");
   real_execvp       = (execvp_fn)      dlsym(RTLD_NEXT, "execvp");
   real_execv        = (execv_fn)       dlsym(RTLD_NEXT, "execv");
+  // execvpe is a GNU extension; on non-glibc systems (e.g. musl prior
+  // to 1.1.5) dlsym may return NULL — we guard at call sites.
+  real_execvpe      = (execvpe_fn)     dlsym(RTLD_NEXT, "execvpe");
+  real_fexecve      = (fexecve_fn)     dlsym(RTLD_NEXT, "fexecve");
+  // execveat is a libc wrapper around the syscall (glibc >= 2.34);
+  // older libcs lack the symbol entirely, so dlsym may return NULL.
+  real_execveat     = (execveat_fn)    dlsym(RTLD_NEXT, "execveat");
   real_posix_spawn  = (posix_spawn_fn) dlsym(RTLD_NEXT, "posix_spawn");
   real_posix_spawnp = (posix_spawn_fn) dlsym(RTLD_NEXT, "posix_spawnp");
 }
@@ -615,6 +742,173 @@ int posix_spawnp(pid_t *pid, const char *file,
   }
   log_route(pm, file);
   int rc = real_posix_spawn(pid, bp, fa, attr, new_argv, new_envp);
+  free(new_argv);
+  free(allocated_envp);
+  free(inv.env_kv);
+  return rc;
+}
+
+// --- execl / execlp / execle ----------------------------------------
+//
+// glibc's variadic exec helpers ultimately call internal symbols
+// (`__execve`, `__execvpe`) rather than the public `execve`/`execvp`
+// we shadow above. A C or Rust caller using `execl("/usr/local/bin/npm",
+// "npm", "install", "foo", NULL)` therefore bypasses Layer 3 without
+// these explicit shadows.
+//
+// Each wrapper marshals the va_list into a NULL-terminated argv array
+// (pointer aliases, not deep copies) and delegates to the corresponding
+// vector-form wrapper above. The argv buffer is freed after exec
+// returns; on exec-success the kernel discards our address space, so
+// the leak window is zero.
+
+int execl(const char *path, const char *arg0, ...) {
+  va_list ap;
+  va_start(ap, arg0);
+  char **argv = marshal_execl_va(arg0, ap, 0, NULL);
+  va_end(ap);
+  if (!argv) { errno = ENOMEM; return -1; }
+  int rc = execv(path, argv);
+  int saved = errno;
+  free(argv);
+  errno = saved;
+  return rc;
+}
+
+int execlp(const char *file, const char *arg0, ...) {
+  va_list ap;
+  va_start(ap, arg0);
+  char **argv = marshal_execl_va(arg0, ap, 0, NULL);
+  va_end(ap);
+  if (!argv) { errno = ENOMEM; return -1; }
+  int rc = execvp(file, argv);
+  int saved = errno;
+  free(argv);
+  errno = saved;
+  return rc;
+}
+
+int execle(const char *path, const char *arg0, ...) {
+  va_list ap;
+  va_start(ap, arg0);
+  char **envp = NULL;
+  char **argv = marshal_execl_va(arg0, ap, 1, &envp);
+  va_end(ap);
+  if (!argv) { errno = ENOMEM; return -1; }
+  int rc = execve(path, argv, envp);
+  int saved = errno;
+  free(argv);
+  errno = saved;
+  return rc;
+}
+
+// --- execvpe --------------------------------------------------------
+//
+// Same shape as execvp but with an explicit envp. Mirrors veto_execvp
+// above; we route through real_execvpe when not rewriting so the PATH
+// search runs against the supplied envp's PATH, not the parent's.
+int execvpe(const char *file, char *const argv[], char *const envp[]) {
+  // If the runtime libc lacks execvpe (e.g. older musl), there's
+  // nothing real to delegate to. Surface ENOSYS so callers see a clear
+  // failure rather than a silent infinite loop.
+  if (!real_execvpe) { errno = ENOSYS; return -1; }
+  const char *pm = is_risky(file, argv);
+  if (!pm) return real_execvpe(file, argv, envp);
+  const char *bp = getenv("VETO_PATH");
+  if (!bp || !*bp) return real_execvpe(file, argv, envp);
+  invocation_t inv = classify_invocation(file, argv);
+  char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
+  if (!new_argv) { free(inv.env_kv); return real_execvpe(file, argv, envp); }
+  char **new_envp = (char **)envp;
+  char **allocated_envp = NULL;
+  if (inv.env_kv) {
+    allocated_envp = rewrite_envp(envp, inv.env_kv);
+    if (allocated_envp) new_envp = allocated_envp;
+  }
+  log_route(pm, file);
+  // bp is an absolute path; execve avoids the redundant PATH walk
+  // execvpe would otherwise do.
+  int rc = real_execve(bp, new_argv, new_envp);
+  free(new_argv);
+  free(allocated_envp);
+  free(inv.env_kv);
+  return rc;
+}
+
+// --- fexecve --------------------------------------------------------
+//
+// fexecve takes an open file descriptor, so there's no real path to
+// hand is_risky(). The only signal we have is argv[0] — by convention
+// callers set it to the program name. We synthesise a "path" equal to
+// argv[0] so basename_of() lifts the PM name out, and let is_risky()
+// run as usual. If a caller passes a bogus argv[0] we fail open at
+// this layer — the PATH shim and Claude hook still gate the common
+// command-line paths.
+int fexecve(int fd, char *const argv[], char *const envp[]) {
+  if (!real_fexecve) { errno = ENOSYS; return -1; }
+  const char *fake_path = (argv && argv[0]) ? argv[0] : "";
+  const char *pm = is_risky(fake_path, argv);
+  if (!pm) return real_fexecve(fd, argv, envp);
+  const char *bp = getenv("VETO_PATH");
+  if (!bp || !*bp) return real_fexecve(fd, argv, envp);
+  invocation_t inv = classify_invocation(fake_path, argv);
+  char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
+  if (!new_argv) { free(inv.env_kv); return real_fexecve(fd, argv, envp); }
+  char **new_envp = (char **)envp;
+  char **allocated_envp = NULL;
+  if (inv.env_kv) {
+    allocated_envp = rewrite_envp(envp, inv.env_kv);
+    if (allocated_envp) new_envp = allocated_envp;
+  }
+  log_route(pm, fake_path);
+  // We deliberately exec the resolved veto path rather than re-using
+  // the input fd: the fd points at the PM binary, not at veto. On
+  // success the kernel closes our descriptors per O_CLOEXEC; on
+  // failure the caller's fd is untouched.
+  int rc = real_execve(bp, new_argv, new_envp);
+  free(new_argv);
+  free(allocated_envp);
+  free(inv.env_kv);
+  return rc;
+}
+
+// --- execveat -------------------------------------------------------
+//
+// execveat(dirfd, path, argv, envp, flags) is the *at-relative cousin
+// of execve. We can route through is_risky() with the supplied path
+// — basename-of resolution is identical whether the path is absolute,
+// relative, or *at-relative. AT_EMPTY_PATH means "exec the file
+// referenced by dirfd, ignoring path"; in that case path is typically
+// "" and we fall back on argv[0] just like fexecve.
+int execveat(int dirfd, const char *path, char *const argv[],
+             char *const envp[], int flags) {
+  if (!real_execveat) { errno = ENOSYS; return -1; }
+#ifdef AT_EMPTY_PATH
+  int empty_path = (flags & AT_EMPTY_PATH) && (!path || !*path);
+#else
+  int empty_path = (!path || !*path);
+#endif
+  const char *probe_path = empty_path
+    ? ((argv && argv[0]) ? argv[0] : "")
+    : path;
+  const char *pm = is_risky(probe_path, argv);
+  if (!pm) return real_execveat(dirfd, path, argv, envp, flags);
+  const char *bp = getenv("VETO_PATH");
+  if (!bp || !*bp) return real_execveat(dirfd, path, argv, envp, flags);
+  invocation_t inv = classify_invocation(probe_path, argv);
+  char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
+  if (!new_argv) { free(inv.env_kv); return real_execveat(dirfd, path, argv, envp, flags); }
+  char **new_envp = (char **)envp;
+  char **allocated_envp = NULL;
+  if (inv.env_kv) {
+    allocated_envp = rewrite_envp(envp, inv.env_kv);
+    if (allocated_envp) new_envp = allocated_envp;
+  }
+  log_route(pm, probe_path);
+  // Re-route through plain execve against the absolute veto path. The
+  // original dirfd / flags / relative-path semantics no longer apply
+  // because we've replaced the target with veto.
+  int rc = real_execve(bp, new_argv, new_envp);
   free(new_argv);
   free(allocated_envp);
   free(inv.env_kv);

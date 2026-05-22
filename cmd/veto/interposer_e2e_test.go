@@ -335,6 +335,56 @@ func TestInterposerEndToEnd_AllowsNpmRunDev(t *testing.T) {
 	require.NoError(t, err, "fake npm did not run — `npm run dev` was incorrectly rewritten")
 }
 
+// TestInterposerEndToEnd_RewritesExeclNpmInstall covers H7: the variadic
+// execl() call site. Without the new shadow, glibc routes execl through
+// an internal __execve symbol that LD_PRELOAD/dlsym can't reach, and the
+// macOS interpose surface only swaps direct execve/execv/execvp call
+// sites — execl() goes through none of those when libc dispatches it
+// internally. The fix adds explicit shadows that marshal the va_list
+// and delegate to our existing exec wrappers.
+//
+// We exercise the path with a small C spawner that calls execl directly,
+// then assert the rewrite went through veto exactly like the
+// syscall.Exec test above.
+func TestInterposerEndToEnd_RewritesExeclNpmInstall(t *testing.T) {
+	libPath := interposerLibPath(t)
+	if libPath == "" {
+		t.Skip("interposer artifact not built; run `make interposer` to enable this test")
+	}
+
+	dir := t.TempDir()
+	argLog := filepath.Join(dir, "argv.log")
+
+	fakeVeto := filepath.Join(dir, "veto")
+	vetoScript := "#!/bin/sh\n" +
+		"for a in \"$@\"; do printf '%s\\n' \"$a\"; done > " + argLog + "\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(fakeVeto, []byte(vetoScript), 0o755))
+
+	fakeNpm := filepath.Join(dir, "npm")
+	require.NoError(t, os.WriteFile(fakeNpm, []byte("#!/bin/sh\nexit 77\n"), 0o755))
+
+	// Build the C spawner via the same compiler that built the
+	// interposer. cc is required for `make interposer` to have produced
+	// libPath in the first place, so it's safe to assume here.
+	spawnerSrc := filepath.Join("testdata", "interpose_execl_spawner", "main.c")
+	spawnerBin := filepath.Join(dir, "execl_spawner")
+	build := exec.Command("cc", "-O0", "-Wall", "-o", spawnerBin, spawnerSrc)
+	build.Stderr = os.Stderr
+	require.NoError(t, build.Run(), "build interpose_execl_spawner helper")
+
+	cmd := exec.Command(spawnerBin, fakeNpm, "install", "foo")
+	cmd.Env = withPreloadEnv(libPath, fakeVeto)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "spawner exit error; stderr=%s", stderr.String())
+
+	data, err := os.ReadFile(argLog)
+	require.NoError(t, err, "fakeVeto did not write argv.log — execl shadow may not have rewritten")
+	lines := splitLines(string(data))
+	require.Equal(t, []string{"npm", "install", "foo"}, lines)
+}
+
 // interposerLibPath returns the absolute path to the built interposer
 // artifact, or "" if it doesn't exist. We look both in the repo root
 // (where `make interposer` puts it) and in the testdata dir, so the test

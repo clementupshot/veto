@@ -167,16 +167,29 @@ func (m *Manager) Ecosystem() intel.Ecosystem { return m.opts.Ecosystem }
 //     evil-pkg`. The first non-flag token is the spec.
 //
 // For PipxStyle managers we first locate the action verb (`run`, `install`,
-// `upgrade`, `inject`) and parse what follows.
+// `upgrade`, `inject`) and parse what follows. The verb determines how the
+// trailing positionals are interpreted:
+//
+//   - `run`: pipx runs ONE package; only the first positional is the spec
+//     (everything after is forwarded to the command being run).
+//   - `install`/`upgrade`: pipx accepts multiple package specs in a single
+//     invocation; every positional is a separate install to gate.
+//   - `inject`: the FIRST positional is the local venv name (already
+//     installed, not a package), and every positional after that is a
+//     package being injected into that venv. Gating the venv name is wrong
+//     and gating only the venv name lets the actual injected packages slip
+//     through unchecked.
 func (m *Manager) ParseInstalls(args []string) []packagemanager.Install {
 	rest := args
+	verb := ""
 	if m.opts.PipxStyle {
-		verb, after, ok := argv.FirstNonFlagWithTable(args, m.opts.FlagsWithValues)
+		v, after, ok := argv.FirstNonFlagWithTable(args, m.opts.FlagsWithValues)
 		if !ok {
 			return nil
 		}
-		switch verb {
+		switch v {
 		case "run", "install", "upgrade", "inject":
+			verb = v
 			rest = after
 		default:
 			return nil
@@ -185,7 +198,7 @@ func (m *Manager) ParseInstalls(args []string) []packagemanager.Install {
 
 	// Spec-via-flag wins over spec-via-positional: when the user wrote
 	// `npx -p foo cmd`, "cmd" is a binary name inside the package "foo",
-	// not itself a package.
+	// not itself a package. Same for `pipx run --spec foo cmd`.
 	if len(m.opts.SpecFlags) > 0 {
 		flagSpecs := argv.CollectFlagValues(rest, m.opts.SpecFlags, m.opts.FlagsWithValues)
 		if len(flagSpecs) > 0 {
@@ -195,6 +208,33 @@ func (m *Manager) ParseInstalls(args []string) []packagemanager.Install {
 			}
 			return out
 		}
+	}
+
+	// Multi-install pipx verbs: every positional is a package spec to gate.
+	// `inject` is the same shape but with the venv name (first positional)
+	// dropped — that name refers to an existing local venv, not a package.
+	if m.opts.PipxStyle && (verb == "install" || verb == "upgrade" || verb == "inject") {
+		positionals := argv.CollectPositionalsWithTable(rest, m.opts.FlagsWithValues)
+		if verb == "inject" {
+			if len(positionals) <= 1 {
+				return nil
+			}
+			positionals = positionals[1:]
+		}
+		if len(positionals) == 0 {
+			return nil
+		}
+		out := make([]packagemanager.Install, 0, len(positionals))
+		for _, spec := range positionals {
+			if spec == "help" {
+				continue
+			}
+			out = append(out, m.parseSpec(spec))
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
 	}
 
 	spec, _, ok := argv.FirstNonFlagWithTable(rest, m.opts.FlagsWithValues)

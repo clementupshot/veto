@@ -174,7 +174,18 @@ static const char *is_risky(const char *path, char *const argv[]) {
   // libc execve, that goes through the env argument we don't have on
   // this function signature, so we fall through to the rewrite logic and
   // let veto itself notice the bypass via its env at startup.
-  if (getenv("VETO_BYPASS")) return NULL;
+  //
+  // The check is strictly `VETO_BYPASS=1`; any other value (including
+  // `VETO_BYPASS=0`, `VETO_BYPASS=false`, or empty-string) does NOT
+  // disable the gate. This matches the hook side
+  // (internal/hook/claudecode/claudecode.go) and the runGate
+  // short-circuit so the documented escape hatch behaves the same at
+  // every layer — and so a user can't accidentally disable Layer 3 by
+  // exporting `VETO_BYPASS=0` thinking it means "off."
+  {
+    const char *v = getenv("VETO_BYPASS");
+    if (v && !strcmp(v, "1")) return NULL;
+  }
 
   if (!path || !argv || !argv[0]) return NULL;
   const char *bn = basename_of(path);

@@ -231,6 +231,82 @@ func TestInterposerEndToEnd_PassesThroughPythonMHttpServer(t *testing.T) {
 	require.NoError(t, err, "fake python did not run — `python -m http.server` was incorrectly rewritten")
 }
 
+// TestInterposerEndToEnd_BypassZeroIsNotABypass guards the literal-"1"
+// rule on the interposer side. A user (or a confused shell) that
+// exports `VETO_BYPASS=0` must NOT silently disable Layer 3 — the
+// presence-only check that used to live in is_risky() let any value
+// (including 0, false, empty) turn off the gate, which contradicted
+// the hook and runGate semantics. The C side now requires the literal
+// string "1" to match, same as the Go side.
+func TestInterposerEndToEnd_BypassZeroIsNotABypass(t *testing.T) {
+	libPath := interposerLibPath(t)
+	if libPath == "" {
+		t.Skip("interposer artifact not built; run `make interposer` to enable this test")
+	}
+
+	dir := t.TempDir()
+	argLog := filepath.Join(dir, "argv.log")
+
+	fakeVeto := filepath.Join(dir, "veto")
+	vetoScript := "#!/bin/sh\n" +
+		"for a in \"$@\"; do printf '%s\\n' \"$a\"; done > " + argLog + "\n" +
+		"exit 0\n"
+	require.NoError(t, os.WriteFile(fakeVeto, []byte(vetoScript), 0o755))
+
+	fakeNpm := filepath.Join(dir, "npm")
+	require.NoError(t, os.WriteFile(fakeNpm, []byte("#!/bin/sh\nexit 77\n"), 0o755))
+
+	spawnerSrc := filepath.Join("testdata", "interpose_spawner", "main.go")
+	spawnerBin := filepath.Join(dir, "spawner")
+	build := exec.Command("go", "build", "-o", spawnerBin, spawnerSrc)
+	build.Stderr = os.Stderr
+	require.NoError(t, build.Run(), "build interpose_spawner helper")
+
+	cmd := exec.Command(spawnerBin, fakeNpm, "install", "foo")
+	// VETO_BYPASS=0 must NOT disable the interposer. The is_risky()
+	// check requires the literal string "1"; anything else falls
+	// through to the rewrite logic.
+	cmd.Env = append(withPreloadEnv(libPath, fakeVeto), "VETO_BYPASS=0")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Run(), "spawner exit error; stderr=%s", stderr.String())
+
+	data, err := os.ReadFile(argLog)
+	require.NoError(t, err, "fakeVeto did not write argv.log — interposer wrongly treated VETO_BYPASS=0 as a bypass and let fake npm run (sentinel exit 77)")
+	lines := splitLines(string(data))
+	require.Equal(t, []string{"npm", "install", "foo"}, lines)
+}
+
+// TestInterposerEndToEnd_BypassOneIsABypass is the positive companion
+// to the test above: VETO_BYPASS=1 (literal "1") MUST disable Layer 3
+// so the documented escape hatch works.
+func TestInterposerEndToEnd_BypassOneIsABypass(t *testing.T) {
+	libPath := interposerLibPath(t)
+	if libPath == "" {
+		t.Skip("interposer artifact not built; run `make interposer` to enable this test")
+	}
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	fakeNpm := filepath.Join(dir, "npm")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
+	require.NoError(t, os.WriteFile(fakeNpm, []byte(script), 0o755))
+
+	// Sentinel fake veto — must not be invoked when the bypass is on.
+	fakeVeto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(fakeVeto, []byte("#!/bin/sh\nexit 99\n"), 0o755))
+
+	spawnerSrc := filepath.Join("testdata", "interpose_spawner", "main.go")
+	spawnerBin := filepath.Join(dir, "spawner")
+	require.NoError(t, exec.Command("go", "build", "-o", spawnerBin, spawnerSrc).Run())
+
+	cmd := exec.Command(spawnerBin, fakeNpm, "install", "foo")
+	cmd.Env = append(withPreloadEnv(libPath, fakeVeto), "VETO_BYPASS=1")
+	require.NoError(t, cmd.Run())
+	_, err := os.Stat(marker)
+	require.NoError(t, err, "fake npm did not run — `VETO_BYPASS=1` failed to disable Layer 3 (or the rewrite ran anyway)")
+}
+
 func TestInterposerEndToEnd_AllowsNpmRunDev(t *testing.T) {
 	// `npm run dev` is a PM invocation with a NON-dangerous verb; the
 	// interposer must let it through unchanged.

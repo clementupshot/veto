@@ -72,6 +72,14 @@ func TestAnalyze(t *testing.T) {
 		{"env var assignment", "FOO=bar npm install foo", "npm"},
 		{"two env var assignments", "FOO=bar BAZ=qux pip install requests", "pip"},
 		{"explicit bypass", "VETO_BYPASS=1 npm install foo", ""},
+		// Only the literal value "1" disables the gate. Any other value
+		// (including the foot-gun "0", which a user might assume means
+		// "off") MUST still be flagged. The C interposer and runGate
+		// honor the same rule — see veto_interpose.c::is_risky and
+		// cmd/veto/main.go::vetoBypassEnabled.
+		{"bypass with value 0 is not a bypass", "VETO_BYPASS=0 npm install foo", "npm"},
+		{"bypass with empty value is not a bypass", "VETO_BYPASS= npm install foo", "npm"},
+		{"bypass with arbitrary value is not a bypass", "VETO_BYPASS=true npm install foo", "npm"},
 
 		{"redirect operator", "npm install foo > /tmp/log 2>&1", "npm"},
 		{"redirect operator with append", "pip install foo >> /tmp/log", "pip"},

@@ -235,10 +235,42 @@ func isShimName(basename string) bool {
 	return false
 }
 
+// vetoBypassEnabled reports whether the VETO_BYPASS escape hatch is
+// engaged for this invocation. Only the literal string "1" counts;
+// every other value (including "0", "false", "true", or empty) leaves
+// the gate in force. This rule is shared by all three veto layers —
+// the Claude Code hook (internal/hook/claudecode/claudecode.go), the
+// runGate short-circuit, and the C interposer (is_risky in
+// internal/interposer/veto_interpose.c) — so the documented escape
+// hatch behaves identically everywhere a user might wire veto in.
+//
+// Extracted as a helper so unit tests can pin the contract without
+// running runGate end-to-end.
+func vetoBypassEnabled() bool {
+	return os.Getenv("VETO_BYPASS") == "1"
+}
+
 // runGate handles the `veto <pm> <args...>` path: parse the invocation,
 // refresh and consult the intel store, then exec the real PM (or refuse).
 func runGate(logger zerolog.Logger, cfg config, args []string) int {
 	pmName, pmArgs := args[0], args[1:]
+
+	// VETO_BYPASS=1 is the documented per-invocation escape hatch. The
+	// hook and the C interposer both honor it; runGate is the third
+	// touch-point a shimmed command actually passes through, so it must
+	// honor the same contract or the escape hatch silently fails when
+	// Layer 2 is wired up without Layer 3 (interposer) or Layer 1
+	// (hook). We log loudly at INFO so the user SEES that the gate was
+	// skipped — an invisible escape hatch is a footgun.
+	if vetoBypassEnabled() {
+		logger.Info().Str("pm", pmName).Strs("args", pmArgs).Msg("VETO_BYPASS=1 set; skipping gate and exec'ing real package manager")
+		// Use execPMOrPythonM so a `VETO_BYPASS=1 python -m pip install foo`
+		// invocation rebuilds the python -m form (preserving venv-scoped
+		// pip resolution) instead of exec'ing pip directly. For non-python
+		// invocations the helper falls through to execReal.
+		return execPMOrPythonM(cfg, pmName, pmArgs)
+	}
+
 	pms := buildPackageManagers()
 	pm, ok := pms[pmName]
 	if !ok {

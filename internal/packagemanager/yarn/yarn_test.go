@@ -16,9 +16,10 @@ func TestParseInstalls(t *testing.T) {
 	require.Equal(t, intel.EcosystemNPM, m.Ecosystem())
 
 	cases := []struct {
-		name string
-		args []string
-		want []packagemanager.Install
+		name    string
+		args    []string
+		want    []packagemanager.Install
+		wantNil bool // distinguishes nil (passthrough) from empty-non-nil (implicit install)
 	}{
 		{
 			name: "global flag-with-value before verb is skipped",
@@ -48,10 +49,70 @@ func TestParseInstalls(t *testing.T) {
 				{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "typescript"}, RawSpec: "typescript"},
 			},
 		},
+		{
+			name: "install verb with no specs returns empty slice",
+			args: []string{"install"},
+			want: []packagemanager.Install{},
+		},
+		// Yarn classic treats bare `yarn` as `yarn install`. The parser must
+		// return an empty-non-nil slice so the gate engages (a nil result
+		// triggers passthrough).
+		{
+			name: "bare yarn (no args) returns empty slice for implicit install",
+			args: nil,
+			want: []packagemanager.Install{},
+		},
+		{
+			name: "bare yarn with only --frozen-lockfile returns empty slice",
+			args: []string{"--frozen-lockfile"},
+			want: []packagemanager.Install{},
+		},
+		{
+			name: "bare yarn with flag-with-value returns empty slice",
+			args: []string{"--cwd", "/tmp/proj"},
+			want: []packagemanager.Install{},
+		},
+		// Info flags mean yarn won't install anything; passthrough.
+		{
+			name:    "yarn --help passes through",
+			args:    []string{"--help"},
+			wantNil: true,
+		},
+		{
+			name:    "yarn -h passes through",
+			args:    []string{"-h"},
+			wantNil: true,
+		},
+		{
+			name:    "yarn --version passes through",
+			args:    []string{"--version"},
+			wantNil: true,
+		},
+		{
+			name:    "yarn -v passes through",
+			args:    []string{"-v"},
+			wantNil: true,
+		},
+		// Non-install verbs are not bare-install; passthrough.
+		{
+			name:    "yarn config set passes through",
+			args:    []string{"config", "set", "registry", "https://example.com"},
+			wantNil: true,
+		},
+		{
+			name:    "yarn run dev passes through",
+			args:    []string{"run", "dev"},
+			wantNil: true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, m.ParseInstalls(c.args))
+			got := m.ParseInstalls(c.args)
+			if c.wantNil {
+				require.Nil(t, got)
+				return
+			}
+			require.Equal(t, c.want, got)
 		})
 	}
 }
@@ -69,6 +130,14 @@ func TestManifestRefs(t *testing.T) {
 		{name: "non-install verb returns nil", args: []string{"run", "dev"}, wantNil: true},
 		{name: "install with no specs emits package.json + lock refs", args: []string{"install"}, wantPkg: true, wantLocks: true},
 		{name: "add with explicit specs emits lock refs only", args: []string{"add", "lodash"}, wantLocks: true},
+		// Bare `yarn` is yarn classic's implicit `yarn install`; must emit
+		// the full manifest+lockfile set so the gate engages.
+		{name: "bare yarn emits package.json + lock refs", args: nil, wantPkg: true, wantLocks: true},
+		{name: "bare yarn with --frozen-lockfile emits package.json + lock refs", args: []string{"--frozen-lockfile"}, wantPkg: true, wantLocks: true},
+		{name: "yarn --help returns nil", args: []string{"--help"}, wantNil: true},
+		{name: "yarn --version returns nil", args: []string{"--version"}, wantNil: true},
+		{name: "yarn -v returns nil", args: []string{"-v"}, wantNil: true},
+		{name: "yarn config set passes through (nil)", args: []string{"config", "set", "registry", "https://example.com"}, wantNil: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

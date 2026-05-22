@@ -205,15 +205,20 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 			os.Remove(tmpPath)
 			return nil, errors.With(err, "rename zip")
 		}
+
+		// Parse BEFORE persisting the etag so a malformed payload doesn't
+		// pin us into 304-loop perma-failure: if parse fails here we leave
+		// the previous etag in place (or no etag at all), and the next
+		// refresh will re-download the body rather than re-parse the same
+		// broken zip from disk.
+		reports, err := parseZip(zipPath, s.logger)
+		if err != nil {
+			return nil, errors.With(err, "parse fresh zip")
+		}
 		if upstreamEtag != "" {
 			if err := os.WriteFile(etagPath, []byte(upstreamEtag), 0o644); err != nil {
 				s.logger.Warn().Err(err).Msg("write etag")
 			}
-		}
-
-		reports, err := parseZip(zipPath, s.logger)
-		if err != nil {
-			return nil, errors.With(err, "parse fresh zip")
 		}
 		s.cached[eco] = ecosystemEntry{etag: upstreamEtag, reports: reports}
 		s.logger.Info().Str("ecosystem", string(eco)).Int("reports", len(reports)).Msg("osv parsed")

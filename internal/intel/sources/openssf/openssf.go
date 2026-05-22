@@ -179,6 +179,14 @@ func (s *Source) ensureLoaded(ctx context.Context) ([]intel.MalwareReport, error
 
 	reports, err := s.parseTarball(tarballPath)
 	if err != nil {
+		// Etag on disk now references a tarball we couldn't parse, and
+		// downloadIfChanged's short-circuit (etag-matches-upstream → reuse
+		// cached file) would loop on the same broken payload on every
+		// future refresh. Drop the etag so the next call re-downloads.
+		etagPath := filepath.Join(s.cacheDir, "main.etag")
+		if rmErr := os.Remove(etagPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			s.logger.Warn().Err(rmErr).Msg("remove etag after parse failure")
+		}
 		return nil, errors.With(err, "openssf: parse tarball")
 	}
 

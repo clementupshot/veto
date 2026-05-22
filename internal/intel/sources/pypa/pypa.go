@@ -129,7 +129,17 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 	if err != nil {
 		return nil, vetoerrors.With(err, "pypa fetch")
 	}
-	return parseTarball(payload, s.logger)
+	reports, err := parseTarball(payload, s.logger)
+	if err != nil {
+		// Etag on disk now references a tarball we couldn't parse. Drop it
+		// so the next refresh re-downloads rather than 304-looping on the
+		// broken payload forever.
+		if rmErr := os.Remove(etagPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			s.logger.Warn().Err(rmErr).Msg("remove etag after parse failure")
+		}
+		return nil, err
+	}
+	return reports, nil
 }
 
 // fetchWithCache mirrors the aikido source's logic: etag-conditional

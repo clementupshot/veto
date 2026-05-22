@@ -118,7 +118,17 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 		return nil, errors.With(err, "aikido fetch").Set("ecosystem", string(eco), "url", url)
 	}
 
-	return parsePayload(eco, payload)
+	reports, err := parsePayload(eco, payload)
+	if err != nil {
+		// Etag-on-disk now points to a payload we couldn't parse. Drop it
+		// so the next refresh re-downloads instead of 304-looping on the
+		// same malformed cache file.
+		if rmErr := os.Remove(cachedEtag); rmErr != nil && !os.IsNotExist(rmErr) {
+			s.logger.Warn().Err(rmErr).Msg("remove etag after parse failure")
+		}
+		return nil, err
+	}
+	return reports, nil
 }
 
 // fetchWithCache returns the latest payload bytes for url. It honors etag-based

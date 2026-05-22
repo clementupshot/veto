@@ -161,6 +161,73 @@ func TestFetch304WithMissingCacheRetriesOnce(t *testing.T) {
 		"bounded retry must not spin — at most 2 hits (initial + 1 retry)")
 }
 
+// TestFetchParseFailureDropsEtag verifies H3: when the body cannot be
+// parsed (transient malformed payload, partial upload, etc.), the etag
+// must NOT persist to disk pointing at the bad cache. Otherwise the next
+// refresh sends If-None-Match, gets 304, re-parses the same bad payload,
+// and fails again — perma-failure until the operator wipes the cache.
+//
+// We simulate this by first serving non-JSON garbage with an etag, then
+// flipping the server to serve a valid payload on a second hit. If the
+// fix is in place the second fetch hits the server (no 304) and succeeds.
+func TestFetchParseFailureDropsEtag(t *testing.T) {
+	var hits atomic.Int32
+	var serveValid atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		// If the client honors a 304-from-cache for the broken payload, we
+		// will see If-None-Match on the second hit. Fail loudly in that
+		// case rather than silently 304ing — the test wants to assert
+		// the etag was dropped after parse failure.
+		if r.Header.Get("If-None-Match") == `"broken"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		if serveValid.Load() {
+			w.Header().Set("ETag", `"good"`)
+			_, _ = w.Write([]byte(samplePayload))
+			return
+		}
+		w.Header().Set("ETag", `"broken"`)
+		// Non-JSON body — survives the size cap (small) but fails parsePayload.
+		_, _ = w.Write([]byte("not valid json at all"))
+	}))
+	defer srv.Close()
+
+	cacheDir := t.TempDir()
+	src, err := aikido.New(aikido.Options{
+		BaseURL:  srv.URL,
+		CacheDir: cacheDir,
+		Logger:   zerolog.Nop(),
+	})
+	require.NoError(t, err)
+
+	// First fetch: parse must fail.
+	_, err = src.Fetch(context.Background(), intel.EcosystemNPM)
+	require.Error(t, err, "garbage payload must fail to parse")
+
+	// Etag file must NOT be present (was either never written or removed
+	// after parse failed). If it is present, the next refresh will 304-loop.
+	_, statErr := os.Stat(filepath.Join(cacheDir, "npm.etag"))
+	require.True(t, os.IsNotExist(statErr),
+		"etag must not persist for an unparseable payload (got stat err: %v)", statErr)
+
+	// Flip the server to serve a valid payload and refetch. Without the
+	// fix this would send If-None-Match: "broken" and get a 304, then
+	// re-parse the same garbage from disk and fail again.
+	serveValid.Store(true)
+	reports, err := src.Fetch(context.Background(), intel.EcosystemNPM)
+	require.NoError(t, err, "second fetch must succeed after parse-failure recovery")
+	require.Len(t, reports, 3)
+
+	// Etag for the GOOD payload should now be persisted.
+	etag, err := os.ReadFile(filepath.Join(cacheDir, "npm.etag"))
+	require.NoError(t, err)
+	require.Equal(t, `"good"`, string(etag))
+
+	require.Equal(t, int32(2), hits.Load(), "exactly two upstream hits expected")
+}
+
 func TestFetchNetworkFailureFallsBackToCache(t *testing.T) {
 	// First serve the payload to populate the cache.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

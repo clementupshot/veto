@@ -1,4 +1,4 @@
-.PHONY: build test vet tidy clean install install-unchecked install-preload codegen-deps generate-mocks interposer
+.PHONY: build test vet tidy clean install install-unchecked install-preload interposer
 
 BIN := veto
 PKG := ./cmd/veto
@@ -85,9 +85,3 @@ $(INTERPOSER_OUT): $(INTERPOSER_SRC) $(INTERPOSER_HEADER)
 
 install-preload: interposer build
 	./$(BIN) install-preload --lib $(PWD)/$(INTERPOSER_OUT)
-
-codegen-deps:
-	go install github.com/vektra/mockery/v3@latest
-
-generate-mocks:
-	mockery

@@ -352,7 +352,22 @@ func runSync(logger zerolog.Logger, cfg config) int {
 		logger.Error().Err(err).Msg("refresh")
 		return exitInternal
 	}
-	fmt.Printf("veto: synced sources %v\n", store.SourceIDs())
+	// Post-refresh sanity floor. The per-(source, ecosystem) retention
+	// threshold inside store.Refresh is a relative check (50% of previous);
+	// it can erode the index geometrically across many successful refreshes
+	// if a feed is wedged. The absolute floor here catches that case so a
+	// CI cron running `veto sync` daily doesn't silently accept an eroded
+	// state. runGate already enforces the same floor on every gate call.
+	if reportCount := store.ReportCount(); reportCount < minHealthyReportCount {
+		logger.Error().
+			Int("reports", reportCount).
+			Int("floor", minHealthyReportCount).
+			Msg("intel store below sanity floor after refresh")
+		fmt.Fprintf(os.Stderr, "veto: WARN — intel store has only %d reports (expected at least %d); sync succeeded but the index is implausibly small.\n", reportCount, minHealthyReportCount)
+		fmt.Fprintln(os.Stderr, "Check that your sources are configured correctly and reachable: `veto status`.")
+		return exitInternal
+	}
+	fmt.Printf("veto: synced sources %v (%d reports)\n", store.SourceIDs(), store.ReportCount())
 	return exitOK
 }
 

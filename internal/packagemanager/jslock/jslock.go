@@ -26,8 +26,10 @@ package jslock
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -310,44 +312,56 @@ func expandYarnLock(path string) ([]packagemanager.Install, error) {
 	if err != nil || !ok {
 		return nil, err
 	}
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	// We deliberately avoid bufio.Scanner here: its default 64 KiB and even
+	// our previous 8 MiB cap silently truncate yarn-berry lockfiles for
+	// large monorepos, fail-open. bufio.Reader.ReadString has no per-line
+	// cap, so arbitrary line lengths are handled naturally; the only price
+	// is dealing with EOF semantics where the final line may not end in
+	// '\n'.
+	reader := bufio.NewReader(bytes.NewReader(data))
 	var out []packagemanager.Install
 	var pendingHeader string
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		// Header line: no leading whitespace and ends with ":".
-		if line == trimmed && strings.HasSuffix(trimmed, ":") {
-			pendingHeader = strings.TrimSuffix(trimmed, ":")
-			continue
-		}
-		// Body line: indented. We look only for `version "..."` or
-		// `version: x` (berry).
-		if strings.HasPrefix(trimmed, "version ") || strings.HasPrefix(trimmed, "version:") {
-			version := extractYarnVersion(trimmed)
-			if version == "" {
-				continue
+	for {
+		line, readErr := reader.ReadString('\n')
+		if line != "" {
+			// Strip the trailing newline (and CR, on Windows lockfiles)
+			// without altering interior whitespace, so the header /
+			// body distinction below remains sound.
+			line = strings.TrimRight(line, "\r\n")
+			trimmed := strings.TrimSpace(line)
+			switch {
+			case trimmed == "" || strings.HasPrefix(trimmed, "#"):
+				// Skip blank lines and comments.
+			case line == trimmed && strings.HasSuffix(trimmed, ":"):
+				// Header line: no leading whitespace and ends with ":".
+				pendingHeader = strings.TrimSuffix(trimmed, ":")
+			case strings.HasPrefix(trimmed, "version ") || strings.HasPrefix(trimmed, "version:"):
+				// Body line: indented. We look only for `version "..."`
+				// (yarn classic) or `version: x` (berry).
+				version := extractYarnVersion(trimmed)
+				if version == "" {
+					break
+				}
+				name := nameFromYarnHeader(pendingHeader)
+				if name == "" {
+					break
+				}
+				out = append(out, packagemanager.Install{
+					Ref: intel.PackageRef{
+						Ecosystem: intel.EcosystemNPM,
+						Name:      name,
+						Version:   version,
+					},
+					RawSpec: name + "@" + version,
+				})
 			}
-			name := nameFromYarnHeader(pendingHeader)
-			if name == "" {
-				continue
-			}
-			out = append(out, packagemanager.Install{
-				Ref: intel.PackageRef{
-					Ecosystem: intel.EcosystemNPM,
-					Name:      name,
-					Version:   version,
-				},
-				RawSpec: name + "@" + version,
-			})
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, vetoerrors.With(err, "scan yarn.lock").Set("path", path)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return nil, vetoerrors.With(readErr, "read yarn.lock").Set("path", path)
+		}
 	}
 	return out, nil
 }

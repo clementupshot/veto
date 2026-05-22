@@ -3,6 +3,7 @@ package jslock_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -131,6 +132,45 @@ func TestExpandYarnLockBerryNpmAlias(t *testing.T) {
 	got := mustExpand(t, "yarn.lock", packagemanager.ManifestKindYarnLock, lock)
 	requireContains(t, got, intel.EcosystemNPM, "evil", "1.0")
 	requireMissing(t, got, "lodash")
+}
+
+// TestExpandYarnLock_OversizeLine guards M7: yarn-berry lockfiles for
+// large monorepos can legitimately produce header or body lines that
+// exceed the old 8 MiB bufio.Scanner cap, which used to truncate silently
+// and fail-open. We build a yarn.lock whose header line alone is >8 MiB
+// (a long comma-separated list of alternative specs) and confirm the
+// parser still recovers the package@version downstream.
+//
+// Skipped under -short because the input is ~9 MiB; it's not slow to
+// generate but there's no reason to pay for it on every CI invocation.
+func TestExpandYarnLock_OversizeLine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping oversize yarn.lock parser test in -short mode")
+	}
+	// Build a single header line >8 MiB by concatenating many
+	// quoted alternative specs separated by ", ". Each alternative is
+	// ~64 bytes; we need ~150_000 of them to clear 8 MiB.
+	const altsNeeded = 150_000
+	var b strings.Builder
+	b.Grow(altsNeeded * 80)
+	b.WriteString(`"lodash@^4.17.21"`)
+	for range altsNeeded {
+		b.WriteString(`, "lodash@^4.17.`)
+		// Pad the version so each alternative is a substantial chunk
+		// of bytes; the exact value is irrelevant — we only check the
+		// final pinned `version "..."` below.
+		b.WriteString("000000000000000000000000000000000000000000000000")
+		b.WriteString(`"`)
+	}
+	b.WriteString(":\n")
+	b.WriteString("  version \"4.17.21\"\n")
+	b.WriteString("  resolved \"https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz\"\n")
+	lock := b.String()
+	if len(lock) < 9*1024*1024 {
+		t.Fatalf("test fixture too small: %d bytes (want >9 MiB to exercise the >8 MiB code path)", len(lock))
+	}
+	got := mustExpand(t, "yarn.lock", packagemanager.ManifestKindYarnLock, lock)
+	requireContains(t, got, intel.EcosystemNPM, "lodash", "4.17.21")
 }
 
 // TestExpandMissingFile_ReturnsNilNil: PMs emit lock refs speculatively,

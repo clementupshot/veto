@@ -92,11 +92,17 @@ var wrappedManagers = []string{
 //
 // Default behavior: discover candidate dirs (homebrew, mise installs,
 // asdf installs, user-specified --dir flags), find every PM in our
-// wrappedManagers list living in those dirs, and wrap each one.
+// wrappedManagers list living in those dirs, and wrap each one. Paths
+// that are already wrapped (symlink-to-veto + `.veto-original` sibling)
+// but missing from wrappers.json are reconciled into state — this
+// self-heals after a cache wipe, manual symlinking, or an install run
+// under a different VETO_CACHE_DIR.
 //
 //	--dry-run        list the changes that would be made without making them.
-//	--force          re-wrap entries we previously wrapped (no-op normally;
-//	                 useful after an upgrade re-installed the real binary).
+//	--force          re-link entries we previously wrapped — useful after an
+//	                 upgrade re-installed the real binary, OR to repoint
+//	                 already-correct symlinks at the current veto path
+//	                 (e.g. after moving the veto binary).
 //	--dir DIR        add an additional discovery dir. Can be repeated.
 //	--only PM        only wrap this PM. Can be repeated.
 func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
@@ -120,17 +126,9 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 
 	state, _ := loadWrapperState(cfg) // empty state is fine
 
-	// Empty candidates is ambiguous: either no PMs exist in known dirs
-	// (fresh machine, nothing to wrap), or everything's already wrapped
-	// from a prior install-wrappers run. Distinguish by consulting state.
+	// Discovery includes already-ours paths, so empty candidates now
+	// genuinely means nothing on disk — no PMs in known dirs at all.
 	if len(candidates) == 0 {
-		if existing := len(state.Wrappers); existing > 0 {
-			fmt.Printf("veto install-wrappers: %d wrapper%s already installed — nothing new to wrap.\n",
-				existing, pluralS(existing))
-			fmt.Println("Re-run after `brew upgrade` / `mise install` / `asdf install` to re-wrap binaries that toolchain")
-			fmt.Println("upgrades replaced. `veto doctor` will flag any wrapper that drifted.")
-			return exitOK
-		}
 		fmt.Fprintln(os.Stderr, "veto install-wrappers: no candidate PM binaries found in known dirs.")
 		fmt.Fprintln(os.Stderr, "Checked: /opt/homebrew/bin, /usr/local/bin, ~/.local/share/mise/installs/*/*/bin,")
 		fmt.Fprintln(os.Stderr, "         ~/.asdf/installs/*/*/bin, ~/.bun/bin.")
@@ -145,9 +143,24 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 			stats.failed++
 			fmt.Fprintf(os.Stderr, "  %-10s  FAIL  %s — %v\n", c.pm, c.path, err)
 		case action == wrapperActionSkipAlreadyOurs:
-			stats.alreadyOurs++
-			if opts.verbose {
-				fmt.Printf("  %-10s  ok    already wrapped: %s\n", c.pm, c.path)
+			// The filesystem says this is wrapped. If state agrees,
+			// silent no-op. If state doesn't know about it, reconcile —
+			// register the entry so future uninstall-wrappers can
+			// reverse it. Idempotent because state.add replaces by Path.
+			if state.has(c.path) {
+				stats.alreadyOurs++
+				if opts.verbose {
+					fmt.Printf("  %-10s  ok    already wrapped: %s\n", c.pm, c.path)
+				}
+			} else {
+				stats.reconciled++
+				fmt.Printf("  %-10s  ok    reconciled (already wrapped, registering in state): %s\n", c.pm, c.path)
+				state.add(wrapperEntry{
+					Path:         c.path,
+					OriginalPath: c.path + wrapperSuffix,
+					PM:           c.pm,
+					Source:       c.source,
+				})
 			}
 		case action == wrapperActionSkipDryRun:
 			stats.wouldWrap++
@@ -164,15 +177,15 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 		}
 	}
 
-	if !opts.dryRun && (stats.wrapped > 0 || stats.failed > 0) {
+	if !opts.dryRun && (stats.wrapped > 0 || stats.reconciled > 0 || stats.failed > 0) {
 		if err := saveWrapperState(cfg, state); err != nil {
 			logger.Error().Err(err).Msg("save wrapper state")
 			return exitInternal
 		}
 	}
 
-	fmt.Printf("\nSummary: %d wrapped, %d already-ours, %d would-wrap, %d failed\n",
-		stats.wrapped, stats.alreadyOurs, stats.wouldWrap, stats.failed)
+	fmt.Printf("\nSummary: %d wrapped, %d reconciled, %d already-ours, %d would-wrap, %d failed\n",
+		stats.wrapped, stats.reconciled, stats.alreadyOurs, stats.wouldWrap, stats.failed)
 	if stats.failed > 0 {
 		return exitInternal
 	}
@@ -247,15 +260,9 @@ type wrapperFlags struct {
 	verbose bool
 }
 
-func pluralS(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
-}
-
 type wrapperStats struct {
 	wrapped     int
+	reconciled  int
 	alreadyOurs int
 	wouldWrap   int
 	failed      int
@@ -312,8 +319,11 @@ type wrapCandidate struct {
 
 // discoverWrapCandidates walks the well-known install-dir patterns
 // looking for files whose basename matches one of wrappedManagers. We
-// only return files that exist and are executable, and we only return
-// real files (not already veto symlinks).
+// emit a candidate for any path that is either (a) wrappable
+// (executable real binary, not yet ours) or (b) already a veto wrapper
+// (symlink-to-veto with a `.veto-original` sibling). The latter look
+// like no-ops to applyWrapper but let runInstallWrappers reconcile them
+// into wrappers.json when state has drifted from filesystem reality.
 func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate, error) {
 	candidates := []wrapCandidate{}
 	pmFilter := func(name string) bool {
@@ -322,6 +332,9 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 		}
 		_, ok := opts.only[name]
 		return ok
+	}
+	include := func(p string) bool {
+		return isWrappableTarget(p, vetoPath) || isAlreadyOursWrap(p, vetoPath)
 	}
 
 	// 1) Homebrew prefix dirs. On Apple Silicon, /opt/homebrew/bin; on
@@ -333,7 +346,7 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 				continue
 			}
 			p := filepath.Join(dir, pm)
-			if isWrappableTarget(p, vetoPath) {
+			if include(p) {
 				candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "homebrew"})
 			}
 		}
@@ -348,7 +361,7 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 					continue
 				}
 				p := filepath.Join(binDir, pm)
-				if isWrappableTarget(p, vetoPath) {
+				if include(p) {
 					candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "mise"})
 				}
 			}
@@ -361,7 +374,7 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 					continue
 				}
 				p := filepath.Join(binDir, pm)
-				if isWrappableTarget(p, vetoPath) {
+				if include(p) {
 					candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "asdf"})
 				}
 			}
@@ -373,7 +386,7 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 				continue
 			}
 			p := filepath.Join(bunDir, pm)
-			if isWrappableTarget(p, vetoPath) {
+			if include(p) {
 				candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "bun"})
 			}
 		}
@@ -386,7 +399,7 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 				continue
 			}
 			p := filepath.Join(dir, pm)
-			if isWrappableTarget(p, vetoPath) {
+			if include(p) {
 				candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "user"})
 			}
 		}
@@ -454,6 +467,26 @@ func pointsAtVeto(linkPath, vetoPath string) bool {
 	return resolved == canonicalVeto
 }
 
+// isAlreadyOursWrap reports whether p is an existing veto wrapper:
+// a symlink that resolves to vetoPath AND has a sibling
+// `<p>.veto-original` on disk. Mirrors applyWrapper's "already ours"
+// detection so discovery can include these paths and runInstallWrappers
+// can reconcile them into wrappers.json when the state file has drifted
+// from filesystem reality (cache wipe, install run under a different
+// VETO_CACHE_DIR, manual symlinking). Strict physical-path identity via
+// pointsAtVeto — see that helper for the impostor-rejection rationale.
+func isAlreadyOursWrap(p, vetoPath string) bool {
+	info, err := os.Lstat(p)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	if !pointsAtVeto(p, vetoPath) {
+		return false
+	}
+	_, err = os.Lstat(p + wrapperSuffix)
+	return err == nil
+}
+
 // isWrappableTarget reports whether the path is something we should
 // wrap: it exists, is not a directory, is executable, and is not
 // already our own veto wrapper.
@@ -507,10 +540,27 @@ func applyWrapper(c wrapCandidate, vetoPath string, dryRun, force bool) (wrapAct
 	// physical file as vetoPath AND `<c.path>.veto-original` exists.
 	// Strict physical-path identity (not name substring) — see
 	// pointsAtVeto for rationale.
+	//
+	// With --force the user is asking us to re-link even when nothing
+	// is broken: useful after moving the veto binary, or to recover
+	// confidence that nothing has rewritten the symlink. We delete the
+	// symlink and recreate it pointing at the current vetoPath.
 	if existing, err := os.Lstat(c.path); err == nil && existing.Mode()&os.ModeSymlink != 0 {
 		if pointsAtVeto(c.path, vetoPath) {
 			if _, err := os.Lstat(original); err == nil {
-				return wrapperActionSkipAlreadyOurs, nil
+				if !force {
+					return wrapperActionSkipAlreadyOurs, nil
+				}
+				if dryRun {
+					return wrapperActionSkipDryRun, nil
+				}
+				if err := os.Remove(c.path); err != nil {
+					return wrapperActionWrapped, errors.With(err, "remove existing veto symlink for --force relink").Set("path", c.path)
+				}
+				if err := os.Symlink(vetoPath, c.path); err != nil {
+					return wrapperActionWrapped, errors.With(err, "recreate veto symlink").Set("path", c.path)
+				}
+				return wrapperActionWrapped, nil
 			}
 		}
 	}
@@ -601,6 +651,18 @@ func (s *wrapperState) add(entry wrapperEntry) {
 		}
 	}
 	s.Wrappers = append(s.Wrappers, entry)
+}
+
+// has reports whether state already has a record at the given path.
+// Used by reconciliation to distinguish "already in sync" from
+// "filesystem-only, needs registering".
+func (s *wrapperState) has(path string) bool {
+	for _, w := range s.Wrappers {
+		if w.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 // loadWrapperState reads the state file. Missing file is not an error;

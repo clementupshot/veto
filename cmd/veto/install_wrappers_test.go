@@ -108,6 +108,131 @@ func TestApplyWrapper_RefusesToClobberPartialState(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestApplyWrapper_ForceRelinksAlreadyOurs: with --force, a path that
+// is already a veto symlink (with `.veto-original` sibling intact) gets
+// re-linked rather than silently skipped. This is what the docstring
+// has always promised but the early-return previously short-circuited
+// even when force was set. Useful after moving the veto binary, or as
+// a paranoia button.
+func TestApplyWrapper_ForceRelinksAlreadyOurs(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+	npm := filepath.Join(dir, "npm")
+	require.NoError(t, os.WriteFile(npm, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	// First wrap to get into the already-ours state.
+	_, err := applyWrapper(wrapCandidate{path: npm, pm: "npm", source: "user"}, veto, false, false)
+	require.NoError(t, err)
+
+	// Without --force, a second call short-circuits.
+	action, err := applyWrapper(wrapCandidate{path: npm, pm: "npm", source: "user"}, veto, false, false)
+	require.NoError(t, err)
+	require.Equal(t, wrapperActionSkipAlreadyOurs, action)
+
+	// With --force, the symlink gets recreated.
+	action, err = applyWrapper(wrapCandidate{path: npm, pm: "npm", source: "user"}, veto, false, true)
+	require.NoError(t, err)
+	require.Equal(t, wrapperActionWrapped, action, "--force should recreate the symlink, not skip")
+
+	// Symlink still points at veto.
+	target, err := os.Readlink(npm)
+	require.NoError(t, err)
+	require.Equal(t, veto, target)
+	// `.veto-original` still present — force-relink must not touch it.
+	_, err = os.Lstat(npm + ".veto-original")
+	require.NoError(t, err)
+}
+
+// TestApplyWrapper_ForceRelinksAlreadyOurs_DryRun: --force --dry-run on
+// an already-ours path should report a would-wrap, not silently succeed
+// and not actually touch the filesystem.
+func TestApplyWrapper_ForceRelinksAlreadyOurs_DryRun(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+	npm := filepath.Join(dir, "npm")
+	require.NoError(t, os.WriteFile(npm, []byte("#!/bin/sh\n"), 0o755))
+	_, err := applyWrapper(wrapCandidate{path: npm, pm: "npm", source: "user"}, veto, false, false)
+	require.NoError(t, err)
+
+	before, err := os.Readlink(npm)
+	require.NoError(t, err)
+
+	action, err := applyWrapper(wrapCandidate{path: npm, pm: "npm", source: "user"}, veto, true, true)
+	require.NoError(t, err)
+	require.Equal(t, wrapperActionSkipDryRun, action)
+
+	after, err := os.Readlink(npm)
+	require.NoError(t, err)
+	require.Equal(t, before, after, "dry-run must not change anything on disk")
+}
+
+// TestIsAlreadyOursWrap: truth table for the helper that powers
+// reconciliation. True only when path is a symlink whose physical
+// target is the real veto binary AND a `.veto-original` sibling exists.
+func TestIsAlreadyOursWrap(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+
+	// Case 1: full already-ours state. Symlink + sibling.
+	npm := filepath.Join(dir, "npm")
+	require.NoError(t, os.Symlink(veto, npm))
+	require.NoError(t, os.WriteFile(npm+wrapperSuffix, []byte("real"), 0o755))
+	require.True(t, isAlreadyOursWrap(npm, veto))
+
+	// Case 2: symlink to veto but no sibling — broken half-state, not ours yet.
+	pip := filepath.Join(dir, "pip")
+	require.NoError(t, os.Symlink(veto, pip))
+	require.False(t, isAlreadyOursWrap(pip, veto))
+
+	// Case 3: regular file — not a wrapper.
+	pnpm := filepath.Join(dir, "pnpm")
+	require.NoError(t, os.WriteFile(pnpm, []byte(""), 0o755))
+	require.False(t, isAlreadyOursWrap(pnpm, veto))
+
+	// Case 4: symlink to a same-named impostor with sibling present — must
+	// not be treated as ours. Closes the same impostor hole pointsAtVeto guards.
+	impostor := filepath.Join(dir, "veto-impostor")
+	require.NoError(t, os.WriteFile(impostor, []byte(""), 0o755))
+	uv := filepath.Join(dir, "uv")
+	require.NoError(t, os.Symlink(impostor, uv))
+	require.NoError(t, os.WriteFile(uv+wrapperSuffix, []byte(""), 0o755))
+	require.False(t, isAlreadyOursWrap(uv, veto))
+
+	// Case 5: nonexistent path.
+	require.False(t, isAlreadyOursWrap(filepath.Join(dir, "nope"), veto))
+}
+
+// TestDiscoverWrapCandidates_IncludesAlreadyOurs: discovery must emit
+// candidates for paths that are already-ours so reconciliation can run.
+// Without this, install-wrappers prints "no candidates found" when state
+// has drifted from filesystem reality. We assert by path-membership
+// rather than slice length because discovery also walks real system
+// dirs the test machine may populate.
+func TestDiscoverWrapCandidates_IncludesAlreadyOurs(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+
+	// Plant a fully already-ours npm under a user --dir.
+	pmDir := filepath.Join(dir, "bin")
+	require.NoError(t, os.MkdirAll(pmDir, 0o755))
+	npm := filepath.Join(pmDir, "npm")
+	require.NoError(t, os.Symlink(veto, npm))
+	require.NoError(t, os.WriteFile(npm+wrapperSuffix, []byte("real"), 0o755))
+
+	candidates, err := discoverWrapCandidates(wrapperFlags{dirs: []string{pmDir}, only: map[string]struct{}{"npm": {}}}, veto)
+	require.NoError(t, err)
+
+	paths := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		paths = append(paths, c.path)
+	}
+	require.Contains(t, paths, npm, "already-ours path must surface as a candidate so reconciliation can register it")
+}
+
 // TestApplyWrapper_DryRun_TouchesNothing: --dry-run mode reports what
 // would happen without making filesystem changes.
 func TestApplyWrapper_DryRun_TouchesNothing(t *testing.T) {

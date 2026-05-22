@@ -429,12 +429,60 @@ func execReal(cfg config, name string, args []string) int {
 		fmt.Fprintf(os.Stderr, "veto: cannot find real %s: %v\n", name, err)
 		return exitInternal
 	}
-	if err := syscall.Exec(realPath, append([]string{name}, args...), os.Environ()); err != nil {
+	if err := syscall.Exec(realPath, append([]string{name}, args...), sanitizedEnv(os.Environ())); err != nil {
 		fmt.Fprintf(os.Stderr, "veto: exec %s: %v\n", realPath, err)
 		return exitInternal
 	}
 	// syscall.Exec doesn't return on success.
 	return exitInternal
+}
+
+// sanitizedEnv returns env with veto-internal control variables removed,
+// so the child process veto is about to exec into doesn't re-trigger the
+// veto-side rewrites that brought us here.
+//
+// Why this matters (B6): without wrappers (Layer 4) installed, the basename
+// of realPath is `npm` (or `python`, etc.). With the interposer (Layer 3)
+// loaded via DYLD_INSERT_LIBRARIES / LD_PRELOAD, that basename matches
+// PM_NAMES; the interposer's is_risky() reads VETO_PATH and, finding it
+// set, rewrites the exec to call veto again — which re-enters this
+// function and loops until the user kills it. Same hazard applies to the
+// `python -m <pm>` shim path landed in B2: re-exec'ing python with
+// VETO_PATH still set would let the interposer re-rewrite the call.
+//
+// We strip VETO_PATH only. The interposer is still loaded in the child
+// (DYLD_INSERT_LIBRARIES is preserved), but every interposed function
+// short-circuits to the real syscall when VETO_PATH is empty (see
+// veto_interpose.c). That breaks the recursion at the immediate child
+// without invalidating Layer 3 for sibling processes in the same shell.
+//
+// Tradeoff: Layer 3 no longer propagates into grandchildren of the
+// exec'd PM (e.g. an npm postinstall that spawns another `pip install`).
+// Those grandchildren still hit Layer 2 (PATH shims) and Layer 4
+// (real-binary wrappers) when installed, so they're not unprotected —
+// just not covered by Layer 3. Keeping Layer 3 alive for them would
+// require a sentinel like VETO_ALREADY_GATED, but that sentinel would
+// itself propagate to grandchildren and disable the defense for the
+// nested PM calls we DO want to gate. Stripping VETO_PATH is the
+// surgical choice.
+//
+// VETO_PYTHON_M_ORIGINAL is also stripped as belt-and-suspenders:
+// execPMOrPythonM Unsetenv's it before calling here, but a stale value
+// in the child env (say, from a future refactor that forgets the
+// Unsetenv) would cause the same double-rewrite the B2 commit aimed to
+// prevent. Cheap to strip; closes the door.
+func sanitizedEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "VETO_PATH=") {
+			continue
+		}
+		if strings.HasPrefix(kv, pythonDashMEnvOriginal+"=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // wrapperRegisteredFunc loads wrappers.json once and returns a predicate

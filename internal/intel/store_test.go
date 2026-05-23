@@ -401,6 +401,108 @@ func TestStoreLookupPyPINameNormalization(t *testing.T) {
 	require.True(t, v.Flagged(), "unversioned PyPI lookup must also normalize")
 }
 
+// TestStoreLookupBoundedRangeRefusesInsideAllowsOutside: a ranged
+// advisory `{introduced: 1.1.5, last_affected: 1.1.6}` must refuse
+// queries inside the interval (1.1.5, 1.1.6) AND allow queries
+// outside it (1.1.4, 1.1.7). This is the MAL-2022-466 / foo@3.0.0
+// class of false positive: the pre-range-aware emitter would refuse
+// every version of the name.
+func TestStoreLookupBoundedRangeRefusesInsideAllowsOutside(t *testing.T) {
+	logger := zerolog.Nop()
+	rng := intel.VersionRange{Introduced: "1.1.5", LastAffected: "1.1.6"}
+	src := &fakeSource{
+		id: "alpha",
+		per: map[intel.Ecosystem][]intel.MalwareReport{
+			intel.EcosystemNPM: {
+				{
+					PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "react"},
+					SourceID:   "alpha",
+					Reason:     "ranged",
+					Range:      &rng,
+				},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+
+	t.Run("inside range refuses 1.1.5", func(t *testing.T) {
+		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "react", Version: "1.1.5"})
+		require.True(t, v.Flagged())
+	})
+	t.Run("inside range refuses 1.1.6", func(t *testing.T) {
+		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "react", Version: "1.1.6"})
+		require.True(t, v.Flagged())
+	})
+	t.Run("below range allows 1.1.4", func(t *testing.T) {
+		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "react", Version: "1.1.4"})
+		require.False(t, v.Flagged(), "1.1.4 is below the range [1.1.5, 1.1.6] and must NOT be refused")
+	})
+	t.Run("above range allows 1.1.7", func(t *testing.T) {
+		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "react", Version: "1.1.7"})
+		require.False(t, v.Flagged(), "1.1.7 is above the range [1.1.5, 1.1.6] and must NOT be refused")
+	})
+}
+
+// TestStoreLookupUnboundedRangeRefusesEveryVersion: a ranged advisory
+// `{introduced: 0}` (no upper bound) is the post-rewrite shape for
+// the very common "all versions are bad" case. Every concrete-version
+// query against the name must still refuse — regression for the
+// post-183f807 behavior.
+func TestStoreLookupUnboundedRangeRefusesEveryVersion(t *testing.T) {
+	logger := zerolog.Nop()
+	rng := intel.VersionRange{Introduced: "0"}
+	src := &fakeSource{
+		id: "alpha",
+		per: map[intel.Ecosystem][]intel.MalwareReport{
+			intel.EcosystemNPM: {
+				{
+					PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "always-bad"},
+					SourceID:   "alpha",
+					Reason:     "unbounded",
+					Range:      &rng,
+				},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+
+	for _, v := range []string{"0.0.1", "1.0.0", "2.0.0", "99.99.99"} {
+		verdict := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "always-bad", Version: v})
+		require.True(t, verdict.Flagged(), "unbounded range must refuse always-bad@%s", v)
+	}
+}
+
+// TestStoreLookupPyPIUnboundedRangeRefuses: PyPI bounded-range matching
+// isn't implemented, but the IsUnbounded short-circuit means
+// `{introduced: 0}` advisories (the only shape today's PyPI feeds
+// produce) still refuse every version without invoking PEP 440.
+func TestStoreLookupPyPIUnboundedRangeRefuses(t *testing.T) {
+	logger := zerolog.Nop()
+	rng := intel.VersionRange{Introduced: "0"}
+	src := &fakeSource{
+		id: "alpha",
+		per: map[intel.Ecosystem][]intel.MalwareReport{
+			intel.EcosystemPyPI: {
+				{
+					PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-py"},
+					SourceID:   "alpha",
+					Reason:     "unbounded pypi",
+					Range:      &rng,
+				},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+
+	for _, v := range []string{"1.0.0", "2.0.0", "9.9.9"} {
+		verdict := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-py", Version: v})
+		require.True(t, verdict.Flagged(), "unbounded PyPI range must refuse evil-py@%s without PEP 440", v)
+	}
+}
+
 // TestStoreLookupNPMNameNormalization: npm names are case-insensitive at
 // the registry. A feed publishing a capitalized name (or a user typing
 // one) must still match. Defensive ToLower at both boundaries.

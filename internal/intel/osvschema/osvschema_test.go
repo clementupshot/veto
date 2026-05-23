@@ -75,7 +75,9 @@ func TestReportsAllVersions(t *testing.T) {
 	require.Equal(t, "openssf", reports[0].SourceID)
 	require.Equal(t, intel.EcosystemNPM, reports[0].Ecosystem)
 	require.Equal(t, "--hiljson", reports[0].Name)
-	require.Empty(t, reports[0].Version, "all-versions advisory should produce empty Version")
+	require.Empty(t, reports[0].Version, "ranged reports must leave Version empty; the interval is on Range")
+	require.NotNil(t, reports[0].Range, "all-versions advisory now carries an unbounded Range")
+	require.True(t, reports[0].Range.IsUnbounded())
 	require.Equal(t, "MAL-2022-2", reports[0].AdvisoryID)
 }
 
@@ -134,15 +136,165 @@ func TestReportsSkipsUnknownEcosystem(t *testing.T) {
 	require.Empty(t, reports)
 }
 
-func TestReportsBoundedRangeEmitsAnyVersionReport(t *testing.T) {
-	// "introduced: 0, fixed: 2.0.0" means versions <2.0.0 are bad. The store
-	// doesn't model ranges, so we conservatively emit a name-only ("any
-	// version") report — better to over-block a clean pin than to silently
-	// allow a flagged unpinned install.
+func TestReportsBoundedRangeEmitsRangeReport(t *testing.T) {
+	// "introduced: 0, fixed: 2.0.0" means versions <2.0.0 are bad.
+	// Range-aware emission attaches the interval to the report so
+	// Lookup can test membership at query time. Version stays empty
+	// (the report applies to a set of versions, not one specifically).
 	adv, err := osvschema.Parse([]byte(advisoryRangeWithFix))
 	require.NoError(t, err)
 	reports := osvschema.Reports(adv, "osv")
 	require.Len(t, reports, 1)
-	require.Empty(t, reports[0].Version, "bounded ranges should still emit any-version report for conservative blocking")
-	require.Equal(t, "later-good", reports[0].Name)
+	r := reports[0]
+	require.Empty(t, r.Version, "ranged reports must leave Version empty; the interval is on Range")
+	require.Equal(t, "later-good", r.Name)
+	require.NotNil(t, r.Range, "bounded range must attach a Range")
+	require.Equal(t, "0", r.Range.Introduced)
+	require.Equal(t, "2.0.0", r.Range.Fixed)
+	require.Empty(t, r.Range.LastAffected)
+	require.False(t, r.Range.IsUnbounded(), "bounded range must not report IsUnbounded")
+}
+
+const advisoryLastAffected = `{
+  "id": "MAL-2024-9",
+  "summary": "last_affected upper bound",
+  "affected": [
+    {
+      "package": {"ecosystem": "npm", "name": "incl-upper"},
+      "ranges": [
+        {"type": "SEMVER", "events": [{"introduced": "1.1.5"}, {"last_affected": "1.1.6"}]}
+      ]
+    }
+  ]
+}`
+
+func TestReportsLastAffectedRange(t *testing.T) {
+	adv, err := osvschema.Parse([]byte(advisoryLastAffected))
+	require.NoError(t, err)
+	reports := osvschema.Reports(adv, "osv")
+	require.Len(t, reports, 1)
+	require.NotNil(t, reports[0].Range)
+	require.Equal(t, "1.1.5", reports[0].Range.Introduced)
+	require.Empty(t, reports[0].Range.Fixed)
+	require.Equal(t, "1.1.6", reports[0].Range.LastAffected)
+}
+
+const advisoryMultipleEventsPerRange = `{
+  "id": "MAL-2024-10",
+  "summary": "two intervals in one range",
+  "affected": [
+    {
+      "package": {"ecosystem": "npm", "name": "twin"},
+      "ranges": [
+        {"type": "SEMVER", "events": [
+          {"introduced": "1.161.12"}, {"fixed": "1.161.13"},
+          {"introduced": "1.161.9"},  {"fixed": "1.161.13"}
+        ]}
+      ]
+    }
+  ]
+}`
+
+func TestReportsMultipleEventsPerRange(t *testing.T) {
+	// One OSV range whose event list interleaves two [introduced,
+	// fixed] pairs must emit TWO interval reports — the dedup key
+	// includes the range bounds so each interval survives into the
+	// index.
+	adv, err := osvschema.Parse([]byte(advisoryMultipleEventsPerRange))
+	require.NoError(t, err)
+	reports := osvschema.Reports(adv, "osv")
+	require.Len(t, reports, 2)
+	require.Equal(t, "1.161.12", reports[0].Range.Introduced)
+	require.Equal(t, "1.161.13", reports[0].Range.Fixed)
+	require.Equal(t, "1.161.9", reports[1].Range.Introduced)
+	require.Equal(t, "1.161.13", reports[1].Range.Fixed)
+}
+
+const advisoryMultipleRangesPerAffected = `{
+  "id": "MAL-2024-11",
+  "summary": "two ranges per affected entry",
+  "affected": [
+    {
+      "package": {"ecosystem": "npm", "name": "double"},
+      "ranges": [
+        {"type": "SEMVER", "events": [{"introduced": "0"}]},
+        {"type": "SEMVER", "events": [{"introduced": "1.0.4"}]}
+      ]
+    }
+  ]
+}`
+
+func TestReportsMultipleRangesPerAffected(t *testing.T) {
+	adv, err := osvschema.Parse([]byte(advisoryMultipleRangesPerAffected))
+	require.NoError(t, err)
+	reports := osvschema.Reports(adv, "osv")
+	require.Len(t, reports, 2)
+	require.True(t, reports[0].Range.IsUnbounded())
+	require.Equal(t, "1.0.4", reports[1].Range.Introduced)
+}
+
+func TestReportsUnboundedRangeIsUnbounded(t *testing.T) {
+	adv, err := osvschema.Parse([]byte(advisoryAllVersions))
+	require.NoError(t, err)
+	reports := osvschema.Reports(adv, "openssf")
+	require.Len(t, reports, 1)
+	require.NotNil(t, reports[0].Range, "unbounded range must still attach a Range so Lookup's path is uniform")
+	require.True(t, reports[0].Range.IsUnbounded(), "introduced=0 with no upper bound is the unbounded shape")
+}
+
+const advisoryMixedVersionsAndRanges = `{
+  "id": "MAL-2024-12",
+  "summary": "explicit versions plus a range",
+  "affected": [
+    {
+      "package": {"ecosystem": "npm", "name": "mixed"},
+      "versions": ["0.0.1", "0.0.2"],
+      "ranges": [
+        {"type": "SEMVER", "events": [{"introduced": "1.0.0"}, {"fixed": "2.0.0"}]}
+      ]
+    }
+  ]
+}`
+
+func TestReportsMixedVersionsAndRanges(t *testing.T) {
+	// Mixed advisories must emit BOTH per-version reports and per-range
+	// reports — the pre-rewrite emitter would skip the range when an
+	// explicit versions list was present, dropping coverage of versions
+	// not in the explicit list.
+	adv, err := osvschema.Parse([]byte(advisoryMixedVersionsAndRanges))
+	require.NoError(t, err)
+	reports := osvschema.Reports(adv, "osv")
+	require.Len(t, reports, 3)
+	require.Equal(t, "0.0.1", reports[0].Version)
+	require.Nil(t, reports[0].Range)
+	require.Equal(t, "0.0.2", reports[1].Version)
+	require.Nil(t, reports[1].Range)
+	require.Empty(t, reports[2].Version)
+	require.NotNil(t, reports[2].Range)
+	require.Equal(t, "1.0.0", reports[2].Range.Introduced)
+	require.Equal(t, "2.0.0", reports[2].Range.Fixed)
+}
+
+const advisoryGitRange = `{
+  "id": "MAL-2024-13",
+  "summary": "GIT range — should be skipped",
+  "affected": [
+    {
+      "package": {"ecosystem": "npm", "name": "git-only"},
+      "ranges": [
+        {"type": "GIT", "events": [{"introduced": "abc123"}, {"fixed": "def456"}]}
+      ]
+    }
+  ]
+}`
+
+func TestReportsSkipsGitRanges(t *testing.T) {
+	// GIT ranges are commit-SHA intervals — they don't map onto
+	// (eco, name, version) lookups, so emitting them would either
+	// create reports that never match (dead weight) or, worse, match
+	// incorrectly. Skip the range entirely.
+	adv, err := osvschema.Parse([]byte(advisoryGitRange))
+	require.NoError(t, err)
+	reports := osvschema.Reports(adv, "osv")
+	require.Empty(t, reports, "GIT ranges produce no reports")
 }

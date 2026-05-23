@@ -96,11 +96,20 @@ type sourceEcoKey struct {
 // A struct (rather than a concatenated string) avoids the theoretical
 // collision where any field contains the separator character, and the
 // extra type-safety makes the dedup intent obvious at the call site.
+//
+// Range bounds are included so a single advisory with multiple
+// distinct intervals (e.g. OSV ranges that decompose into two
+// `[introduced, fixed]` pairs) doesn't collapse to one report — each
+// interval expresses a different version constraint and needs to
+// survive into the index.
 type dedupKey struct {
-	SourceID  string
-	Ecosystem Ecosystem
-	Name      string
-	Version   string
+	SourceID     string
+	Ecosystem    Ecosystem
+	Name         string
+	Version      string
+	Introduced   string
+	Fixed        string
+	LastAffected string
 }
 
 type memStore struct {
@@ -124,31 +133,30 @@ var _ Store = (*memStore)(nil)
 //
 //   - ref.Version == "":   unpinned install. The caller didn't pin, so any
 //     flagged version against this name is a hit. Returns every byName entry.
-//   - ref.Version != "":   pinned install. Refuses when EITHER an exact
-//     (name, version) match exists, OR the store holds a byName entry with
-//     an empty recorded Version. An empty-version entry is the parser's way
-//     of saying "this finding applies to ALL versions" — it's emitted for
-//     OSV/OpenSSF/PyPA's unbounded `introduced: 0` ranges (and, conservatively,
-//     for bounded ranges where range-matching isn't implemented). A byName
-//     entry with a concrete-but-different version is scoped to that version
-//     only and does NOT apply to the current query.
+//   - ref.Version != "":   pinned install. Refuses when ANY of:
+//   - an exact (name, version) match exists in byVersion, OR
+//   - a byName entry carries a Range that contains ref.Version
+//     (under the per-ecosystem comparator in range.go), OR
+//   - a byName entry has both Range==nil and Version=="" — the legacy
+//     "all versions, no interval" shape. Post-osvschema-rewrite OSV
+//     feeds emit unbounded ranges instead, but non-OSV sources (e.g.
+//     Aikido, which doesn't model ranges) still produce this shape
+//     and the gate must keep refusing those.
 //
-// The earlier policy was "any byName hit refuses any query for that name,"
-// based on the assumption that malware-feed entries assert package-level
-// badness. That assumption breaks badly for the common case of a single
-// rogue release of an otherwise-legitimate name (e.g. MAL-2024-2929 named
-// react@1.0.0 and react@35.0.0 — clearly typosquats — and the policy
-// refused every Meta-published `react` install, even after the advisory
-// itself was withdrawn). Trusting the recorded version IS what the
-// upstream advisories actually claim; we now trust it.
+// A byName entry with a concrete-but-different Version is scoped to
+// that specific version and does NOT apply to the current query. This
+// is the version-aware semantics introduced in commit 183f807 that
+// fixed the react@1.0.0/35.0.0 false positive.
 //
-// What remains over-blocking by design: a bounded range advisory
-// (`introduced: 1.0.0, fixed: 2.0.0`) is emitted by osvschema.Reports as
-// a single empty-version report — that report refuses every version,
-// including post-fix ones. Range-aware lookup is future work; today the
-// conservative refusal is the right safety posture, but it lives at one
-// well-named boundary (the empty-version emission) instead of being
-// diffused across the entire store as it was before.
+// What changed in the range-aware layer: bounded ranges
+// (`introduced: 1.0.0, fixed: 2.0.0`) used to be emitted by
+// osvschema.Reports as a single empty-Version, empty-Range report,
+// which refused every version of the name — including post-fix ones.
+// Now osvschema emits one report per interval with the interval
+// attached as Range, and Lookup tests interval membership at query
+// time. This closes the MAL-2022-466 / foo@3.0.0 false positive where
+// a `{introduced:"0", fixed:"2.0.3"}` advisory was refusing every
+// install of `foo` even though 3.0.0 is outside the affected range.
 func (s *memStore) Lookup(ref PackageRef) Verdict {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -172,13 +180,25 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 	if reports, ok := s.byVersion[versionKey{ref.Ecosystem, lookupName, ref.Version}]; ok {
 		verdict.Reports = append(verdict.Reports, reports...)
 	}
-	// "All versions" findings — byName entries the parser emitted with
-	// an empty Version. These apply regardless of which version was
-	// requested. Concrete-version byName entries that don't match
-	// ref.Version are scoped to their specific version and are skipped.
+	// Range-bearing and legacy "all versions" findings. byName holds
+	// every report (pinned, ranged, and the rare empty-Version-empty-Range
+	// case from non-OSV sources). We pick out the entries that apply to
+	// ref.Version here:
+	//   - r.Range != nil: defer to the per-ecosystem comparator. An
+	//     unbounded range short-circuits to true; a bounded range
+	//     calls into the semver parser.
+	//   - r.Range == nil && r.Version == "": legacy any-version shape.
+	//   - r.Range == nil && r.Version != "": concrete-but-different
+	//     version — already handled by the byVersion lookup above and
+	//     skipped here so it doesn't double-count or false-positive.
 	if reports, ok := s.byName[nameKey{ref.Ecosystem, lookupName}]; ok {
 		for _, r := range reports {
-			if r.Version == "" {
+			switch {
+			case r.Range != nil:
+				if InRange(ref.Ecosystem, ref.Version, *r.Range) {
+					verdict.Reports = append(verdict.Reports, r)
+				}
+			case r.Version == "":
 				verdict.Reports = append(verdict.Reports, r)
 			}
 		}
@@ -416,6 +436,11 @@ func buildIndices(resolved map[sourceEcoKey][]MalwareReport) (
 				Ecosystem: report.Ecosystem,
 				Name:      indexName,
 				Version:   report.Version,
+			}
+			if report.Range != nil {
+				k.Introduced = report.Range.Introduced
+				k.Fixed = report.Range.Fixed
+				k.LastAffected = report.Range.LastAffected
 			}
 			if _, ok := seen[k]; ok {
 				continue

@@ -58,6 +58,15 @@ type MalwareReport struct {
 	// PublishedAt is when the source first flagged this finding. Zero value
 	// means the source did not record this.
 	PublishedAt time.Time
+
+	// Range, when non-nil, constrains this report to versions matching the
+	// interval under the ecosystem's comparator. Used by sources that emit
+	// bounded advisories (e.g. OSV `{introduced: "0", fixed: "2.0.3"}`):
+	// the report's PackageRef.Version is left empty and the interval lives
+	// here so Lookup can test membership. nil means "no range constraint" —
+	// PackageRef.Version is then the sole version selector (or "all
+	// versions" when both Range and Version are empty).
+	Range *VersionRange
 }
 
 // Source fetches malicious-package intelligence for one upstream feed.

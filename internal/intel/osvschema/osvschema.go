@@ -18,8 +18,11 @@
 //	}
 //
 // One advisory may name multiple affected packages or version ranges; we emit
-// one MalwareReport per (package, version) tuple, plus one with empty version
-// when only an "introduced: 0" range is present (i.e. "all versions are bad").
+// one MalwareReport per (package, version) tuple from the explicit `versions`
+// list, and one MalwareReport per parsed range interval (with the range
+// attached as the report's Range field and Version left empty). The Store's
+// Lookup consults the per-ecosystem version comparator to test interval
+// membership at query time.
 package osvschema
 
 import (
@@ -124,7 +127,6 @@ func Reports(adv Advisory, sourceID string) []intel.MalwareReport {
 		}
 
 		// Explicit versions list — one report per version.
-		emitted := 0
 		for _, v := range aff.Versions {
 			if v == "" {
 				continue
@@ -136,40 +138,77 @@ func Reports(adv Advisory, sourceID string) []intel.MalwareReport {
 				AdvisoryID:  adv.ID,
 				PublishedAt: adv.Published,
 			})
-			emitted++
 		}
 
-		// If no explicit versions list, look for any "introduced" event in
-		// any range and emit a name-only report. We over-block on purpose:
-		// `pip install foo==3.0.0` will refuse even if 3.0.0 is post-fix,
-		// because the store does exact-version matching and we don't model
-		// ranges. This matches the project's "security over convenience"
-		// stance; range-aware lookup is future work.
-		if emitted == 0 && hasIntroducedEvent(aff.Ranges) {
-			out = append(out, intel.MalwareReport{
-				PackageRef:  intel.PackageRef{Ecosystem: eco, Name: aff.Package.Name},
-				SourceID:    sourceID,
-				Reason:      reason,
-				AdvisoryID:  adv.ID,
-				PublishedAt: adv.Published,
-			})
+		// Ranges — emit one report per parsed interval with Range set and
+		// Version empty. Store.Lookup tests interval membership at query
+		// time via the per-ecosystem comparator; an unbounded interval
+		// (`{introduced: "0"}` with no upper bound) short-circuits the
+		// comparator and refuses every version, which is what the
+		// pre-range-aware emitter was doing too.
+		for _, r := range aff.Ranges {
+			// GIT ranges are commit-SHA intervals and don't map onto the
+			// (eco, name, version) lookup model — skip rather than mint
+			// an entry that can never match a sensible install ref.
+			if strings.EqualFold(r.Type, "GIT") {
+				continue
+			}
+			for _, vr := range parseRangeEvents(r.Events) {
+				out = append(out, intel.MalwareReport{
+					PackageRef:  intel.PackageRef{Ecosystem: eco, Name: aff.Package.Name},
+					SourceID:    sourceID,
+					Reason:      reason,
+					AdvisoryID:  adv.ID,
+					PublishedAt: adv.Published,
+					Range:       &vr,
+				})
+			}
 		}
 	}
 	return out
 }
 
-// hasIntroducedEvent reports whether any of the ranges names an introduction
-// point. Bounded ranges (with a fix) still produce a hit so unversioned
-// installs of any version in the family are refused.
-func hasIntroducedEvent(ranges []Range) bool {
-	for _, r := range ranges {
-		for _, e := range r.Events {
-			if e.Introduced != "" {
-				return true
-			}
+// parseRangeEvents walks an OSV range's event list and reconstructs the
+// implied intervals. The OSV spec encodes intervals as an ordered
+// sequence: an `introduced` event opens an interval, the next `fixed`
+// (exclusive upper bound) or `last_affected` (inclusive upper bound)
+// event closes it, and a subsequent `introduced` opens the next one.
+//
+// Real-world feeds occasionally emit unusual shapes — multiple
+// `introduced` events without an interleaved closer, a closer with no
+// preceding `introduced`. We emit a best-effort interval per
+// `introduced` (or per stray closer) rather than silently dropping
+// data: a malformed feed should over-block, not under-block.
+func parseRangeEvents(events []Event) []intel.VersionRange {
+	var out []intel.VersionRange
+	cur := intel.VersionRange{}
+	have := false
+	flush := func() {
+		if have {
+			out = append(out, cur)
+		}
+		cur = intel.VersionRange{}
+		have = false
+	}
+	for _, e := range events {
+		switch {
+		case e.Introduced != "":
+			// New interval opens. Flush whatever was in progress.
+			flush()
+			cur.Introduced = e.Introduced
+			have = true
+		case e.Fixed != "":
+			cur.Fixed = e.Fixed
+			have = true
+			flush()
+		case e.LastAffected != "":
+			cur.LastAffected = e.LastAffected
+			have = true
+			flush()
 		}
 	}
-	return false
+	flush()
+	return out
 }
 
 // normalizeEcosystem maps OSV's ecosystem strings into the intel taxonomy.

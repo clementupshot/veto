@@ -880,7 +880,10 @@ Layer 4 — real-binary wrappers (catches absolute-path invocations):
 
 Supported package managers:
   npm, pnpm, yarn, bun, pip, pip3, uv, poetry, pdm,
-  npx, pnpx, bunx, uvx, pipx
+  npx, pnpx, bunx, uvx, pipx,
+  python, python3 (only the `+"`python -m {pip,uv,pipx,poetry,pdm}`"+` form
+                   is gated; every other invocation fast-paths to
+                   real python with no intel-store touch)
 
 Environment:
   VETO_CACHE_DIR     override cache location (default: $XDG_CACHE_HOME/veto)

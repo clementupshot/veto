@@ -35,6 +35,7 @@ import (
 
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/intel/osvschema"
+	"github.com/brynbellomy/veto/internal/intel/sources/internal/fsutil"
 )
 
 const (
@@ -215,11 +216,11 @@ func (s *Source) fetchWithCacheBounded(ctx context.Context, payloadPath, etagPat
 		return nil, errors.WithNew("pypa tarball exceeds size limit").
 			Set("limit_bytes", maxFeedBytes).Set("url", s.url)
 	}
-	if err := writeAtomic(payloadPath, body); err != nil {
+	if err := fsutil.WriteAtomic(payloadPath, body); err != nil {
 		return nil, errors.With(err, "cache payload")
 	}
 	if etag := resp.Header.Get("ETag"); etag != "" {
-		if err := writeAtomic(etagPath, []byte(etag)); err != nil {
+		if err := fsutil.WriteAtomic(etagPath, []byte(etag)); err != nil {
 			s.logger.Warn().Err(err).Msg("write etag")
 		}
 	}
@@ -308,24 +309,5 @@ func parseYAMLAdvisory(body []byte) (osvschema.Advisory, error) {
 		return osvschema.Advisory{}, errors.With(err, "yaml unmarshal")
 	}
 	return adv, nil
-}
-
-// writeAtomic mirrors the helper in other sources: tmp + rename, so a
-// crash mid-write leaves either the old file or the new one.
-func writeAtomic(dst string, payload []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp-")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.Write(payload); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, dst)
 }
 

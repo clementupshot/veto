@@ -23,6 +23,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/brynbellomy/veto/internal/intel"
+	"github.com/brynbellomy/veto/internal/intel/sources/internal/fsutil"
 )
 
 const (
@@ -231,11 +232,11 @@ func (s *Source) fetchWithCacheBounded(ctx context.Context, url, payloadPath, et
 			Set("url", url)
 	}
 
-	if err := writeAtomic(payloadPath, body); err != nil {
+	if err := fsutil.WriteAtomic(payloadPath, body); err != nil {
 		return nil, errors.With(err, "cache payload")
 	}
 	if etag := resp.Header.Get("ETag"); etag != "" {
-		if err := writeAtomic(etagPath, []byte(etag)); err != nil {
+		if err := fsutil.WriteAtomic(etagPath, []byte(etag)); err != nil {
 			// Etag is an optimization — log and continue rather than failing.
 			s.logger.Warn().Err(err).Msg("write etag")
 		}
@@ -286,27 +287,3 @@ func parsePayload(eco intel.Ecosystem, payload []byte) ([]intel.MalwareReport, e
 	return out, nil
 }
 
-// writeAtomic writes payload to dst by renaming a sibling temp file, so a
-// crash mid-write leaves either the old file or the new file but never a
-// truncated one.
-func writeAtomic(dst string, payload []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp-")
-	if err != nil {
-		return errors.With(err, "create temp")
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(payload); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return errors.With(err, "write temp")
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return errors.With(err, "close temp")
-	}
-	if err := os.Rename(tmpPath, dst); err != nil {
-		os.Remove(tmpPath)
-		return errors.With(err, "rename temp")
-	}
-	return nil
-}

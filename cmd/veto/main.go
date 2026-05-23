@@ -322,7 +322,7 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 		policy.AllowOpaqueRemote = true
 		logger.Warn().Msg("VETO_ALLOW_OPAQUE=1 set; opaque remote specs (URL/git/tarball) will NOT be refused")
 	}
-	g := gate.New(store, policy).WithLogger(logger)
+	g := gate.New(store, policy, logger)
 	decision := g.Evaluate(installs, manifestRefs...)
 
 	switch decision.Outcome {

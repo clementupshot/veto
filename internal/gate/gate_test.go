@@ -36,14 +36,14 @@ func buildStore(t *testing.T, reports ...intel.MalwareReport) intel.Store {
 
 func TestEvaluateNilInstallsPassesThrough(t *testing.T) {
 	store := buildStore(t)
-	g := gate.New(store, gate.DefaultPolicy())
+	g := gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
 	dec := g.Evaluate(nil)
 	require.Equal(t, gate.OutcomePassThrough, dec.Outcome)
 }
 
 func TestEvaluateCleanInstallsAllow(t *testing.T) {
 	store := buildStore(t)
-	g := gate.New(store, gate.DefaultPolicy())
+	g := gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{
 		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "lodash"}},
 	})
@@ -58,7 +58,7 @@ func TestEvaluateMaliciousInstallRefuses(t *testing.T) {
 			SourceID:   "fake",
 		},
 	)
-	g := gate.New(store, gate.DefaultPolicy())
+	g := gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{
 		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil", Version: "1.0.0"}},
 		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "innocent"}},
@@ -70,7 +70,7 @@ func TestEvaluateMaliciousInstallRefuses(t *testing.T) {
 
 func TestEvaluateLocalPathInstallAllowedUnderDefaultPolicy(t *testing.T) {
 	store := buildStore(t)
-	g := gate.New(store, gate.DefaultPolicy())
+	g := gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{
 		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local"}, LocalPath: true},
 	})
@@ -85,7 +85,7 @@ func TestEvaluateLocalPathInstallAllowedUnderDefaultPolicy(t *testing.T) {
 // https://evil.com/foo.tgz` through unchecked.
 func TestEvaluateOpaqueRemoteRefusedByDefault(t *testing.T) {
 	store := buildStore(t)
-	g := gate.New(store, gate.DefaultPolicy())
+	g := gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{
 		{
 			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "https://evil.com/x.tgz"},
@@ -106,7 +106,7 @@ func TestEvaluateOpaqueRemoteAllowedWithPolicy(t *testing.T) {
 	store := buildStore(t)
 	policy := gate.DefaultPolicy()
 	policy.AllowOpaqueRemote = true
-	g := gate.New(store, policy)
+	g := gate.New(store, policy, zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{
 		{
 			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "https://example.com/x.tgz"},
@@ -126,7 +126,7 @@ func TestEvaluateLocalPathRefusedUnderStrictPolicy(t *testing.T) {
 	store := buildStore(t)
 	policy := gate.DefaultPolicy()
 	policy.AllowLocalPath = false
-	g := gate.New(store, policy)
+	g := gate.New(store, policy, zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{
 		{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "./local"}, LocalPath: true},
 	})
@@ -139,7 +139,7 @@ func TestEvaluateEmptyInstallsAllow(t *testing.T) {
 	// An install verb with no specs (e.g. `npm install` from package.json)
 	// is currently allowed; manifest expansion is a documented @@TODO.
 	store := buildStore(t)
-	g := gate.New(store, gate.DefaultPolicy())
+	g := gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{})
 	require.Equal(t, gate.OutcomeAllow, dec.Outcome)
 }
@@ -172,7 +172,7 @@ func TestEvaluateManifestExpansionRefusesOnFlaggedInstall(t *testing.T) {
 	}}
 	policy := gate.DefaultPolicy()
 	policy.ManifestExpander = exp
-	g := gate.New(store, policy)
+	g := gate.New(store, policy, zerolog.Nop())
 
 	dec := g.Evaluate(nil, packagemanager.ManifestRef{Path: "requirements.txt", Kind: packagemanager.ManifestKindRequirements})
 	require.Equal(t, gate.OutcomeRefuse, dec.Outcome)
@@ -194,7 +194,7 @@ func TestEvaluateManifestExpansionGatesAlongsideArgvInstalls(t *testing.T) {
 	}}
 	policy := gate.DefaultPolicy()
 	policy.ManifestExpander = exp
-	g := gate.New(store, policy)
+	g := gate.New(store, policy, zerolog.Nop())
 
 	dec := g.Evaluate(
 		[]packagemanager.Install{
@@ -216,7 +216,7 @@ func TestEvaluateManifestExpanderErrorAbortsFailClosed(t *testing.T) {
 	exp := &fakeExpander{err: sentinel}
 	policy := gate.DefaultPolicy()
 	policy.ManifestExpander = exp
-	g := gate.New(store, policy)
+	g := gate.New(store, policy, zerolog.Nop())
 
 	dec := g.Evaluate(
 		[]packagemanager.Install{

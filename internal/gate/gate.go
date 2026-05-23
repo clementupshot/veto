@@ -131,8 +131,11 @@ type Gate struct {
 }
 
 // New builds a Gate. A nil-valued Policy.ManifestExpander is replaced with
-// NopExpander so call sites stay nil-free.
-func New(store intel.Store, policy Policy) *Gate {
+// NopExpander so call sites stay nil-free. The logger is used to surface
+// manifest-expansion failures (non-fatal — missing or unreadable
+// requirements files don't refuse the install on their own); pass
+// zerolog.Nop() if the caller has no logger in scope.
+func New(store intel.Store, policy Policy, logger zerolog.Logger) *Gate {
 	if policy.ManifestExpander == nil {
 		policy.ManifestExpander = NopExpander{}
 	}
@@ -140,18 +143,8 @@ func New(store intel.Store, policy Policy) *Gate {
 		store:    store,
 		policy:   policy,
 		expander: policy.ManifestExpander,
-		logger:   zerolog.Nop(),
+		logger:   logger,
 	}
-}
-
-// WithLogger returns a copy of g configured with the given logger. The logger
-// is used to surface manifest-expansion failures, which are non-fatal —
-// missing or unreadable requirements files don't refuse the install on their
-// own.
-func (g *Gate) WithLogger(logger zerolog.Logger) *Gate {
-	copy := *g
-	copy.logger = logger
-	return &copy
 }
 
 // Evaluate returns the decision for the given installs. A nil installs

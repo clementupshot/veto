@@ -88,6 +88,28 @@ func TestStoreLookup(t *testing.T) {
 		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil", Version: "1.0.0"})
 		require.False(t, v.Flagged())
 	})
+
+	t.Run("concrete-version advisory does NOT refuse a different version of the same name", func(t *testing.T) {
+		// The store holds reports for evil@1.0.0 (both sources). A query
+		// for evil@2.0.0 must NOT pick up those entries — they're scoped
+		// to a specific version. This is the version-aware Lookup
+		// semantics: byName entries with concrete-but-different versions
+		// are skipped. Old policy would have refused; closing the
+		// react@1.0.0/35.0.0 vs react@18.2.0 false-positive class.
+		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "evil", Version: "2.0.0"})
+		require.False(t, v.Flagged(), "evil@2.0.0 must be clean — only evil@1.0.0 is flagged")
+		require.Empty(t, v.Reports)
+	})
+
+	t.Run("empty-version advisory refuses every concrete-version query", func(t *testing.T) {
+		// always-bad has a byName entry with Version="" — the parser's
+		// "applies to all versions" signal. Every concrete-version query
+		// against this name must refuse.
+		for _, v := range []string{"1.0.0", "2.0.0", "99.99.99"} {
+			verdict := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "always-bad", Version: v})
+			require.True(t, verdict.Flagged(), "always-bad@%s should refuse — has an all-versions advisory", v)
+		}
+	})
 }
 
 func TestStoreRefreshAllSourcesFailingReturnsError(t *testing.T) {

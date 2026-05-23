@@ -120,26 +120,35 @@ type memStore struct {
 
 var _ Store = (*memStore)(nil)
 
-// Lookup implements Store. Semantics:
+// Lookup implements Store. Version-aware semantics:
 //
-//   - ref.Version == "":   unpinned install. Returns every report against any
-//     version of the package.
-//   - ref.Version != "":   pinned install. Returns reports for that exact
-//     version, AND any other report for the same name — every source we
-//     ingest is malware-only, so a name match at any version is a hit.
+//   - ref.Version == "":   unpinned install. The caller didn't pin, so any
+//     flagged version against this name is a hit. Returns every byName entry.
+//   - ref.Version != "":   pinned install. Refuses when EITHER an exact
+//     (name, version) match exists, OR the store holds a byName entry with
+//     an empty recorded Version. An empty-version entry is the parser's way
+//     of saying "this finding applies to ALL versions" — it's emitted for
+//     OSV/OpenSSF/PyPA's unbounded `introduced: 0` ranges (and, conservatively,
+//     for bounded ranges where range-matching isn't implemented). A byName
+//     entry with a concrete-but-different version is scoped to that version
+//     only and does NOT apply to the current query.
 //
-// Why name-match wins regardless of recorded version: aikido / openssf /
-// osv / pypa entries assert "this package name is malicious." The
-// Version field on the report is the version the source happened to
-// sample, not "only this version is bad." Treating a different-version
-// query as a miss would let an attacker republish the same name under a
-// new version and bypass the gate; a lockfile pinning a version the
-// source didn't sample would also slip through. We refuse on name.
+// The earlier policy was "any byName hit refuses any query for that name,"
+// based on the assumption that malware-feed entries assert package-level
+// badness. That assumption breaks badly for the common case of a single
+// rogue release of an otherwise-legitimate name (e.g. MAL-2024-2929 named
+// react@1.0.0 and react@35.0.0 — clearly typosquats — and the policy
+// refused every Meta-published `react` install, even after the advisory
+// itself was withdrawn). Trusting the recorded version IS what the
+// upstream advisories actually claim; we now trust it.
 //
-// If a future source introduces version-specific non-malware advisories,
-// this policy must be revisited — but every source today is malware-only
-// (filtered to MAL-* IDs / aikido's malware feed), so name = refuse is
-// the right default.
+// What remains over-blocking by design: a bounded range advisory
+// (`introduced: 1.0.0, fixed: 2.0.0`) is emitted by osvschema.Reports as
+// a single empty-version report — that report refuses every version,
+// including post-fix ones. Range-aware lookup is future work; today the
+// conservative refusal is the right safety posture, but it lives at one
+// well-named boundary (the empty-version emission) instead of being
+// diffused across the entire store as it was before.
 func (s *memStore) Lookup(ref PackageRef) Verdict {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -159,21 +168,19 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 		return verdict
 	}
 
-	// Exact-version hits go first so their position in the verdict
-	// reflects "this is the version the upstream feed flagged."
+	// Exact (name, version) match — every entry here applies.
 	if reports, ok := s.byVersion[versionKey{ref.Ecosystem, lookupName, ref.Version}]; ok {
 		verdict.Reports = append(verdict.Reports, reports...)
 	}
-	// Name-match: include every other report for this name. Dedup by
-	// comparing stored Version against ref.Version — the exact-version
-	// hits above shared that field by construction, so skipping them
-	// here keeps a single entry from appearing twice in the refusal.
+	// "All versions" findings — byName entries the parser emitted with
+	// an empty Version. These apply regardless of which version was
+	// requested. Concrete-version byName entries that don't match
+	// ref.Version are scoped to their specific version and are skipped.
 	if reports, ok := s.byName[nameKey{ref.Ecosystem, lookupName}]; ok {
 		for _, r := range reports {
-			if r.Version == ref.Version {
-				continue
+			if r.Version == "" {
+				verdict.Reports = append(verdict.Reports, r)
 			}
-			verdict.Reports = append(verdict.Reports, r)
 		}
 	}
 

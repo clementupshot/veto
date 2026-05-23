@@ -239,6 +239,10 @@ func parseZip(path string, logger zerolog.Logger) ([]intel.MalwareReport, error)
 	}
 	defer zr.Close()
 
+	// Entry COUNT is not capped here — we trust the per-feed entry total
+	// (tens of thousands today) to stay bounded by the outer maxFeedBytes
+	// zip-size cap plus the per-entry maxAdvisoryBytes below. Together
+	// those keep worst-case memory well below GiB on adversarial inputs.
 	var reports []intel.MalwareReport
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {

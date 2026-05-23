@@ -639,6 +639,14 @@ func unwrap(w wrapperEntry, vetoPath string, dryRun bool) error {
 			return errors.WithNew("path no longer points at veto; refusing to overwrite").
 				Set("path", w.Path, "current_target", current, "expected_veto", vetoPath)
 		}
+		// TOCTOU note: there's a window between pointsAtVeto and Remove
+		// where a same-UID attacker could repoint w.Path elsewhere. That's
+		// safe here: os.Remove on a symlink unlinks the symlink inode
+		// itself, not the target it points at — the attacker is only
+		// cleaning up their own swap, not tricking us into deleting
+		// something we wouldn't have. The check is "is this our state?"
+		// not "is this safe to unlink?", and unlinking a symlink is
+		// always safe.
 		if err := os.Remove(w.Path); err != nil {
 			return errors.With(err, "remove veto symlink").Set("path", w.Path)
 		}

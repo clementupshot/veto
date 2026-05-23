@@ -315,6 +315,13 @@ func (s *Source) parseTarball(path string) ([]intel.MalwareReport, error) {
 		if !isMaliciousEntry(hdr.Name) {
 			continue
 		}
+		// The `reports` slice grows once per matching entry. Entry COUNT
+		// is not capped here — we trust the per-feed entry total to stay
+		// in the tens of thousands. The real bound on memory is the
+		// outer maxFeedBytes (the tarball size cap) plus the per-entry
+		// maxAdvisoryBytes below; together those keep the worst case
+		// well below GiB even on adversarial inputs.
+		//
 		// Per-advisory cap: a tar entry larger than maxAdvisoryBytes is
 		// either malicious or malformed; we skip rather than abort the
 		// whole parse, so a single bad entry can't deny the rest of the

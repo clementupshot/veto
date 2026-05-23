@@ -59,6 +59,12 @@ func NewStore(logger zerolog.Logger, sources ...Source) Store {
 // MITM'd or wedged upstream can't silently shrink the index. Set
 // conservatively: malware feeds grow over time, so any meaningful drop
 // is suspicious.
+//
+// Edge case: int(float64(1) * 0.5) = 0, so a previous count of 1 makes
+// the retention guard unreachable — any newCount (including 0) clears
+// the bar. Intentional: you can't meaningfully claim "shrunk" from a
+// baseline of a single report, and an empty fetch following a single
+// stale one is the case where the new data is probably correct.
 const partialDropThreshold = 0.5
 
 // versionKey targets exact (ecosystem, name, version) lookups.
@@ -258,6 +264,18 @@ func (s *memStore) fetchAll(ctx context.Context) []fetchResult {
 			wg.Add(1)
 			go func(src Source, eco Ecosystem) {
 				defer wg.Done()
+				// Pre-check ctx so an already-cancelled refresh
+				// short-circuits without paying the spawn-then-fail cost
+				// across len(sources)*len(AllEcosystems) goroutines.
+				select {
+				case <-ctx.Done():
+					out <- fetchResult{
+						key: sourceEcoKey{SourceID: src.ID(), Ecosystem: eco},
+						err: ctx.Err(),
+					}
+					return
+				default:
+				}
 				reports, err := src.Fetch(ctx, eco)
 				out <- fetchResult{
 					key:     sourceEcoKey{SourceID: src.ID(), Ecosystem: eco},

@@ -13,6 +13,7 @@
 
 # Local-only state
 .envrc.local
+.claude/
 
 # Native interposer build artifacts (built via `make interposer`)
 libveto_interpose.dylib

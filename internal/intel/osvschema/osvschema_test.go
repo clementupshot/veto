@@ -97,6 +97,36 @@ func TestReportsSkipsNonMalware(t *testing.T) {
 	require.Empty(t, reports)
 }
 
+const advisoryWithdrawn = `{
+  "id": "MAL-2024-2929",
+  "summary": "Malicious code in react (npm)",
+  "published": "2024-06-25T12:22:49Z",
+  "withdrawn": "2024-07-01T03:32:00Z",
+  "affected": [
+    {
+      "package": {"ecosystem": "npm", "name": "react"},
+      "versions": ["35.0.0", "1.0.0"]
+    }
+  ]
+}`
+
+// TestReportsSkipsWithdrawn: an upstream-retracted MAL-* advisory must
+// not gate. The OSV `withdrawn` field is the canonical retraction
+// signal — the advisory stays in the feed for audit continuity but
+// callers must treat it as inactive. Surfaced by a real false positive:
+// MAL-2024-2929 ("Malicious code in react") was withdrawn one week after
+// publication with details saying "False positive caused by problematic
+// ingestion", but the entry kept refusing every `npm install react`
+// until this filter landed.
+func TestReportsSkipsWithdrawn(t *testing.T) {
+	adv, err := osvschema.Parse([]byte(advisoryWithdrawn))
+	require.NoError(t, err)
+	require.False(t, adv.Withdrawn.IsZero(), "fixture should parse the withdrawn timestamp")
+	require.False(t, osvschema.IsMalware(adv), "withdrawn advisory must not be treated as malware")
+	reports := osvschema.Reports(adv, "osv")
+	require.Empty(t, reports, "withdrawn advisory must produce zero reports")
+}
+
 func TestReportsSkipsUnknownEcosystem(t *testing.T) {
 	adv, err := osvschema.Parse([]byte(advisoryUnknownEcosystem))
 	require.NoError(t, err)

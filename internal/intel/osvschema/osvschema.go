@@ -38,6 +38,11 @@ type Advisory struct {
 	ID        string    `json:"id"`
 	Summary   string    `json:"summary"`
 	Published time.Time `json:"published"`
+	// Withdrawn is set to the timestamp at which the upstream retracted the
+	// advisory — typically because it was a false positive or got superseded.
+	// IsMalware returns false for withdrawn advisories so a withdrawn entry
+	// can't keep gating after the upstream has retracted it.
+	Withdrawn time.Time `json:"withdrawn"`
 	Affected  []Affected `json:"affected"`
 }
 
@@ -79,10 +84,20 @@ func Parse(payload []byte) (Advisory, error) {
 	return adv, nil
 }
 
-// IsMalware reports whether an advisory looks like a malware report.
-// True for any advisory whose ID starts with "MAL-" (OSV's malware namespace).
+// IsMalware reports whether an advisory looks like an actionable malware
+// report: MAL-* ID AND not withdrawn. Withdrawn advisories have been
+// explicitly retracted by the upstream (usually as false positives) and
+// must not gate, even though the entry remains in the feed for audit
+// continuity. Filtering at this boundary closes the false-positive case
+// where a withdrawn MAL-* keeps refusing a clean package indefinitely.
 func IsMalware(adv Advisory) bool {
-	return strings.HasPrefix(adv.ID, "MAL-")
+	if !strings.HasPrefix(adv.ID, "MAL-") {
+		return false
+	}
+	if !adv.Withdrawn.IsZero() {
+		return false
+	}
+	return true
 }
 
 // Reports converts an advisory into MalwareReports under the given source ID.

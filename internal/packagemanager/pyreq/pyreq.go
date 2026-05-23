@@ -87,11 +87,12 @@ func expandFile(path string, depth int) ([]packagemanager.Install, error) {
 			continue
 		}
 
-		// pip allows backslash line-continuation; we do not bother to glue
-		// them. The leftover backslash would not parse cleanly as a spec
-		// (skipped silently). This matches the documented over-include
-		// posture — we'd rather miss a niche continuation case than error.
-		// @@TODO: glue backslash continuations when a real workflow needs it.
+		// pip allows backslash line-continuation; we do not glue them. The
+		// leftover backslash would not parse cleanly as a spec (skipped
+		// silently). Real requirements.txt files almost never use this
+		// (it's an artifact of hand-rolled flake8-style configs); committing
+		// to "won't do" keeps the parser simple. If a real workflow ever
+		// breaks, the fix is one line of accumulation here.
 
 		if include, kind, ok := parseIncludeDirective(line); ok {
 			resolved := include

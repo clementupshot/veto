@@ -15,9 +15,12 @@
 // Direct deps only. The intel store's name-keyed fallback catches every
 // flagged version when the spec is a range we can't pin.
 //
-// @@TODO: full PEP 508 marker evaluation. Today we over-include conditional
-// deps for the same reason pyspec does — over-gating is safer than missing a
-// dep that would actually install.
+// Marker evaluation is intentionally not implemented: we over-include
+// conditional deps the same way pyspec does. Resolving `sys_platform ==
+// "linux"` correctly requires snapshotting the target environment, which
+// veto can't observe from a manifest alone. Over-gating is the safe
+// posture — a refusal the user can override is better than a missed
+// install that wouldn't have happened on their platform anyway.
 package pymanifest
 
 import (

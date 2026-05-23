@@ -136,8 +136,10 @@ func TestEvaluateLocalPathRefusedUnderStrictPolicy(t *testing.T) {
 }
 
 func TestEvaluateEmptyInstallsAllow(t *testing.T) {
-	// An install verb with no specs (e.g. `npm install` from package.json)
-	// is currently allowed; manifest expansion is a documented @@TODO.
+	// An install verb with no specs AND no manifest refs evaluates to
+	// Allow. When the parser emits package.json / lockfile ManifestRefs
+	// (the common case for bare `npm install`), the expander handles
+	// transitive gating — see TestEvaluateExpanderInstallsRefused below.
 	store := buildStore(t)
 	g := gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{})

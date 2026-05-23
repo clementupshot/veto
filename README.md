@@ -3,7 +3,10 @@
 A command-level malware scanner for package managers. Aggregates intel
 from four upstream feeds (Aikido, OpenSSF malicious-packages, OSV,
 PyPA advisory-db), deduplicates, and refuses to let an install proceed
-if any source flags the requested package — at any version.
+if any source flags the requested (package, version) tuple — honoring
+the advisory's recorded version pins or affected ranges, with an
+unbounded "all versions" fallback for advisories that don't narrow it
+down.
 
 **Status:** ready for colleague use on macOS. Linux untested in this
 revision; the C interposer should build but layer 4's mise/asdf
@@ -38,8 +41,14 @@ subprocess.run(["/opt/homebrew/bin/npm", "install", "chai-as-upgraded"],
                shell=False, env={"PATH": "/usr/bin:/bin"})       # also refused
 ```
 
-The version on the lockfile or argv doesn't need to match the version
-the upstream feed recorded — the gate refuses on package name.
+For a versioned query (`npm install foo@1.2.3` or a lockfile pin),
+veto refuses when the version falls inside an advisory's affected
+range, is in its explicit `versions` list, or matches an "all
+versions" advisory. A flagged `evil@1.0.0` does NOT refuse `evil@2.0.0`
+unless the advisory said both — closing the false-positive class that
+used to refuse popular packages over a single rogue release of an
+otherwise-legitimate name. For an unversioned query, ANY flagged
+version of the name refuses, since the caller hasn't pinned.
 
 ## Quick install (60 seconds)
 
@@ -118,6 +127,10 @@ runs, none of the failure modes above apply.
 ```
 intel/             ← parent: Source interface, MalwareReport, Store
 intel/normalize.go ← PEP 503 + npm name normalization at lookup + ingest
+intel/range.go     ← VersionRange + per-ecosystem InRange comparator
+                     (semver via Masterminds/semver for npm; PyPI
+                     over-blocks bounded ranges with a debug log —
+                     no PEP 440 today, feed has no bounded PyPI entries)
 intel/sources/
   aikido/          ← https://malware-list.aikido.dev (implemented)
   openssf/         ← github.com/ossf/malicious-packages (implemented)
@@ -148,13 +161,32 @@ cmd/veto/          ← CLI entrypoint
 hooks/             ← per-agent integration docs
 ```
 
-**Lookup policy: name match wins.** Every source we ingest is
-malware-only; the version field on a report is the version the source
-sampled, not "only this version is bad." So a query for `(name, X.Y.Z)`
-that finds any report for the same name — at any version — refuses.
-This closes two real bypass paths: an attacker republishing the same
-name under a new version, and a lockfile pinning a version the source
-didn't sample.
+**Lookup policy: version-aware + range-aware.** Every source we ingest
+is malware-only, but advisories DO narrow their claims to specific
+versions or version ranges. Veto honors those claims:
+
+- **Exact-version reports** (OSV `affected.versions` lists) match
+  only the listed versions. A `MAL-*` entry against `react@1.0.0`
+  does not refuse `react@18.2.0`.
+- **Range-bearing reports** (OSV `affected.ranges` events) match when
+  the queried version falls inside the interval per the ecosystem's
+  comparison rules. npm uses semver 2.0.0 (Masterminds/semver/v3),
+  including pre-release ordering. PyPI bounded ranges are not yet
+  implemented (no current feed entries use them) and over-block when
+  encountered — see Known Limitations.
+- **All-versions reports** (unbounded `introduced: 0` ranges, or
+  sources that don't model versions at all) match every version of
+  the name. These are the common shape for typosquats and
+  fully-malicious packages.
+- **Unversioned queries** (no pin in argv or lockfile) match any
+  flagged version of the name — the caller hasn't committed to a
+  pin, so any flag is enough to refuse.
+
+**Withdrawn advisories don't gate.** OSV advisories carry a
+`withdrawn` timestamp when the upstream retracts (usually as a false
+positive). Veto filters those at ingest so a retracted MAL-* entry
+can't keep refusing a clean package indefinitely — the advisory stays
+in the feed for audit continuity but is treated as inactive.
 
 **Transitive coverage via lockfiles.** When an install verb runs in a
 project with a lockfile (`package-lock.json`, `pnpm-lock.yaml`,
@@ -295,6 +327,10 @@ these):
   ONLY after the body parses successfully. A transient malformed
   payload doesn't poison the cache — the next refresh re-downloads
   rather than 304-looping on a broken body.
+- **Withdrawn-advisory filter**: OSV-format advisories with a
+  `withdrawn` timestamp are dropped at ingest. A retracted MAL-*
+  cannot keep refusing a clean package indefinitely; the entry
+  remains in the feed for audit continuity but doesn't gate.
 
 **Known limitations** (what veto cannot protect against):
 
@@ -307,8 +343,8 @@ these):
   covered via the Layer 2 python shim — only the system interpreter
   at `/usr/bin/python3` is unreachable.
 - **Linux `execl*` / `fexecve` / `execveat` coverage**: best-effort.
-  H7 added LD_PRELOAD shadows for execl/execlp/execle/execvpe/
-  fexecve/execveat, but glibc's internal `__execve` calls and
+  The interposer exports LD_PRELOAD shadows for execl/execlp/execle/
+  execvpe/fexecve/execveat, but glibc's internal `__execve` calls and
   statically-linked binaries bypass any libc-level interposer. Layers
   2 + 4 still catch these on Linux as long as PATH resolution flows
   through the shim or the real PM has been wrapped.
@@ -320,6 +356,12 @@ these):
   floor catches the worst case (literally empty), but a feed that
   omits most malware while still returning hundreds of entries would
   slip through. Track-and-alert on report-count drops is future work.
+- **PyPI bounded-range advisories over-block**. The current OSV PyPI
+  feed only uses `{introduced: "0"}` ("all versions"), so no PyPI
+  feed today emits a bounded range. If one ever does, the comparator
+  falls back to "over-block" (refuse the install) with a debug log
+  rather than under-block — safe posture but a known precision gap
+  until PEP 440 range matching lands.
 - **Statically-linked binaries that bypass libc**. Theoretical; no
   real PM does this today.
 

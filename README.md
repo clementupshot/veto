@@ -1,8 +1,9 @@
 # veto
 
 A command-level malware scanner for package managers. Aggregates intel
-from four upstream feeds (Aikido, OpenSSF malicious-packages, OSV,
-PyPA advisory-db), deduplicates, and refuses to let an install proceed
+from four default upstream feeds (Aikido, OpenSSF malicious-packages,
+OSV, PyPA advisory-db), supports optional GitHub Advisory Database
+CVE/GHSA blocking, deduplicates, and refuses to let an install proceed
 if any source flags the requested (package, version) tuple — honoring
 the advisory's recorded version pins or affected ranges, with an
 unbounded "all versions" fallback for advisories that don't narrow it
@@ -112,6 +113,11 @@ package names against an aggregated malware database, and refuses or
 passes through. Because the check happens before the package manager
 runs, none of the failure modes above apply.
 
+Optional broad vulnerability feeds can also be enabled for teams that
+want install-time CVE/GHSA blocking. They are intentionally separate
+from the default malware feed set because they block ordinary vulnerable
+versions, not only active supply-chain malware.
+
 ## Architecture
 
 ```
@@ -126,6 +132,7 @@ intel/sources/
   openssf/         ← github.com/ossf/malicious-packages (implemented)
   osv/             ← osv.dev MAL-* advisories (implemented)
   pypa/            ← github.com/pypa/advisory-database (PyPI; implemented)
+  ghsa/            ← github.com/github/advisory-database (opt-in CVE/GHSA)
   internal/fsutil/ ← shared atomic-write helper (source-internal)
 
 packagemanager/    ← parent: PackageManager interface, Install
@@ -151,8 +158,9 @@ cmd/veto/          ← CLI entrypoint
 hooks/             ← per-agent integration docs
 ```
 
-**Lookup policy: version-aware + range-aware.** Every source we ingest
-is malware-only, but advisories DO narrow their claims to specific
+**Lookup policy: version-aware + range-aware.** Default sources are
+malware-only, while optional `ghsa` brings broad vulnerability
+advisories. Either way, advisories DO narrow their claims to specific
 versions or version ranges. Veto honors those claims:
 
 - **Exact-version reports** (OSV `affected.versions` lists) match
@@ -204,12 +212,16 @@ than fail open. A sanity floor of 1000 reports total catches the
 # Gate an install (same shape as safe-chain's CLI).
 veto npm install lodash         # → exec real npm
 veto npm install chai-as-upgraded
-# veto: install refused — malware intelligence flagged the following:
+# veto: install refused — package intelligence flagged the following:
 #   - chai-as-upgraded@<any> (ecosystem: npm)
 #       [aikido] MALWARE
 
 # Refresh malware intel manually.
 veto sync
+
+# Optional: include GitHub Advisory Database CVE/GHSA findings too.
+# This can block normal vulnerable versions, not only malware.
+VETO_SOURCES=aikido,openssf,osv,pypa,ghsa veto sync
 
 # Show source health and cache location.
 veto status
@@ -258,7 +270,7 @@ configuration rather than package-intel matches.
 | Variable | Default | Purpose |
 |---|---|---|
 | `VETO_CACHE_DIR` | `$XDG_CACHE_HOME/veto` | where intel snapshots live |
-| `VETO_SOURCES` | `aikido,openssf,osv,pypa` | comma-separated source IDs to enable |
+| `VETO_SOURCES` | `aikido,openssf,osv,pypa` | comma-separated source IDs to enable; add `ghsa` to opt into broad GitHub Advisory Database CVE/GHSA blocking |
 | `VETO_LOG` | (info) | set `debug` for verbose logging |
 | `VETO_BYPASS` | (unset) | prepend `VETO_BYPASS=1 ` to skip the gate for one invocation |
 | `VETO_ALLOW_OPAQUE` | `0` | set `1` to opt URL/git/tarball installs through the gate (refused by default) |
@@ -305,8 +317,9 @@ binaries at their install paths, so PATH lookup order stops mattering.
 **Fail-closed guarantees** (the gate refuses the install in all of
 these):
 
-- **Malicious package**: any source flags it → exit 1, "install
-  refused — malware intelligence flagged …"
+- **Flagged package**: any source flags it → exit 1, "install
+  refused — package intelligence flagged …". Default sources flag
+  malware; opt-in `ghsa` also flags ordinary vulnerable versions.
 - **Opaque-spec install** (URL / git / tarball / `user/repo`
   github-shorthand): refused by default → exit 1,
   `[veto-policy]` source. Set `VETO_ALLOW_OPAQUE=1` to opt in
@@ -324,8 +337,8 @@ these):
   logs name the source.
 - **Oversized intel payload**: any single feed body exceeding its
   per-source size cap (256 MiB for aikido/osv, 512 MiB for
-  openssf/pypa) is rejected for that refresh — a compromised upstream
-  cannot OOM veto by streaming a multi-GB body.
+  openssf/pypa, 1 GiB for opt-in ghsa) is rejected for that refresh —
+  a compromised upstream cannot OOM veto by streaming a multi-GB body.
 - **Manifest file present but unreadable / malformed** (`package.json`,
   `pyproject.toml`, `requirements.txt`, lockfiles): exit 70, "INTERNAL
   ERROR — install aborted fail-closed"
@@ -361,6 +374,12 @@ these):
   remains in the feed for audit continuity but doesn't gate.
 
 **Known limitations** (what veto cannot protect against):
+
+- **Socket and SafeDep PMG are not cached bulk sources yet.** Socket's
+  public vuln path is a website/API surface, and PMG queries SafeDep's
+  real-time analysis service per package. Those are good candidates for
+  a future authenticated online lookup layer, but veto does not scrape
+  them into the cached source set.
 
 - **SIP-protected binaries on macOS** (`/usr/bin/pip3`,
   `/usr/bin/python3 -m pip …`). `DYLD_INSERT_LIBRARIES` is stripped

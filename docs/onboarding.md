@@ -380,7 +380,7 @@ echo "$VETO_PATH"                        # should be your veto absolute path
 
 # 6. End-to-end — should be refused by the gate.
 VETO_LOG=debug veto npm install chai-as-upgraded
-#   veto: install refused — malware intelligence flagged the following:
+#   veto: install refused — package intelligence flagged the following:
 #     - chai-as-upgraded@<any> (ecosystem: npm)
 #         [aikido] MALWARE
 ```
@@ -438,7 +438,8 @@ hole.
 The fail-closed sanity check fired. Either every source returned an
 empty feed (probable upstream incident — try again later, or check
 `veto status`), or `VETO_SOURCES` is pointed at non-existent
-source IDs. Default is `aikido,openssf,osv`.
+source IDs. Default is `aikido,openssf,osv,pypa`; add `ghsa` only if
+you intentionally want broad CVE/GHSA blocking too.
 
 ### "could not be loaded" when an unrelated process starts
 

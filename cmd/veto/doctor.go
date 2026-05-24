@@ -605,7 +605,7 @@ func checkIntel(logger zerolog.Logger, cfg config) []checkResult {
 			status:   statusFail,
 			label:    "intel store",
 			detail:   "build store: " + err.Error(),
-			howToFix: "Check VETO_SOURCES is valid (default: aikido,openssf,osv,pypa).",
+			howToFix: "Check VETO_SOURCES is valid (default: aikido,openssf,osv,pypa; optional: ghsa).",
 		})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

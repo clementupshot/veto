@@ -1,6 +1,7 @@
-// Package osvschema parses OSV-format malicious-package advisories. Both
-// OpenSSF malicious-packages and OSV (osv.dev) use this schema, so the two
-// sources share the parser and differ only in how they fetch the documents.
+// Package osvschema parses OSV-format package advisories. OpenSSF
+// malicious-packages, OSV (osv.dev), and GitHub Advisory Database all use this
+// schema, so sources share the parser and differ only in how they fetch and
+// filter the documents.
 //
 // The schema we care about (subset of OSV 1.5):
 //
@@ -45,7 +46,7 @@ type Advisory struct {
 	// advisory — typically because it was a false positive or got superseded.
 	// IsMalware returns false for withdrawn advisories so a withdrawn entry
 	// can't keep gating after the upstream has retracted it.
-	Withdrawn time.Time `json:"withdrawn"`
+	Withdrawn time.Time  `json:"withdrawn"`
 	Affected  []Affected `json:"affected"`
 }
 
@@ -76,15 +77,22 @@ type Event struct {
 	LastAffected string `json:"last_affected,omitempty"`
 }
 
-// Parse decodes one OSV JSON document. Callers filter to malware findings
-// via IsMalware (cheaper than tagging the verdict here, since most callers
-// already need the full Advisory for reporting).
+// Parse decodes one OSV JSON document. Callers choose whether they want only
+// malware findings via Reports or every active advisory via
+// VulnerabilityReports.
 func Parse(payload []byte) (Advisory, error) {
 	var adv Advisory
 	if err := json.Unmarshal(payload, &adv); err != nil {
 		return Advisory{}, errors.With(err, "decode osv advisory")
 	}
 	return adv, nil
+}
+
+// IsActive reports whether an advisory should still be enforced. Withdrawn
+// advisories have been explicitly retracted by the upstream, usually because
+// they were false positives or superseded.
+func IsActive(adv Advisory) bool {
+	return adv.ID != "" && adv.Withdrawn.IsZero()
 }
 
 // IsMalware reports whether an advisory looks like an actionable malware
@@ -97,7 +105,7 @@ func IsMalware(adv Advisory) bool {
 	if !strings.HasPrefix(adv.ID, "MAL-") {
 		return false
 	}
-	if !adv.Withdrawn.IsZero() {
+	if !IsActive(adv) {
 		return false
 	}
 	return true
@@ -110,7 +118,21 @@ func Reports(adv Advisory, sourceID string) []intel.MalwareReport {
 	if !IsMalware(adv) {
 		return nil
 	}
+	return reportsFromAdvisory(adv, sourceID, "MALWARE")
+}
 
+// VulnerabilityReports converts any active OSV advisory into reports under the
+// given source ID. This is intentionally separate from Reports so malware-only
+// sources keep their historical MAL-* filter while optional CVE/GHSA feeds can
+// use the same range-aware emission logic.
+func VulnerabilityReports(adv Advisory, sourceID string) []intel.MalwareReport {
+	if !IsActive(adv) {
+		return nil
+	}
+	return reportsFromAdvisory(adv, sourceID, "VULNERABILITY")
+}
+
+func reportsFromAdvisory(adv Advisory, sourceID, defaultReason string) []intel.MalwareReport {
 	var out []intel.MalwareReport
 	for _, aff := range adv.Affected {
 		eco, ok := normalizeEcosystem(aff.Package.Ecosystem)
@@ -123,7 +145,7 @@ func Reports(adv Advisory, sourceID string) []intel.MalwareReport {
 
 		reason := adv.Summary
 		if reason == "" {
-			reason = "MALWARE"
+			reason = defaultReason
 		}
 
 		// Explicit versions list — one report per version.
@@ -217,7 +239,7 @@ func normalizeEcosystem(osv string) (intel.Ecosystem, bool) {
 	switch strings.ToLower(osv) {
 	case "npm":
 		return intel.EcosystemNPM, true
-	case "pypi":
+	case "pip", "pypi":
 		return intel.EcosystemPyPI, true
 	default:
 		return "", false

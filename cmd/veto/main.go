@@ -30,6 +30,7 @@ import (
 	"github.com/brynbellomy/veto/internal/gate"
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/intel/sources/aikido"
+	"github.com/brynbellomy/veto/internal/intel/sources/ghsa"
 	"github.com/brynbellomy/veto/internal/intel/sources/openssf"
 	"github.com/brynbellomy/veto/internal/intel/sources/osv"
 	"github.com/brynbellomy/veto/internal/intel/sources/pypa"
@@ -430,7 +431,7 @@ func runStatus(logger zerolog.Logger, cfg config) int {
 
 // printRefusal writes a human-readable explanation of a refusal to w.
 func printRefusal(w io.Writer, decision gate.Decision) {
-	fmt.Fprintln(w, "veto: install refused — malware intelligence flagged the following:")
+	fmt.Fprintln(w, "veto: install refused — package intelligence flagged the following:")
 	for _, v := range decision.Flagged() {
 		fmt.Fprintf(w, "  - %s@%s (ecosystem: %s)\n", v.Ref.Name, displayVersion(v.Ref.Version), v.Ref.Ecosystem)
 		for _, r := range v.Reports {
@@ -973,6 +974,11 @@ func buildSource(logger zerolog.Logger, cfg config, id string) (intel.Source, er
 		return openssf.New(openssf.Options{
 			CacheDir: filepath.Join(cfg.CacheDir, "openssf"),
 		})
+	case "ghsa":
+		return ghsa.New(ghsa.Options{
+			CacheDir: filepath.Join(cfg.CacheDir, "ghsa"),
+			Logger:   logger,
+		})
 	case "osv":
 		return osv.New(osv.Options{
 			CacheDir: filepath.Join(cfg.CacheDir, "osv"),
@@ -1151,6 +1157,7 @@ Supported package managers:
 Environment:
   VETO_CACHE_DIR     override cache location (default: $XDG_CACHE_HOME/veto)
   VETO_SOURCES       comma-separated source IDs (default: aikido,openssf,osv,pypa)
+                       optional broad vulnerability feed: ghsa
   VETO_LOG           set to "debug" for verbose logging
   VETO_BYPASS        prepend `+"`VETO_BYPASS=1 `"+` to skip the gate for one invocation
   VETO_ALLOW_OPAQUE  set to 1 to opt URL/git/tarball/github-shorthand specs

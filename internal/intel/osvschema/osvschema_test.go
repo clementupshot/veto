@@ -99,6 +99,19 @@ func TestReportsSkipsNonMalware(t *testing.T) {
 	require.Empty(t, reports)
 }
 
+func TestVulnerabilityReportsIncludesNonMalware(t *testing.T) {
+	adv, err := osvschema.Parse([]byte(advisoryNotMalware))
+	require.NoError(t, err)
+	reports := osvschema.VulnerabilityReports(adv, "ghsa")
+	require.Len(t, reports, 1)
+	require.Equal(t, "ghsa", reports[0].SourceID)
+	require.Equal(t, "GHSA-1234-5678-90ab", reports[0].AdvisoryID)
+	require.Equal(t, "regular CVE", reports[0].Reason)
+	require.Equal(t, intel.EcosystemNPM, reports[0].Ecosystem)
+	require.Equal(t, "vulnerable", reports[0].Name)
+	require.Equal(t, "1.0.0", reports[0].Version)
+}
+
 const advisoryWithdrawn = `{
   "id": "MAL-2024-2929",
   "summary": "Malicious code in react (npm)",
@@ -124,9 +137,12 @@ func TestReportsSkipsWithdrawn(t *testing.T) {
 	adv, err := osvschema.Parse([]byte(advisoryWithdrawn))
 	require.NoError(t, err)
 	require.False(t, adv.Withdrawn.IsZero(), "fixture should parse the withdrawn timestamp")
+	require.False(t, osvschema.IsActive(adv), "withdrawn advisory must not be active")
 	require.False(t, osvschema.IsMalware(adv), "withdrawn advisory must not be treated as malware")
 	reports := osvschema.Reports(adv, "osv")
 	require.Empty(t, reports, "withdrawn advisory must produce zero reports")
+	vulnReports := osvschema.VulnerabilityReports(adv, "ghsa")
+	require.Empty(t, vulnReports, "withdrawn vulnerability advisory must produce zero reports")
 }
 
 func TestReportsSkipsUnknownEcosystem(t *testing.T) {

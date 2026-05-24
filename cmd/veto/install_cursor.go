@@ -42,9 +42,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// runInstallCursor implements
-// `veto install-cursor [--project-dir DIR] [--skip-shims]
-//                     [--shim-dir DIR] [--force]`.
+// runInstallCursor implements install-cursor for project rules and PATH shims.
 func runInstallCursor(logger zerolog.Logger, args []string) int {
 	fs := flag.NewFlagSet("install-cursor", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -123,17 +121,17 @@ func runInstallCursor(logger zerolog.Logger, args []string) int {
 // in the project, not just when matching a glob. That's what we want — a
 // package install verb can show up regardless of which files are open.
 const cursorRuleBody = `---
-description: Always route package-manager installs through veto's malware scan.
+description: Always route package-manager installs through veto's package scan.
 globs:
 alwaysApply: true
 ---
 
-# veto — malware scan for package installs
+# veto — package intelligence scan for installs
 
 This project uses [veto](https://github.com/brynbellomy/veto), a
-command-level malware scanner that checks package names against multiple
-supply-chain malware feeds (Aikido, OpenSSF, OSV, PyPA) before allowing
-an install to run.
+command-level scanner that checks package names against multiple
+supply-chain feeds (Aikido, OpenSSF, OSV, PyPA; optional GHSA) before
+allowing an install to run.
 
 **Always** prefix package-manager install commands with ` + "`veto`" + `:
 

@@ -48,11 +48,10 @@ func (r VersionRange) IsUnbounded() bool {
 //     failure mode the gate exists to prevent.
 //
 // npm uses Masterminds/semver/v3 which handles pre-release ordering
-// per the semver 2.0.0 spec. PyPI is not implemented today (no PyPI
-// feeds emit bounded ranges in the cache as of the version-aware
-// Lookup work) and returns true conservatively while logging a
-// debug-level note so a future bounded PyPI advisory leaves a
-// breadcrumb.
+// per the semver 2.0.0 spec. PyPI is not implemented today and returns
+// true conservatively while logging a debug-level note. That means an
+// opt-in vulnerability feed with a bounded PyPI range may over-block
+// until PEP 440 range matching lands, but it will not under-block.
 //
 // InRange lives in the intel package — rather than a sub-package —
 // so the Store's Lookup can call it without introducing an import

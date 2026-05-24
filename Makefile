@@ -35,7 +35,7 @@ endif
 build:
 	go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
 
-test:
+test: $(INTERPOSER_HEADER)
 	go test -race ./...
 
 vet:
@@ -45,7 +45,7 @@ tidy:
 	go mod tidy
 
 clean:
-	rm -f $(BIN) coverage.out coverage.html $(INTERPOSER_OUT) $(INTERPOSER_HEADER)
+	rm -f $(BIN) coverage.out coverage.html $(INTERPOSER_OUT)
 
 # `make install` gates on the full test suite (with -race). veto is a
 # security tool; shipping a build whose race detector or invariants are

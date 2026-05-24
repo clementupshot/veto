@@ -72,9 +72,9 @@ const (
 
 	// Lockfile kinds — the resolved, version-pinned, transitively-complete
 	// tree that the package manager will actually install. Gating against
-	// the lockfile is the closest thing veto can do to "gate every
-	// transitive dependency" without running the resolver itself: the PM
-	// already wrote the answer to disk.
+	// the lockfile is the stable package-manager output veto can consume to
+	// cover transitives: the PM already wrote the answer to disk, or a
+	// ResolverPreScanner produced it in an isolated lock-only pre-scan.
 	//
 	// Each kind is emitted alongside the manifest kind for install verbs
 	// that consult either. The expander returns nil, nil when the file is
@@ -119,6 +119,26 @@ type ManifestRef struct {
 	Kind ManifestKind
 }
 
+// ResolverPreScanPlan describes a package-manager dry resolver command that
+// can produce lockfiles before the real install runs. The caller executes Args
+// against the real package-manager binary inside an isolated temp workdir,
+// then expands ManifestRefs from that temp workdir and gates the resulting
+// resolved dependency tree.
+//
+// SeedFiles are relative paths copied from the user's cwd into the temp
+// workdir before running the resolver. Package managers use these to preserve
+// lockfile/config context without mutating the user's checkout.
+//
+// DirectInstalls are the argv-named packages the resolver output must contain.
+// The caller uses this as a sanity check that a package-manager config did not
+// suppress lockfile updates and leave veto looking at stale seeded output.
+type ResolverPreScanPlan struct {
+	Args           []string
+	ManifestRefs   []ManifestRef
+	SeedFiles      []string
+	DirectInstalls []Install
+}
+
 // PackageManager parses install-style commands for one binary.
 //
 // Name returns the binary name we shadow (e.g. "npm"). Ecosystem identifies
@@ -147,4 +167,11 @@ type PackageManager interface {
 	Ecosystem() intel.Ecosystem
 	ParseInstalls(args []string) []Install
 	ManifestRefs(args []string) []ManifestRef
+}
+
+// ResolverPreScanner is an optional capability for PackageManagers that can
+// safely ask their resolver for the full dependency tree without installing
+// packages or running lifecycle scripts.
+type ResolverPreScanner interface {
+	ResolverPreScan(args []string) (ResolverPreScanPlan, bool)
 }

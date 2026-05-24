@@ -38,6 +38,20 @@ func TestExpandPackageLockV3(t *testing.T) {
 	requireMissing(t, got, "myapp")
 }
 
+func TestExpandPackageLockV3UsesEntryNameForAliases(t *testing.T) {
+	const lock = `{
+		"name": "myapp",
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"name": "myapp", "version": "1.0.0"},
+			"node_modules/compat": {"name": "real-package", "version": "2.0.0"}
+		}
+	}`
+	got := mustExpand(t, "package-lock.json", packagemanager.ManifestKindPackageLockJSON, lock)
+	requireContains(t, got, intel.EcosystemNPM, "real-package", "2.0.0")
+	requireMissing(t, got, "compat")
+}
+
 // TestExpandPackageLockV1 covers the legacy nested-dependencies schema.
 // Important because older repos still ship lockfileVersion=1.
 func TestExpandPackageLockV1(t *testing.T) {

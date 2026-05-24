@@ -71,6 +71,7 @@ var flagsWithValues = argv.FlagsWithValues{
 type Manager struct{}
 
 var _ packagemanager.PackageManager = (*Manager)(nil)
+var _ packagemanager.ResolverPreScanner = (*Manager)(nil)
 
 // New builds an npm manager.
 func New() *Manager { return &Manager{} }
@@ -133,4 +134,66 @@ func parseExec(args []string) ([]packagemanager.Install, bool) {
 // gate's expander can read the file and gate its direct dependencies.
 func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 	return jsspec.PackageJSONManifestRefs(args, installVerbs, alwaysReadsManifest, flagsWithValues)
+}
+
+// ResolverPreScan implements packagemanager.ResolverPreScanner. npm can
+// produce a complete package-lock.json without installing packages or running
+// lifecycle scripts; veto runs that in an isolated temp copy and gates the
+// resolved transitive tree before allowing the real install.
+func (Manager) ResolverPreScan(args []string) (packagemanager.ResolverPreScanPlan, bool) {
+	verb, _, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
+	if !ok {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	if _, isInstall := installVerbs[verb]; !isInstall || verb == "ci" {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	directInstalls := jsspec.ParseInstallArgs(args, installVerbs, flagsWithValues)
+	if len(directInstalls) == 0 || hasUnsafeResolverPreScanSpec(directInstalls) {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	return packagemanager.ResolverPreScanPlan{
+		Args: appendResolverFlags(args,
+			"--package-lock=true",
+			"--package-lock-only",
+			"--ignore-scripts",
+			"--dry-run=false",
+			"--audit=false",
+			"--fund=false",
+		),
+		ManifestRefs: []packagemanager.ManifestRef{
+			{Path: "package-lock.json", Kind: packagemanager.ManifestKindPackageLockJSON},
+			{Path: "npm-shrinkwrap.json", Kind: packagemanager.ManifestKindNpmShrinkwrap},
+		},
+		SeedFiles: []string{
+			"package.json",
+			"package-lock.json",
+			"npm-shrinkwrap.json",
+			".npmrc",
+		},
+		DirectInstalls: directInstalls,
+	}, true
+}
+
+func hasUnsafeResolverPreScanSpec(installs []packagemanager.Install) bool {
+	for _, ins := range installs {
+		if ins.LocalPath || ins.OpaqueRemote {
+			return true
+		}
+	}
+	return false
+}
+
+func appendResolverFlags(args []string, flags ...string) []string {
+	out := make([]string, 0, len(args)+len(flags))
+	for i, arg := range args {
+		if arg == "--" {
+			out = append(out, flags...)
+			out = append(out, args[i:]...)
+			return out
+		}
+		out = append(out, arg)
+	}
+	out = append(out, flags...)
+	return out
 }

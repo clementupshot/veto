@@ -121,6 +121,55 @@ func TestPrintResults_ColorMarkers(t *testing.T) {
 	require.Equal(t, 2, strings.Count(out, "→"), "exactly the WARN+FAIL entries should emit a fix arrow")
 }
 
+func TestCheckShellIntegrationFromDetectedRC(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/zsh")
+	shimDir := filepath.Join(dir, ".local", "bin")
+	vetoPath := filepath.Join(shimDir, "veto")
+	for _, target := range []struct {
+		name string
+		kind shellKind
+	}{
+		{name: ".zshrc", kind: shellKindZsh},
+		{name: ".bashrc", kind: shellKindBash},
+		{name: ".bash_profile", kind: shellKindBash},
+		{name: ".profile", kind: shellKindProfile},
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, target.name), []byte(renderShellIntegrationBlock(shimDir, vetoPath, target.kind)), 0o644))
+	}
+
+	got := checkShellIntegration()
+	require.Equal(t, statusPass, got.status)
+	require.Equal(t, "shell integration", got.label)
+}
+
+func TestCheckShellIntegrationWarnsWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/zsh")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".zshrc"), []byte("alias g=git\n"), 0o644))
+
+	got := checkShellIntegration()
+	require.Equal(t, statusWarn, got.status)
+	require.Contains(t, got.howToFix, "install-shell")
+}
+
+func TestCheckShellIntegrationWarnsWhenOneBashFileMissing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/bin/zsh")
+	shimDir := filepath.Join(dir, ".local", "bin")
+	vetoPath := filepath.Join(shimDir, "veto")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".zshrc"), []byte(renderShellIntegrationBlock(shimDir, vetoPath, shellKindZsh)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".bashrc"), []byte(renderShellIntegrationBlock(shimDir, vetoPath, shellKindBash)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".profile"), []byte(renderShellIntegrationBlock(shimDir, vetoPath, shellKindProfile)), 0o644))
+
+	got := checkShellIntegration()
+	require.Equal(t, statusWarn, got.status)
+	require.Contains(t, got.detail, ".bash_profile")
+}
+
 // TestEarlierRealBinary covers the "shim shadowed by mise/homebrew"
 // detection: a real `npm` earlier in PATH than our shim dir must be
 // flagged. A `veto`-pointing symlink earlier in PATH is NOT a
@@ -190,8 +239,8 @@ func TestPrintVersionManagerFooters_DedupesPerManager(t *testing.T) {
 	out := buf.String()
 	require.Equal(t, 1, strings.Count(out, "mise PATH-ordering recipe"),
 		"a multi-mise-shadow doctor run must print the footer exactly once")
-	require.Contains(t, out, "mise activate zsh")
-	require.Contains(t, out, "_veto_pin_path", "chpwd-hook workaround must be in the recipe")
+	require.Contains(t, out, "veto install-shell")
+	require.Contains(t, out, "managed block", "chpwd-hook workaround must be delegated to the managed block")
 }
 
 // TestPrintVersionManagerFooters_OnlyOnFail: a PASS result that happens

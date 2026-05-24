@@ -230,6 +230,79 @@ func TestManifestRefs(t *testing.T) {
 	}
 }
 
+func TestResolverPreScan(t *testing.T) {
+	m := npm.New()
+
+	t.Run("install appends safe lock-only resolver flags", func(t *testing.T) {
+		plan, ok := m.ResolverPreScan([]string{"install", "clean-direct"})
+		require.True(t, ok)
+		require.Equal(t, []string{
+			"install",
+			"clean-direct",
+			"--package-lock=true",
+			"--package-lock-only",
+			"--ignore-scripts",
+			"--dry-run=false",
+			"--audit=false",
+			"--fund=false",
+		}, plan.Args)
+		require.Equal(t, []packagemanager.ManifestRef{
+			{Path: "package-lock.json", Kind: packagemanager.ManifestKindPackageLockJSON},
+			{Path: "npm-shrinkwrap.json", Kind: packagemanager.ManifestKindNpmShrinkwrap},
+		}, plan.ManifestRefs)
+		require.ElementsMatch(t, []string{
+			"package.json",
+			"package-lock.json",
+			"npm-shrinkwrap.json",
+			".npmrc",
+		}, plan.SeedFiles)
+		require.Equal(t, []packagemanager.Install{
+			{Ref: intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "clean-direct"}, RawSpec: "clean-direct"},
+		}, plan.DirectInstalls)
+	})
+
+	t.Run("flags are inserted before separator", func(t *testing.T) {
+		plan, ok := m.ResolverPreScan([]string{"install", "--", "--leading-dash-name"})
+		require.True(t, ok)
+		require.Equal(t, []string{
+			"install",
+			"--package-lock=true",
+			"--package-lock-only",
+			"--ignore-scripts",
+			"--dry-run=false",
+			"--audit=false",
+			"--fund=false",
+			"--",
+			"--leading-dash-name",
+		}, plan.Args)
+	})
+
+	t.Run("ci is already lockfile-based", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"ci"})
+		require.False(t, ok)
+	})
+
+	t.Run("bare install has no newly named package", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"install"})
+		require.False(t, ok)
+	})
+
+	t.Run("local path is not safe to reproduce in temp resolver workdir", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"install", "./local-pkg"})
+		require.False(t, ok)
+	})
+
+	t.Run("opaque remote is refused by the normal gate before pre-scan", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"install", "https://example.com/pkg.tgz"})
+		require.False(t, ok)
+	})
+
+	t.Run("non-install is unsupported", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"run", "build"})
+		require.False(t, ok)
+	})
+}
+
 func requireKind(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
 	t.Helper()
 	for _, r := range refs {

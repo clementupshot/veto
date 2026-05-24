@@ -45,9 +45,9 @@ const (
 
 // checkResult is one row in the doctor's output table.
 type checkResult struct {
-	status  status
-	label   string
-	detail  string
+	status   status
+	label    string
+	detail   string
 	howToFix string // shown only on WARN/FAIL
 }
 
@@ -62,6 +62,7 @@ func runDoctor(logger zerolog.Logger, cfg config, args []string) int {
 	results := []checkResult{}
 	results = append(results, checkVetoOnPath())
 	results = append(results, checkShimDir()...)
+	results = append(results, checkShellIntegration())
 	results = append(results, checkClaudeHook())
 	results = append(results, checkInterposer()...)
 	results = append(results, checkWrappers(cfg)...)
@@ -153,11 +154,10 @@ func checkShimDir() []checkResult {
 	out := []checkResult{}
 	if shimIdx < 0 {
 		out = append(out, checkResult{
-			status: statusWarn,
-			label:  "shim dir on PATH",
-			detail: shimDir + " is NOT in PATH",
-			howToFix: "Add `export PATH=$HOME/.local/bin:$PATH` to your shell rc, " +
-				"in FRONT of mise/homebrew/asdf entries.",
+			status:   statusWarn,
+			label:    "shim dir on PATH",
+			detail:   shimDir + " is NOT in PATH",
+			howToFix: "Run `veto install-shell`, then open a new terminal.",
 		})
 	} else {
 		out = append(out, checkResult{
@@ -172,9 +172,9 @@ func checkShimDir() []checkResult {
 		info, err := os.Lstat(shimPath)
 		if err != nil {
 			out = append(out, checkResult{
-				status:  statusWarn,
-				label:   "shim:" + name,
-				detail:  "not installed",
+				status:   statusWarn,
+				label:    "shim:" + name,
+				detail:   "not installed",
 				howToFix: "Run `veto install-shims` to create missing shims.",
 			})
 			continue
@@ -211,10 +211,10 @@ func checkShimDir() []checkResult {
 				// instead of guessing what's wrong.
 				vm := detectVersionManager(shadow)
 				detail := fmt.Sprintf("real %s at %s appears before shim dir; shim is shadowed", name, shadow)
-				fix := "Reorder PATH so the shim dir is first, or remove the conflicting binary."
+				fix := "Run `veto install-shell`, then open a new terminal."
 				if vm != "" {
 					detail = fmt.Sprintf("%s install at %s shadows the veto shim", vm, shadow)
-					fix = fmt.Sprintf("PATH order: %s wins. See the %s footer at the end for the one-liner fix.", vm, vm)
+					fix = fmt.Sprintf("Run `veto install-shell`. See the %s footer at the end for details.", vm)
 				}
 				out = append(out, checkResult{
 					status:   statusFail,
@@ -232,6 +232,66 @@ func checkShimDir() []checkResult {
 		})
 	}
 	return out
+}
+
+// checkShellIntegration confirms veto's managed shell-rc block is installed
+// in the current user's likely interactive shell rc files. This is the block
+// that pins ~/.local/bin ahead of mise/asdf/pyenv/nvm and wires shell-only
+// pip/uv package-age quarantine wrappers.
+func checkShellIntegration() checkResult {
+	targets, err := defaultShellIntegrationTargets()
+	if err != nil {
+		return checkResult{
+			status:   statusWarn,
+			label:    "shell integration",
+			detail:   "could not detect shell rc targets: " + err.Error(),
+			howToFix: "Run `veto install-shell --shell-rc PATH` for your shell rc.",
+		}
+	}
+
+	var missing []string
+	var present []string
+	for _, target := range targets {
+		exists, malformed, err := managedBlockStatus(target.path, shellMarkerStart, shellMarkerEnd)
+		if os.IsNotExist(err) {
+			missing = append(missing, target.path)
+			continue
+		}
+		if err != nil {
+			return checkResult{
+				status:   statusFail,
+				label:    "shell integration",
+				detail:   "read " + target.path + ": " + err.Error(),
+				howToFix: "Fix rc file permissions, then run `veto install-shell`.",
+			}
+		}
+		if malformed {
+			return checkResult{
+				status:   statusFail,
+				label:    "shell integration",
+				detail:   "managed block markers are incomplete in " + target.path,
+				howToFix: "Remove the partial block and run `veto install-shell`.",
+			}
+		}
+		if exists {
+			present = append(present, target.path)
+		} else {
+			missing = append(missing, target.path)
+		}
+	}
+	if len(missing) > 0 {
+		return checkResult{
+			status:   statusWarn,
+			label:    "shell integration",
+			detail:   "managed block missing from " + strings.Join(missing, ", "),
+			howToFix: "Run `veto install-shell`.",
+		}
+	}
+	return checkResult{
+		status: statusPass,
+		label:  "shell integration",
+		detail: strings.Join(present, ", "),
+	}
 }
 
 // detectVersionManager classifies a shadowing path by which version
@@ -493,9 +553,9 @@ func checkWrappers(cfg config) []checkResult {
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			out = append(out, checkResult{
-				status: statusFail,
-				label:  "wrapper:" + w.PM,
-				detail: fmt.Sprintf("%s is no longer a symlink — wrapper has been replaced by a real binary (likely after upgrade)", w.Path),
+				status:   statusFail,
+				label:    "wrapper:" + w.PM,
+				detail:   fmt.Sprintf("%s is no longer a symlink — wrapper has been replaced by a real binary (likely after upgrade)", w.Path),
 				howToFix: "Re-run `veto install-wrappers --force` to re-wrap.",
 			})
 			continue
@@ -514,9 +574,9 @@ func checkWrappers(cfg config) []checkResult {
 		// `.veto-original` must still exist for execReal to find.
 		if _, err := os.Stat(w.OriginalPath); err != nil {
 			out = append(out, checkResult{
-				status: statusFail,
-				label:  "wrapper:" + w.PM,
-				detail: fmt.Sprintf("%s missing — wrapper would execute as veto with nothing to delegate to", w.OriginalPath),
+				status:   statusFail,
+				label:    "wrapper:" + w.PM,
+				detail:   fmt.Sprintf("%s missing — wrapper would execute as veto with nothing to delegate to", w.OriginalPath),
 				howToFix: "Run `veto uninstall-wrappers` to clean state and `veto install-wrappers` to re-wrap.",
 			})
 			continue
@@ -655,11 +715,10 @@ func versionManagerFooter(vm string) string {
 ─── mise PATH-ordering recipe ──────────────────────────────────────────
 
 mise prepends its shim/install dir to PATH at ` + "`mise activate`" + ` time.
-For veto's shims to win, ~/.local/bin must come AFTER mise activate:
+For veto's shims to win, let veto install its managed shell block after
+your version-manager setup:
 
-    # ~/.zshrc  (or ~/.bashrc, etc.)
-    eval "$(mise activate zsh)"            # mise prepends ITS dirs
-    export PATH="$HOME/.local/bin:$PATH"   # then veto takes the front
+    veto install-shell
 
 Trace of ` + "`npm install foo`" + `:
   1. shell → ~/.local/bin/npm  (veto shim)
@@ -667,37 +726,30 @@ Trace of ` + "`npm install foo`" + `:
   3. veto's findRealBinary walks PATH, skips itself, hits mise's shim
   4. mise's shim resolves the project-pinned npm and exec's it
 
-If mise's chpwd hook re-prepends and undoes the reorder on every ` + "`cd`" + `,
-add this precmd to pin the order:
-
-    _veto_pin_path() { case ":$PATH:" in
-      ":$HOME/.local/bin:"*) ;;
-      *) PATH="$HOME/.local/bin:${PATH//$HOME\/.local\/bin:/}" ;;
-    esac }
-    precmd_functions+=(_veto_pin_path)
+The managed block also installs the prompt hook that re-pins ~/.local/bin
+when mise's chpwd hook re-prepends its own dirs after cd.
 
 Verify with ` + "`veto doctor`" + ` — the shim:* FAIL lines should clear.
 `
 	case "asdf":
 		return `
 ─── asdf PATH-ordering recipe ──────────────────────────────────────────
-asdf prepends ~/.asdf/shims to PATH on activate. Add this AFTER asdf's
-initialization in your shell rc:
-    export PATH="$HOME/.local/bin:$PATH"
+asdf prepends ~/.asdf/shims to PATH on activate. Run:
+    veto install-shell
 The same trace as the mise recipe applies; see that footer for details.
 `
 	case "pyenv":
 		return `
 ─── pyenv PATH-ordering recipe ─────────────────────────────────────────
-pyenv prepends ~/.pyenv/shims via ` + "`pyenv init`" + `. Add AFTER it:
-    export PATH="$HOME/.local/bin:$PATH"
+pyenv prepends ~/.pyenv/shims via ` + "`pyenv init`" + `. Run:
+    veto install-shell
 `
 	case "nvm":
 		return `
 ─── nvm PATH-ordering recipe ───────────────────────────────────────────
 nvm prepends ~/.nvm/versions/node/<v>/bin via ` + "`nvm use`" + `. After every
-` + "`nvm use`" + `, veto's shim dir must be re-prepended. The cleanest
-fix is a shell function that wraps nvm use to reapply the order.
+` + "`nvm use`" + `, veto's shim dir must be re-prepended. Run:
+    veto install-shell
 `
 	}
 	return ""

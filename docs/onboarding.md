@@ -73,9 +73,13 @@ kernel-level interposer.
 git clone https://github.com/brynbellomy/veto.git
 cd veto
 make install              # builds veto, installs to ~/.local/bin
-make interposer           # builds libveto_interpose.{dylib,so}
-veto sync              # first-time intel pull (~10s)
+veto install-all --force  # shims, shell block, hook, interposer,
+                         # wrappers, sync, doctor
 ```
+
+`install-all` builds the native interposer with `make interposer` when
+the shared library is not already present. Use `--skip-interposer` only
+on hosts where compiling or loading the shared library is not possible.
 
 Confirm veto is on PATH:
 
@@ -160,6 +164,7 @@ invocations by `os.Args[0]` basename and routes through the gate.
 veto install-shims                                # default: ~/.local/bin
 veto install-shims --dir /custom/dir              # alternate dir
 veto install-shims --force                        # overwrite non-veto files
+veto install-shell                                 # PATH pinning + pip/uv age quarantine
 ```
 
 `install-shims` refuses to overwrite anything that isn't already a
@@ -167,15 +172,20 @@ veto-managed symlink unless `--force` is passed — replacing real
 binaries silently is exactly the kind of surprise a security tool must
 not cause.
 
+`install-shell` writes one managed block to `.zshrc`, `.bashrc`, or
+`config.fish`. The block keeps `~/.local/bin` ahead of mise/asdf/pyenv/nvm
+after prompt hooks run and wraps `pip`, `pip3`, `uv`, and `uvx` with native
+package-age gates (`PIP_UPLOADED_PRIOR_TO` / `UV_EXCLUDE_NEWER`).
+
 ### PATH ordering
 
 The shim dir must come BEFORE the real PM directories in `PATH`. If you
 use mise, homebrew, asdf, or any other version manager, their dirs are
 typically already in PATH; the shim dir needs to win the lookup.
 
-```sh
-export PATH=$HOME/.local/bin:$PATH         # add to ~/.zshrc / ~/.bashrc
-```
+Run `veto install-shell` instead of hand-editing your rc
+file. `veto doctor` checks for that managed block and reports incomplete
+markers as a failure.
 
 `install-shims` prints a warning if it detects a real PM earlier in
 PATH than the shim dir.
@@ -352,7 +362,8 @@ fresh terminal:
 # 1. Veto itself is on PATH.
 which veto
 
-# 2. Shims are in front of real PMs.
+# 2. The managed shell block exists and shims are in front of real PMs.
+veto doctor                              # includes shell integration check
 which npm                                   # should resolve to ~/.local/bin/npm
 
 # 3. Intel store is healthy.
@@ -470,10 +481,12 @@ Documented limits, in addition to the threat-model section in
   gate against fewer than 1000 reports total, but a feed that drops
   most malware while still returning hundreds of entries would slip
   through.
-- **Transitive dependencies of named packages.** The intel feeds index
-  by package name; if you `pip install some-clean-package` and that
-  package's `setup.py` fetches a flagged transitive dep, veto won't
-  see the second-level fetch.
+- **Resolver pre-scan beyond npm.** Existing lockfiles are gated across
+  npm-family and Python-family projects, and `npm install`/`npm update`
+  get a temp-dir `--package-lock=true --package-lock-only --ignore-scripts`
+  pre-scan before the real install. Other ecosystems do not yet get a
+  resolver probe for newly named packages; they rely on argv, manifests,
+  and already-present lockfiles.
 
 Veto is one layer of defense, not a substitute for code review of
 unpinned/unverified dependencies.

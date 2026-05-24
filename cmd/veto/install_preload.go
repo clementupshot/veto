@@ -43,11 +43,11 @@ const (
 )
 
 type preloadOpts struct {
-	libPath  string // path to the prebuilt .dylib/.so
+	libPath   string // path to the prebuilt .dylib/.so
 	installTo string // dir to copy the library into (default ~/.local/lib)
-	shellRC  string // path to shell rc to edit (default: print only)
-	autoRC   bool   // if true, auto-detect $SHELL and pick the matching rc
-	print    bool   // when true, write export lines to stdout instead of a file
+	shellRC   string // path to shell rc to edit (default: print only)
+	autoRC    bool   // if true, auto-detect $SHELL and pick the matching rc
+	print     bool   // when true, write export lines to stdout instead of a file
 }
 
 // runInstallPreload implements `veto install-preload`.
@@ -398,11 +398,17 @@ func upsertShellRCBlock(rcPath, block string) error {
 // provided block, or appends the block (preceded by one blank line) if
 // no managed section exists yet.
 func upsertManagedBlock(src, block string) string {
-	startIdx := strings.Index(src, preloadMarkerStart)
-	endIdx := strings.Index(src, preloadMarkerEnd)
+	return upsertManagedBlockWithMarkers(src, block, preloadMarkerStart, preloadMarkerEnd)
+}
+
+// upsertManagedBlockWithMarkers replaces the (start..end) section in src with
+// the provided block, or appends the block when the marker pair is absent.
+func upsertManagedBlockWithMarkers(src, block, startMarker, endMarker string) string {
+	startIdx := strings.Index(src, startMarker)
+	endIdx := strings.Index(src, endMarker)
 	if startIdx >= 0 && endIdx > startIdx {
 		// Replace the entire span including the end-marker line and its newline.
-		after := endIdx + len(preloadMarkerEnd)
+		after := endIdx + len(endMarker)
 		if after < len(src) && src[after] == '\n' {
 			after++
 		}
@@ -423,6 +429,12 @@ func upsertManagedBlock(src, block string) string {
 // removeShellRCBlock strips the managed block from rcPath. Returns
 // (changed, error). No file write occurs when nothing was matched.
 func removeShellRCBlock(rcPath string) (bool, error) {
+	return removeShellRCBlockWithMarkers(rcPath, preloadMarkerStart, preloadMarkerEnd)
+}
+
+// removeShellRCBlockWithMarkers strips a managed block from rcPath. Returns
+// (changed, error). No file write occurs when nothing was matched.
+func removeShellRCBlockWithMarkers(rcPath, startMarker, endMarker string) (bool, error) {
 	existing, err := os.ReadFile(rcPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -431,12 +443,12 @@ func removeShellRCBlock(rcPath string) (bool, error) {
 		return false, errors.With(err, "read rc")
 	}
 	src := string(existing)
-	startIdx := strings.Index(src, preloadMarkerStart)
-	endIdx := strings.Index(src, preloadMarkerEnd)
+	startIdx := strings.Index(src, startMarker)
+	endIdx := strings.Index(src, endMarker)
 	if startIdx < 0 || endIdx <= startIdx {
 		return false, nil
 	}
-	after := endIdx + len(preloadMarkerEnd)
+	after := endIdx + len(endMarker)
 	if after < len(src) && src[after] == '\n' {
 		after++
 	}
@@ -449,6 +461,25 @@ func removeShellRCBlock(rcPath string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// managedBlockStatus reports whether rcPath contains a complete marker pair.
+func managedBlockStatus(rcPath, startMarker, endMarker string) (exists bool, malformed bool, err error) {
+	data, err := os.ReadFile(rcPath)
+	if err != nil {
+		return false, false, err
+	}
+	src := string(data)
+	startIdx := strings.Index(src, startMarker)
+	endIdx := strings.Index(src, endMarker)
+	switch {
+	case startIdx >= 0 && endIdx > startIdx:
+		return true, false, nil
+	case startIdx >= 0 || endIdx >= 0:
+		return false, true, nil
+	default:
+		return false, false, nil
+	}
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {

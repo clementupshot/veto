@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -51,15 +52,19 @@ import (
 )
 
 const (
-	exitOK         = 0
-	exitUsage      = 64
-	exitRefused    = 1
-	exitInternal   = 70
+	exitOK       = 0
+	exitUsage    = 64
+	exitRefused  = 1
+	exitInternal = 70
 	// syncTimeout bounds a full refresh across all sources. OpenSSF alone can
 	// take ~10s on first sync (35 MB tarball + 454k entries); allow generous
 	// headroom so the first-time experience isn't surprising. Subsequent
 	// refreshes short-circuit via etag in milliseconds.
 	syncTimeout = 5 * time.Minute
+
+	// resolverPreScanTimeout bounds package-manager dry resolver probes. These
+	// touch the registry but do not install packages or run lifecycle scripts.
+	resolverPreScanTimeout = 2 * time.Minute
 
 	// minHealthyReportCount is the sanity floor below which we treat the
 	// intel store as broken and refuse to gate. Aikido alone publishes
@@ -200,6 +205,10 @@ func run(args []string) int {
 		return runInstallCodex(logger, args[1:])
 	case "install-cursor":
 		return runInstallCursor(logger, args[1:])
+	case "install-shell":
+		return runInstallShell(logger, args[1:])
+	case "uninstall-shell":
+		return runUninstallShell(logger, args[1:])
 	case "install-preload":
 		return runInstallPreload(logger, args[1:])
 	case "uninstall-preload":
@@ -208,6 +217,8 @@ func run(args []string) int {
 		return runInstallWrappers(logger, cfg, args[1:])
 	case "uninstall-wrappers":
 		return runUninstallWrappers(logger, cfg, args[1:])
+	case "install-all":
+		return runInstallAll(logger, cfg, args[1:])
 	case "doctor":
 		return runDoctor(logger, cfg, args[1:])
 	}
@@ -313,8 +324,9 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 		return exitInternal
 	}
 
+	expander := newCompoundExpander()
 	policy := gate.DefaultPolicy()
-	policy.ManifestExpander = newCompoundExpander()
+	policy.ManifestExpander = expander
 	// VETO_ALLOW_OPAQUE=1 opts URL/git/tarball/github-shorthand specs
 	// through the gate. The default refuses them — see
 	// gate.DefaultPolicy docs for why.
@@ -324,20 +336,48 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 	}
 	g := gate.New(store, policy, logger)
 	decision := g.Evaluate(installs, manifestRefs...)
-
 	switch decision.Outcome {
-	case gate.OutcomePassThrough, gate.OutcomeAllow:
-		return execPMOrPythonM(cfg, pmName, pmArgs)
 	case gate.OutcomeRefuse:
 		printRefusal(os.Stderr, decision)
 		return exitRefused
 	case gate.OutcomeAbort:
 		printAbort(os.Stderr, decision)
 		return exitInternal
+	case gate.OutcomePassThrough:
+		return execPMOrPythonM(cfg, pmName, pmArgs)
+	case gate.OutcomeAllow:
+		// Continue into the optional resolver pre-scan below.
+	default:
+		logger.Error().Str("outcome", string(decision.Outcome)).Msg("unknown gate outcome")
+		return exitInternal
 	}
 
-	logger.Error().Str("outcome", string(decision.Outcome)).Msg("unknown gate outcome")
-	return exitInternal
+	preScanInstalls, preScanErr := runResolverPreScanIfAvailable(logger, cfg, pm, pmArgs, expander)
+	if preScanErr != nil {
+		logger.Error().Err(preScanErr).Str("pm", pmName).Msg("resolver pre-scan failed; aborting install fail-closed")
+		decision := gate.Decision{Outcome: gate.OutcomeAbort, Errors: []error{preScanErr}}
+		printAbort(os.Stderr, decision)
+		return exitInternal
+	}
+	if len(preScanInstalls) > 0 {
+		decision = g.Evaluate(preScanInstalls)
+		switch decision.Outcome {
+		case gate.OutcomeRefuse:
+			printRefusal(os.Stderr, decision)
+			return exitRefused
+		case gate.OutcomeAbort:
+			printAbort(os.Stderr, decision)
+			return exitInternal
+		case gate.OutcomePassThrough:
+			return execPMOrPythonM(cfg, pmName, pmArgs)
+		case gate.OutcomeAllow:
+			// Safe to execute the real package manager below.
+		default:
+			logger.Error().Str("outcome", string(decision.Outcome)).Msg("unknown resolver pre-scan gate outcome")
+			return exitInternal
+		}
+	}
+	return execPMOrPythonM(cfg, pmName, pmArgs)
 }
 
 func runSync(logger zerolog.Logger, cfg config) int {
@@ -420,6 +460,200 @@ func displayVersion(v string) string {
 		return "<any>"
 	}
 	return v
+}
+
+func runResolverPreScanIfAvailable(
+	logger zerolog.Logger,
+	cfg config,
+	pm packagemanager.PackageManager,
+	pmArgs []string,
+	expander gate.ManifestExpander,
+) ([]packagemanager.Install, error) {
+	scanner, ok := pm.(packagemanager.ResolverPreScanner)
+	if !ok {
+		return nil, nil
+	}
+	plan, ok := scanner.ResolverPreScan(pmArgs)
+	if !ok || len(plan.Args) == 0 || len(plan.ManifestRefs) == 0 {
+		return nil, nil
+	}
+	return runResolverPreScan(logger, cfg, pm.Name(), plan, expander)
+}
+
+func runResolverPreScan(
+	logger zerolog.Logger,
+	cfg config,
+	pmName string,
+	plan packagemanager.ResolverPreScanPlan,
+	expander gate.ManifestExpander,
+) ([]packagemanager.Install, error) {
+	realPath, err := findRealBinary(pmName, wrapperRegisteredFunc(cfg))
+	if err != nil {
+		return nil, errors.With(err, "locate real package manager for resolver pre-scan").Set("pm", pmName)
+	}
+	workdir, err := os.MkdirTemp("", "veto-resolver-*")
+	if err != nil {
+		return nil, errors.With(err, "create resolver pre-scan workdir")
+	}
+	defer os.RemoveAll(workdir)
+
+	if err := seedResolverWorkdir(workdir, plan.SeedFiles); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), resolverPreScanTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, realPath, plan.Args...)
+	cmd.Dir = workdir
+	cmd.Env = sanitizedEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return nil, errors.With(ctx.Err(), "resolver pre-scan timed out").Set("pm", pmName)
+	}
+	if err != nil {
+		logger.Debug().Str("pm", pmName).Str("output", truncateForError(string(out), 800)).Msg("resolver pre-scan command output")
+		return nil, errors.With(err, "resolver pre-scan command failed").Set("pm", pmName)
+	}
+
+	var installs []packagemanager.Install
+	foundOutput := false
+	for _, ref := range plan.ManifestRefs {
+		cleanPath, ok := cleanSeedPath(ref.Path)
+		if !ok {
+			return nil, errors.WithNew("resolver pre-scan output path must be relative").Set("path", ref.Path)
+		}
+		ref.Path = filepath.Join(workdir, cleanPath)
+		if ok, err := resolverOutputExists(ref.Path); err != nil {
+			return nil, err
+		} else if !ok {
+			continue
+		}
+		foundOutput = true
+		extra, err := expander.Expand(ref)
+		if err != nil {
+			return nil, errors.With(err, "expand resolver pre-scan output").Set("path", ref.Path)
+		}
+		installs = append(installs, extra...)
+	}
+	if !foundOutput {
+		return nil, errors.WithNew("resolver pre-scan did not produce an expected lockfile").Set("pm", pmName)
+	}
+	if missing := unresolvedPreScanInstalls(plan.DirectInstalls, installs); len(missing) > 0 {
+		return nil, errors.WithNew("resolver pre-scan output did not include every requested package").Set(
+			"pm", pmName,
+			"missing", strings.Join(missing, ","),
+		)
+	}
+	logger.Debug().Str("pm", pmName).Int("installs", len(installs)).Msg("resolver pre-scan produced install records")
+	return installs, nil
+}
+
+func unresolvedPreScanInstalls(want, got []packagemanager.Install) []string {
+	seen := map[intel.PackageRef]struct{}{}
+	for _, ins := range got {
+		if ins.LocalPath || ins.OpaqueRemote || ins.Ref.Name == "" {
+			continue
+		}
+		ref := ins.Ref
+		ref.Name = intel.NormalizeName(ref.Ecosystem, ref.Name)
+		seen[ref] = struct{}{}
+		ref.Version = ""
+		seen[ref] = struct{}{}
+	}
+
+	missing := make([]string, 0, len(want))
+	for _, ins := range want {
+		if ins.LocalPath || ins.OpaqueRemote || ins.Ref.Name == "" {
+			continue
+		}
+		ref := ins.Ref
+		ref.Name = intel.NormalizeName(ref.Ecosystem, ref.Name)
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		ref.Version = ""
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		missing = append(missing, ins.RawSpec)
+	}
+	return missing
+}
+
+func resolverOutputExists(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, errors.With(err, "stat resolver pre-scan output").Set("path", path)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, errors.WithNew("resolver pre-scan output is a symlink").Set("path", path)
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return false, errors.WithNew("resolver pre-scan output is not a regular file").Set("path", path)
+	}
+	return true, nil
+}
+
+func seedResolverWorkdir(workdir string, relPaths []string) error {
+	seen := map[string]struct{}{}
+	for _, rel := range relPaths {
+		cleanRel, ok := cleanSeedPath(rel)
+		if !ok {
+			continue
+		}
+		if _, dup := seen[cleanRel]; dup {
+			continue
+		}
+		seen[cleanRel] = struct{}{}
+		if err := copySeedPath(cleanRel, filepath.Join(workdir, cleanRel)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cleanSeedPath(rel string) (string, bool) {
+	if rel == "" || filepath.IsAbs(rel) {
+		return "", false
+	}
+	clean := filepath.Clean(rel)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return clean, true
+}
+
+func copySeedPath(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return errors.With(err, "stat resolver pre-scan seed").Set("path", src)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	if info.IsDir() {
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return errors.With(err, "read resolver pre-scan seed").Set("path", src)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return errors.With(err, "mkdir resolver pre-scan seed parent").Set("path", dst)
+	}
+	if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		return errors.With(err, "write resolver pre-scan seed").Set("path", dst)
+	}
+	return nil
 }
 
 // execPMOrPythonM is the post-gate exec for both the regular PM path
@@ -859,6 +1093,13 @@ Layer 2 — PATH shims (any agent shell, Codex, CI):
   veto install-cursor [--project-dir DIR] [--shim-dir DIR] [--skip-shims] [--force]
                                install-shims + write .cursor/rules/veto.mdc
                                so Cursor's agent prefixes installs with `+"`veto`"+`
+  veto install-shell [--shell-rc PATH|auto] [--print]
+                               install one managed shell-rc block for PATH
+                               pinning and pip/uv package-age quarantine.
+                               Defaults to --shell-rc auto unless --print.
+  veto uninstall-shell [--shell-rc PATH|auto]
+                               remove the managed shell-rc integration block.
+                               Defaults to --shell-rc auto.
 
 Layer 3 — native execve interposer (catches direct child-process spawns):
   veto install-preload --lib PATH [--shell-rc PATH|auto] [--install-to DIR] [--print]
@@ -877,6 +1118,13 @@ Layer 4 — real-binary wrappers (catches absolute-path invocations):
                                Catches `+"`subprocess.run([abs_path,…])`"+` even
                                when DYLD_INSERT_LIBRARIES is stripped.
   veto uninstall-wrappers   reverse every wrapper recorded in state
+
+Install everything:
+  veto install-all [--lib PATH] [--shell-rc PATH|auto] [--force] [--skip-interposer]
+                               install shims, shell integration, Claude hook,
+                               preload interposer, wrappers, sync intel, then doctor.
+                               If --lib is omitted, builds libveto_interpose
+                               with `+"`make interposer`"+` when run from the repo.
 
 Supported package managers:
   npm, pnpm, yarn, bun, pip, pip3, uv, poetry, pdm,

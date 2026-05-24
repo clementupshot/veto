@@ -221,6 +221,12 @@ func run(args []string) int {
 		return runInstallAll(logger, cfg, args[1:])
 	case "doctor":
 		return runDoctor(logger, cfg, args[1:])
+	case "scan":
+		return runScan(logger, cfg, args[1:])
+	case "audit-agent-surface":
+		return runAuditAgentSurface(logger, cfg, args[1:])
+	case "quarantine-cache":
+		return runQuarantineCache(logger, cfg, args[1:])
 	}
 
 	return runGate(logger, cfg, args)
@@ -1073,6 +1079,15 @@ Usage:
   veto sync                 refresh malware intel from all configured sources
   veto status               print configured sources and cache location
   veto doctor               verify defense layers + intel state (run after install)
+  veto scan [--root DIR] [--json] [--no-projects] [--no-caches] [--no-agent-surface]
+                            scan projects, package-manager caches, and agent
+                            surfaces for existing exposure (read-only)
+  veto quarantine-cache [--dry-run] [--purge] [--json]
+                            scan cache exposure and optionally purge confirmed
+                            malicious cache artifacts
+  veto audit-agent-surface [--json]
+                            inspect Claude/Codex/Cursor/Sirene/MCP/launchd
+                            persistence surfaces only
   veto help                 this message
 
 Layer 1 — Claude Code hook (Bash tool interception):

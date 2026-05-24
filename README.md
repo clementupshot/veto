@@ -216,9 +216,42 @@ veto status
 
 # Verify all defense layers and intel state — run after any install.
 veto doctor
+
+# Detect existing exposure across projects, caches, and agent surfaces.
+veto scan
+
+# Targeted follow-up commands for incident response.
+veto quarantine-cache --dry-run   # add --purge only after reviewing candidates
+veto audit-agent-surface
 ```
 
 `veto help` lists every subcommand grouped by layer.
+
+### Existing Exposure Scans
+
+`veto scan` is the broad read-only audit. By default it scans
+`~/projects` for manifests and lockfiles, known package-manager cache
+roots for flagged package artifacts, and agent surfaces for persistence
+or fetch-and-run hooks across Claude, Codex, Cursor, Sirene, MCP configs,
+and launchd. Use negative flags only when you intentionally want to
+narrow the sweep:
+
+```sh
+veto scan --json
+veto scan --root ~/projects/work --no-caches
+veto scan --no-projects --no-agent-surface  # cache exposure only
+```
+
+`veto quarantine-cache` runs the cache scanner and plans removals for
+confirmed malicious cache artifacts. It defaults to dry-run; `--purge`
+deletes only confirmed flagged artifacts after resolving symlinks and
+verifying the target remains inside a known cache root. IOC-only residue,
+such as `_npx` MCP cache entries without an intel hit, is reported but
+not purged by the MVP.
+
+`veto audit-agent-surface` runs only the agent persistence audit. It does
+not need a healthy intel store because it is checking local hook and MCP
+configuration rather than package-intel matches.
 
 ### Environment
 

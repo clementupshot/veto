@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/brynbellomy/go-utils/errors"
+	"github.com/pelletier/go-toml/v2"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 
@@ -425,7 +426,147 @@ func projectPreflightPlan(pm packagemanager.PackageManager, args []string, insta
 	if !ok || len(plan.ManifestRefs) == 0 {
 		return packagemanager.ProjectPreflightPlan{}, false
 	}
-	return plan, true
+	return resolveProjectPreflightRoots(plan), true
+}
+
+func resolveProjectPreflightRoots(plan packagemanager.ProjectPreflightPlan) packagemanager.ProjectPreflightPlan {
+	refs := append([]packagemanager.ManifestRef(nil), plan.ManifestRefs...)
+	refs = resolveDefaultGoProjectRoot(refs)
+	refs = resolveDefaultCargoProjectRoot(refs)
+	plan.ManifestRefs = refs
+	return plan
+}
+
+func resolveDefaultGoProjectRoot(refs []packagemanager.ManifestRef) []packagemanager.ManifestRef {
+	if !hasDefaultRef(refs, packagemanager.ManifestKindGoMod, "go.mod") || !pathIsMissing("go.mod") {
+		return refs
+	}
+	root, ok := findParentProjectFile("go.mod")
+	if !ok {
+		return refs
+	}
+	return rewriteDefaultRefs(refs, map[packagemanager.ManifestKind]defaultRefRewrite{
+		packagemanager.ManifestKindGoMod: {defaultPath: "go.mod", resolvedPath: filepath.Join(root, "go.mod")},
+		packagemanager.ManifestKindGoSum: {defaultPath: "go.sum", resolvedPath: filepath.Join(root, "go.sum")},
+	})
+}
+
+func resolveDefaultCargoProjectRoot(refs []packagemanager.ManifestRef) []packagemanager.ManifestRef {
+	rewrites := map[packagemanager.ManifestKind]defaultRefRewrite{}
+	if hasDefaultRef(refs, packagemanager.ManifestKindCargoToml, "Cargo.toml") && pathIsMissing("Cargo.toml") {
+		if root, ok := findParentProjectFile("Cargo.toml"); ok {
+			rewrites[packagemanager.ManifestKindCargoToml] = defaultRefRewrite{defaultPath: "Cargo.toml", resolvedPath: filepath.Join(root, "Cargo.toml")}
+		}
+	}
+	if hasDefaultRef(refs, packagemanager.ManifestKindCargoLock, "Cargo.lock") && pathIsMissing("Cargo.lock") {
+		if root, ok := findParentProjectFile("Cargo.lock"); ok {
+			rewrites[packagemanager.ManifestKindCargoLock] = defaultRefRewrite{defaultPath: "Cargo.lock", resolvedPath: filepath.Join(root, "Cargo.lock")}
+		}
+	}
+	out := rewriteDefaultRefs(refs, rewrites)
+	workspaceManifest, ok := findParentCargoWorkspaceManifest(out)
+	if !ok {
+		return out
+	}
+	if hasManifestRef(out, workspaceManifest, packagemanager.ManifestKindCargoToml) {
+		return out
+	}
+	return append(out, packagemanager.ManifestRef{Path: workspaceManifest, Kind: packagemanager.ManifestKindCargoToml})
+}
+
+func findParentCargoWorkspaceManifest(refs []packagemanager.ManifestRef) (string, bool) {
+	for _, ref := range refs {
+		if ref.Kind != packagemanager.ManifestKindCargoLock || filepath.Base(ref.Path) != "Cargo.lock" || !filepath.IsAbs(ref.Path) {
+			continue
+		}
+		manifest := filepath.Join(filepath.Dir(ref.Path), "Cargo.toml")
+		if isCargoWorkspaceManifest(manifest) {
+			return manifest, true
+		}
+	}
+	return "", false
+}
+
+func isCargoWorkspaceManifest(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var doc map[string]any
+	if err := toml.Unmarshal(data, &doc); err != nil {
+		return false
+	}
+	_, ok := doc["workspace"]
+	return ok
+}
+
+func hasManifestRef(refs []packagemanager.ManifestRef, path string, kind packagemanager.ManifestKind) bool {
+	for _, ref := range refs {
+		if ref.Kind == kind && filepath.Clean(ref.Path) == filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
+}
+
+func rewriteDefaultRefs(refs []packagemanager.ManifestRef, rewrites map[packagemanager.ManifestKind]defaultRefRewrite) []packagemanager.ManifestRef {
+	if len(rewrites) == 0 {
+		return refs
+	}
+	out := append([]packagemanager.ManifestRef(nil), refs...)
+	for i, ref := range out {
+		rewrite, ok := rewrites[ref.Kind]
+		if !ok || !isDefaultProjectRefPath(ref.Path, rewrite.defaultPath) {
+			continue
+		}
+		out[i].Path = rewrite.resolvedPath
+	}
+	return out
+}
+
+type defaultRefRewrite struct {
+	defaultPath  string
+	resolvedPath string
+}
+
+func hasDefaultRef(refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind, path string) bool {
+	for _, ref := range refs {
+		if ref.Kind == kind && isDefaultProjectRefPath(ref.Path, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDefaultProjectRefPath(got, want string) bool {
+	return !filepath.IsAbs(got) && filepath.Clean(got) == want
+}
+
+func pathIsMissing(path string) bool {
+	_, err := os.Stat(path)
+	return os.IsNotExist(err)
+}
+
+func findParentProjectFile(name string) (string, bool) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for {
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err == nil {
+			return dir, info.Mode().IsRegular()
+		}
+		if !os.IsNotExist(err) {
+			return "", false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 type projectPreflightExpander struct {

@@ -16,9 +16,6 @@ current user-facing behavior.
 - Add remaining safe resolver pre-scans where practical: uv/poetry/pdm next for
   Python-family workflows, then Go/Cargo only if their tooling can resolve
   without executing project code.
-- Improve Go/Cargo project-root discovery for project preflight: walk upward for
-  `go.mod`, `Cargo.toml`, and Cargo workspace roots when commands run from
-  nested directories without explicit path flags.
 - Decide whether IOC-only cache residue can be promoted from report-only to
   purge-safe quarantine rules.
 - Choose and add an explicit license before public distribution.

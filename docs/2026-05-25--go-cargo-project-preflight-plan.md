@@ -174,15 +174,12 @@ Path handling:
 - Respect global `-C DIR` by resolving `go.mod` and `go.sum` relative to `DIR`.
 - Respect `-modfile FILE` by using that file as the required module file and
   the matching sum file when Go's documented naming convention applies.
+- For default invocations from a nested directory, walk upward to the nearest
+  parent `go.mod` and gate its matching `go.sum` when present.
 - Treat remote versioned `go run pkg@version` as phase-1 install-style gating,
   not project preflight.
 - Treat local `go run ./cmd/app`, `go run .`, and `go run main.go` as project
   preflight.
-
-First-slice simplification: do not attempt to resolve nested module roots for
-package args like `./submodule/...`; preflight the command's effective working
-directory. Nested-module support can be added later if tests show common false
-allows.
 
 ## Cargo Command Coverage
 
@@ -208,15 +205,13 @@ Path handling:
 - Respect `--manifest-path PATH` by resolving `Cargo.toml` to that path and
   `Cargo.lock` to the same directory unless `--lockfile-path` is supplied.
 - Respect `--lockfile-path PATH` where Cargo supports it.
-- For default invocations, use `Cargo.toml` and `Cargo.lock` relative to the
-  current working directory.
+- For default invocations from a nested directory, walk upward to the nearest
+  parent `Cargo.toml` when the current directory has none, and walk upward for
+  a parent `Cargo.lock` so workspace lockfiles are still scanned.
+- If the upward `Cargo.lock` directory also contains a workspace `Cargo.toml`,
+  include that manifest so `[workspace.dependencies]` is gated as well.
 - Continue treating `cargo install` as install-style gating, not project
   preflight.
-
-First-slice simplification: do not walk parent directories to find a workspace
-root unless a test proves the current command shape needs it. Defaulting to the
-current directory is easier to reason about and less surprising for a command
-gate.
 
 ## Claude Hook Updates
 
@@ -303,8 +298,8 @@ go test ./...
   security. Start by requiring `Cargo.toml` and gating `Cargo.lock` when
   present unless we decide application-only detection is reliable.
 - **Nested project roots.** Go and Cargo can operate from subdirectories or
-  workspaces. The first slice should handle explicit path flags, then add
-  upward root discovery only with focused tests.
+  workspaces. Upward discovery is now implemented for default preflight refs;
+  explicit path flags remain parser-controlled and are left unchanged.
 - **No resolver means incomplete graph in some cases.** This is intentional for
   phase 2. The command gate should not run tools that might fetch or execute
   code before it has made a decision.

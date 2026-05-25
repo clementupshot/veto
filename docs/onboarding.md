@@ -492,7 +492,10 @@ Documented limits, in addition to the threat-model section in
 - **Go and Cargo project preflight.** Dependency fetch/mutate commands
   are gated, and local build/test/run commands preflight project files
   before execution. Go checks `go.mod` plus optional `go.sum`; Cargo
-  checks `Cargo.toml` plus optional `Cargo.lock`.
+  checks `Cargo.toml` plus optional `Cargo.lock`. Default invocations
+  walk upward from nested directories to find parent Go modules, Cargo
+  manifests, and workspace lockfiles; explicit path flags still take
+  precedence.
 
 Veto is one layer of defense, not a substitute for code review of
 unpinned/unverified dependencies.

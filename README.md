@@ -221,7 +221,10 @@ update`, `cargo fetch`, and `cargo install`). It also preflights local
 Go and Cargo build/test/run commands by reading already-present project
 state before execution: `go build`, `go test`, local `go run`, `go vet`,
 `cargo build`, `cargo check`, `cargo test`, `cargo run`, `cargo bench`,
-and `cargo clippy`.
+and `cargo clippy`. Default Go and Cargo preflight walks upward for
+parent `go.mod`, `Cargo.toml`, and workspace `Cargo.lock`/`Cargo.toml`
+files when the command runs from a nested directory; explicit path flags
+still take precedence.
 
 **Fail-closed defaults.** Per-source malware feeds are fetched
 concurrently with etag-based caching in `~/.cache/veto/`.

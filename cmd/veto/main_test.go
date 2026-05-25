@@ -13,6 +13,7 @@ import (
 	"github.com/brynbellomy/veto/internal/gate"
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/cargo"
 	"github.com/brynbellomy/veto/internal/packagemanager/golang"
 	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
 	"github.com/brynbellomy/veto/internal/packagemanager/pipreport"
@@ -427,6 +428,74 @@ func TestProjectPreflightPlanOnlyForPassThroughCommands(t *testing.T) {
 
 	_, ok = projectPreflightPlan(pm, []string{"get", "github.com/evil/module@v1.2.3"}, []packagemanager.Install{{RawSpec: "github.com/evil/module@v1.2.3"}}, nil)
 	require.False(t, ok)
+}
+
+func TestProjectPreflightPlanFindsParentGoModule(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "cmd", "app")
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/app\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "go.sum"), []byte("github.com/evil/module v1.2.3 h1:abc\n"), 0o644))
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+
+	oldwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(nested))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
+
+	plan, ok := projectPreflightPlan(golang.New(), []string{"test", "./..."}, nil, nil)
+	require.True(t, ok)
+	require.Equal(t, []packagemanager.ManifestRef{
+		{Path: filepath.Join(resolvedRoot, "go.mod"), Kind: packagemanager.ManifestKindGoMod},
+		{Path: filepath.Join(resolvedRoot, "go.sum"), Kind: packagemanager.ManifestKindGoSum},
+	}, plan.ManifestRefs)
+}
+
+func TestProjectPreflightPlanFindsParentCargoManifest(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "src")
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Cargo.toml"), []byte("[package]\nname = \"app\"\nversion = \"0.1.0\"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Cargo.lock"), []byte("[[package]]\nname = \"evil-crate\"\nversion = \"9.9.9\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"), 0o644))
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+
+	oldwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(nested))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
+
+	plan, ok := projectPreflightPlan(cargo.New(), []string{"test"}, nil, nil)
+	require.True(t, ok)
+	require.Equal(t, []packagemanager.ManifestRef{
+		{Path: filepath.Join(resolvedRoot, "Cargo.toml"), Kind: packagemanager.ManifestKindCargoToml},
+		{Path: filepath.Join(resolvedRoot, "Cargo.lock"), Kind: packagemanager.ManifestKindCargoLock},
+	}, plan.ManifestRefs)
+}
+
+func TestProjectPreflightPlanFindsWorkspaceCargoLock(t *testing.T) {
+	workspace := t.TempDir()
+	crate := filepath.Join(workspace, "crates", "app")
+	require.NoError(t, os.MkdirAll(crate, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "Cargo.toml"), []byte("[workspace]\nmembers = [\"crates/app\"]\n\n[workspace.dependencies]\nevil-workspace = \"=8.8.8\"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(crate, "Cargo.toml"), []byte("[package]\nname = \"app\"\nversion = \"0.1.0\"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "Cargo.lock"), []byte("[[package]]\nname = \"evil-crate\"\nversion = \"9.9.9\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"), 0o644))
+	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
+	require.NoError(t, err)
+
+	oldwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(crate))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
+
+	plan, ok := projectPreflightPlan(cargo.New(), []string{"test"}, nil, nil)
+	require.True(t, ok)
+	require.Equal(t, []packagemanager.ManifestRef{
+		{Path: "Cargo.toml", Kind: packagemanager.ManifestKindCargoToml},
+		{Path: filepath.Join(resolvedWorkspace, "Cargo.lock"), Kind: packagemanager.ManifestKindCargoLock},
+		{Path: filepath.Join(resolvedWorkspace, "Cargo.toml"), Kind: packagemanager.ManifestKindCargoToml},
+	}, plan.ManifestRefs)
 }
 
 func TestResolverPreScanDecisionRefusesGeneratedTransitive(t *testing.T) {

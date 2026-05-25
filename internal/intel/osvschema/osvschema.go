@@ -241,6 +241,10 @@ func normalizeEcosystem(osv string) (intel.Ecosystem, bool) {
 		return intel.EcosystemNPM, true
 	case "pip", "pypi":
 		return intel.EcosystemPyPI, true
+	case "go", "golang":
+		return intel.EcosystemGo, true
+	case "crates.io", "cargo", "rust":
+		return intel.EcosystemCrates, true
 	default:
 		return "", false
 	}

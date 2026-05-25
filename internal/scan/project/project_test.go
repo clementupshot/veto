@@ -12,6 +12,9 @@ import (
 	"github.com/brynbellomy/veto/internal/gate"
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/cargolock"
+	"github.com/brynbellomy/veto/internal/packagemanager/cargomanifest"
+	"github.com/brynbellomy/veto/internal/packagemanager/gomod"
 	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
 	"github.com/brynbellomy/veto/internal/packagemanager/jsmanifest"
 	"github.com/brynbellomy/veto/internal/packagemanager/pylock"
@@ -56,6 +59,49 @@ func TestScannerPrunesNodeModules(t *testing.T) {
 	require.Zero(t, result.FilesScanned)
 }
 
+func TestScannerFindsFlaggedGoModule(t *testing.T) {
+	root := t.TempDir()
+	gomod := `module example.com/app
+
+go 1.24
+
+require github.com/evil/module v1.2.3
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte(gomod), 0o644))
+	store := buildStore(t, intel.MalwareReport{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemGo, Name: "github.com/evil/module", Version: "v1.2.3"}, SourceID: "fake"})
+
+	result := project.New(project.Options{Roots: []string{root}, Store: store, Expander: testExpander()}).Scan(context.Background())
+
+	require.Empty(t, result.Errors)
+	require.Equal(t, 1, result.FilesScanned)
+	require.Equal(t, 1, result.PackagesChecked)
+	require.Len(t, result.Findings, 1)
+	require.Equal(t, intel.EcosystemGo, result.Findings[0].PackageRef.Ecosystem)
+	require.Equal(t, "github.com/evil/module", result.Findings[0].PackageRef.Name)
+}
+
+func TestScannerFindsFlaggedCargoLock(t *testing.T) {
+	root := t.TempDir()
+	lock := `version = 4
+
+[[package]]
+name = "evil-crate"
+version = "9.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Cargo.lock"), []byte(lock), 0o644))
+	store := buildStore(t, intel.MalwareReport{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemCrates, Name: "evil-crate", Version: "9.9.9"}, SourceID: "fake"})
+
+	result := project.New(project.Options{Roots: []string{root}, Store: store, Expander: testExpander()}).Scan(context.Background())
+
+	require.Empty(t, result.Errors)
+	require.Equal(t, 1, result.FilesScanned)
+	require.Equal(t, 1, result.PackagesChecked)
+	require.Len(t, result.Findings, 1)
+	require.Equal(t, intel.EcosystemCrates, result.Findings[0].PackageRef.Ecosystem)
+	require.Equal(t, "evil-crate", result.Findings[0].PackageRef.Name)
+}
+
 type fakeSource struct{ reports []intel.MalwareReport }
 
 func (fakeSource) ID() string { return "fake" }
@@ -84,6 +130,9 @@ func testExpander() gate.ManifestExpander {
 		pyPrj:  pymanifest.New(),
 		jsLock: jslock.New(),
 		pyLock: pylock.New(),
+		goMod:  gomod.New(),
+		cargo:  cargomanifest.New(),
+		cLock:  cargolock.New(),
 	}
 }
 
@@ -93,6 +142,9 @@ type compoundExpander struct {
 	pyPrj  *pymanifest.Expander
 	jsLock *jslock.Expander
 	pyLock *pylock.Expander
+	goMod  *gomod.Expander
+	cargo  *cargomanifest.Expander
+	cLock  *cargolock.Expander
 }
 
 func (c compoundExpander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Install, error) {
@@ -112,6 +164,13 @@ func (c compoundExpander) Expand(ref packagemanager.ManifestRef) ([]packagemanag
 		packagemanager.ManifestKindPoetryLock,
 		packagemanager.ManifestKindPdmLock:
 		return c.pyLock.Expand(ref)
+	case packagemanager.ManifestKindGoMod,
+		packagemanager.ManifestKindGoSum:
+		return c.goMod.Expand(ref)
+	case packagemanager.ManifestKindCargoToml:
+		return c.cargo.Expand(ref)
+	case packagemanager.ManifestKindCargoLock:
+		return c.cLock.Expand(ref)
 	default:
 		return nil, nil
 	}

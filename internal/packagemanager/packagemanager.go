@@ -105,6 +105,23 @@ const (
 
 	// ManifestKindPdmLock is pdm's pdm.lock (TOML).
 	ManifestKindPdmLock ManifestKind = "pdm.lock"
+
+	// ManifestKindGoMod is Go's go.mod module manifest. It lists direct and
+	// indirect module requirements with exact module versions.
+	ManifestKindGoMod ManifestKind = "go.mod"
+
+	// ManifestKindGoSum is Go's go.sum checksum file. It can retain historical
+	// modules no longer selected by go.mod, but it is still useful exposure
+	// evidence for existing project scans.
+	ManifestKindGoSum ManifestKind = "go.sum"
+
+	// ManifestKindCargoToml is Cargo.toml. It lists Rust direct dependencies and
+	// can reference registry, git, or path sources.
+	ManifestKindCargoToml ManifestKind = "Cargo.toml"
+
+	// ManifestKindCargoLock is Cargo.lock. It records the resolved Rust package
+	// graph and is the best committed transitive scan surface for Cargo projects.
+	ManifestKindCargoLock ManifestKind = "Cargo.lock"
 )
 
 // ManifestRef is a parser-extracted pointer to an on-disk manifest the gate

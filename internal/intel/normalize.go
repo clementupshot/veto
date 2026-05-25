@@ -35,6 +35,26 @@ func NormalizeName(eco Ecosystem, name string) string {
 	}
 }
 
+// NormalizeVersion canonicalizes versions for exact-version index keys where
+// an ecosystem has a well-known presentation alias. Range comparison has its
+// own comparator path; this helper keeps direct `versions: [...]` advisories
+// and manifest pins aligned.
+func NormalizeVersion(eco Ecosystem, version string) string {
+	switch eco {
+	case EcosystemGo:
+		return normalizeGoVersion(version)
+	default:
+		return version
+	}
+}
+
+func normalizeGoVersion(version string) string {
+	if len(version) > 1 && version[0] == 'v' {
+		return version[1:]
+	}
+	return version
+}
+
 // normalizePyPIName implements PEP 503's normalization rule: lower-case,
 // then collapse every run of `[-_.]` characters into a single `-`.
 //

@@ -69,3 +69,27 @@ func TestNormalizeNameUnknownEcosystem(t *testing.T) {
 	got := intel.NormalizeName(intel.Ecosystem("unknown"), "Mixed_Case.Name")
 	require.Equal(t, "Mixed_Case.Name", got)
 }
+
+func TestNormalizeVersionGo(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"v1.2.3", "1.2.3"},
+		{"1.2.3", "1.2.3"},
+		{"v0.0.0-20260524000000-abcdefabcdef", "0.0.0-20260524000000-abcdefabcdef"},
+		{"", ""},
+		{"v", "v"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := intel.NormalizeVersion(intel.EcosystemGo, tc.in)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestNormalizeVersionUnknownEcosystem(t *testing.T) {
+	got := intel.NormalizeVersion(intel.Ecosystem("unknown"), "v1.2.3")
+	require.Equal(t, "v1.2.3", got)
+}

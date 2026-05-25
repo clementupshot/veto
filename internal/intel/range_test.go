@@ -63,6 +63,17 @@ func TestInRangeNPMSemver(t *testing.T) {
 	}
 }
 
+func TestInRangeGoSemverStripsVPrefix(t *testing.T) {
+	require.True(t, intel.InRange(intel.EcosystemGo, "v1.9.9", intel.VersionRange{Introduced: "0", Fixed: "v2.0.0"}))
+	require.False(t, intel.InRange(intel.EcosystemGo, "v2.0.0", intel.VersionRange{Introduced: "0", Fixed: "v2.0.0"}))
+	require.True(t, intel.InRange(intel.EcosystemGo, "1.9.9", intel.VersionRange{Introduced: "v1.0.0", Fixed: "v2.0.0"}))
+}
+
+func TestInRangeCratesSemver(t *testing.T) {
+	require.True(t, intel.InRange(intel.EcosystemCrates, "1.9.9", intel.VersionRange{Introduced: "0", Fixed: "2.0.0"}))
+	require.False(t, intel.InRange(intel.EcosystemCrates, "2.0.0", intel.VersionRange{Introduced: "0", Fixed: "2.0.0"}))
+}
+
 func TestInRangeUnboundedShortCircuits(t *testing.T) {
 	// IsUnbounded short-circuits before any parser runs, so even a
 	// garbage version string still returns true.

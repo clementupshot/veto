@@ -48,9 +48,18 @@ const advisoryUnknownEcosystem = `{
   "summary": "rust thing",
   "affected": [
     {
-      "package": {"ecosystem": "crates.io", "name": "evil-crate"},
+      "package": {"ecosystem": "Maven", "name": "evil-java"},
       "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}]}]
     }
+  ]
+}`
+
+const advisoryGoAndCrates = `{
+  "id": "MAL-2026-77",
+  "summary": "multi ecosystem",
+  "affected": [
+    {"package": {"ecosystem": "Go", "name": "github.com/evil/module"}, "versions": ["v1.2.3"]},
+    {"package": {"ecosystem": "crates.io", "name": "evil-crate"}, "versions": ["9.9.9"]}
   ]
 }`
 
@@ -150,6 +159,19 @@ func TestReportsSkipsUnknownEcosystem(t *testing.T) {
 	require.NoError(t, err)
 	reports := osvschema.Reports(adv, "osv")
 	require.Empty(t, reports)
+}
+
+func TestReportsSupportsGoAndCrates(t *testing.T) {
+	adv, err := osvschema.Parse([]byte(advisoryGoAndCrates))
+	require.NoError(t, err)
+	reports := osvschema.Reports(adv, "osv")
+	require.Len(t, reports, 2)
+	require.Equal(t, intel.EcosystemGo, reports[0].Ecosystem)
+	require.Equal(t, "github.com/evil/module", reports[0].Name)
+	require.Equal(t, "v1.2.3", reports[0].Version)
+	require.Equal(t, intel.EcosystemCrates, reports[1].Ecosystem)
+	require.Equal(t, "evil-crate", reports[1].Name)
+	require.Equal(t, "9.9.9", reports[1].Version)
 }
 
 func TestReportsBoundedRangeEmitsRangeReport(t *testing.T) {

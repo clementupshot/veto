@@ -524,3 +524,22 @@ func TestStoreLookupNPMNameNormalization(t *testing.T) {
 		require.True(t, v.Flagged(), "npm case-insensitive: %q must hit the same report as React", name)
 	}
 }
+
+func TestStoreLookupGoVersionNormalization(t *testing.T) {
+	logger := zerolog.Nop()
+	src := &fakeSource{
+		id: "alpha",
+		per: map[intel.Ecosystem][]intel.MalwareReport{
+			intel.EcosystemGo: {
+				{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemGo, Name: "github.com/evil/module", Version: "v1.2.3"}, SourceID: "alpha"},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+
+	for _, version := range []string{"v1.2.3", "1.2.3"} {
+		v := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemGo, Name: "github.com/evil/module", Version: version})
+		require.True(t, v.Flagged(), "Go version %q must hit the same report", version)
+	}
+}

@@ -71,6 +71,40 @@ func TestFetchUnsupportedEcosystem(t *testing.T) {
 	require.ErrorIs(t, err, intel.ErrUnsupportedEcosystem)
 }
 
+func TestFetchGoAndCratesPaths(t *testing.T) {
+	t.Parallel()
+
+	goPayload := makeOSVZip(t, "MAL-2026-GO", "github.com/evil/module", "Go", []string{"v1.2.3"})
+	cratePayload := makeOSVZip(t, "MAL-2026-RS", "evil-crate", "crates.io", []string{"9.9.9"})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Go/all.zip":
+			_, _ = w.Write(goPayload)
+		case "/crates.io/all.zip":
+			_, _ = w.Write(cratePayload)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	src, err := osv.New(osv.Options{BaseURL: srv.URL, CacheDir: t.TempDir(), Logger: zerolog.Nop()})
+	require.NoError(t, err)
+
+	goReports, err := src.Fetch(context.Background(), intel.EcosystemGo)
+	require.NoError(t, err)
+	require.Len(t, goReports, 1)
+	require.Equal(t, intel.EcosystemGo, goReports[0].Ecosystem)
+	require.Equal(t, "github.com/evil/module", goReports[0].Name)
+
+	crateReports, err := src.Fetch(context.Background(), intel.EcosystemCrates)
+	require.NoError(t, err)
+	require.Len(t, crateReports, 1)
+	require.Equal(t, intel.EcosystemCrates, crateReports[0].Ecosystem)
+	require.Equal(t, "evil-crate", crateReports[0].Name)
+}
+
 // TestFetchEtagShortCircuit verifies that once a payload has been parsed,
 // a subsequent 304 reuses the in-memory cache (no re-parse off disk needed).
 // We assert two upstream hits — the second carries If-None-Match and the

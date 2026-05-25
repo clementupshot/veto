@@ -15,19 +15,22 @@ import (
 	"github.com/brynbellomy/go-utils/errors"
 )
 
-// Ecosystem identifies a package ecosystem (npm, PyPI, ...). Sources translate
-// their internal taxonomies into this set so the Store can be ecosystem-agnostic.
+// Ecosystem identifies a package ecosystem (npm, PyPI, Go, crates.io, ...).
+// Sources translate their internal taxonomies into this set so the Store can be
+// ecosystem-agnostic.
 type Ecosystem string
 
 const (
-	EcosystemNPM  Ecosystem = "npm"
-	EcosystemPyPI Ecosystem = "pypi"
+	EcosystemNPM    Ecosystem = "npm"
+	EcosystemPyPI   Ecosystem = "pypi"
+	EcosystemGo     Ecosystem = "go"
+	EcosystemCrates Ecosystem = "crates.io"
 )
 
 // AllEcosystems lists every ecosystem the project understands today. New
 // ecosystems get appended here and the corresponding Source method dispatches
 // to them.
-var AllEcosystems = []Ecosystem{EcosystemNPM, EcosystemPyPI}
+var AllEcosystems = []Ecosystem{EcosystemNPM, EcosystemPyPI, EcosystemGo, EcosystemCrates}
 
 // PackageRef identifies a specific package version within an ecosystem. An
 // empty Version means "match any version of this package."

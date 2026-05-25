@@ -45,9 +45,16 @@ func TestParseTarballExtractsReviewedVulnerabilities(t *testing.T) {
 }`
 	goAdvisory := `{
   "id": "GHSA-aaaa-bbbb-cccc",
-  "summary": "unsupported ecosystem",
+  "summary": "go advisory",
   "affected": [
-    {"package": {"ecosystem": "Go", "name": "example.com/pkg"}, "versions": ["1.0.0"]}
+    {"package": {"ecosystem": "Go", "name": "example.com/pkg"}, "versions": ["v1.0.0"]}
+  ]
+}`
+	crateAdvisory := `{
+  "id": "GHSA-dddd-eeee-ffff",
+  "summary": "rust advisory",
+  "affected": [
+    {"package": {"ecosystem": "crates.io", "name": "rust-pkg"}, "versions": ["0.2.0"]}
   ]
 }`
 
@@ -58,13 +65,14 @@ func TestParseTarballExtractsReviewedVulnerabilities(t *testing.T) {
 		"advisory-database-main/advisories/github-reviewed/2026/05/GHSA-4444/GHSA-4444-5555-6666.json": pyPIAdvisory,
 		"advisory-database-main/advisories/github-reviewed/2026/05/GHSA-7777/GHSA-7777-8888-9999.json": withdrawn,
 		"advisory-database-main/advisories/github-reviewed/2026/05/GHSA-aaaa/GHSA-aaaa-bbbb-cccc.json": goAdvisory,
+		"advisory-database-main/advisories/github-reviewed/2026/05/GHSA-dddd/GHSA-dddd-eeee-ffff.json": crateAdvisory,
 		"advisory-database-main/advisories/github-reviewed/2026/05/GHSA-not-json/GHSA-not-json.md":     npmAdvisory,
 	})
 
 	src := &Source{logger: zerolog.Nop()}
 	reports, err := src.parseTarball(tarballPath)
 	require.NoError(t, err)
-	require.Len(t, reports, 2)
+	require.Len(t, reports, 4)
 
 	byName := map[string]intel.MalwareReport{}
 	for _, r := range reports {
@@ -84,6 +92,14 @@ func TestParseTarballExtractsReviewedVulnerabilities(t *testing.T) {
 	require.NotNil(t, py.Range)
 	require.Equal(t, "0", py.Range.Introduced)
 	require.Equal(t, "2.0.0", py.Range.Fixed)
+
+	goReport := byName["example.com/pkg"]
+	require.Equal(t, intel.EcosystemGo, goReport.Ecosystem)
+	require.Equal(t, "v1.0.0", goReport.Version)
+
+	crateReport := byName["rust-pkg"]
+	require.Equal(t, intel.EcosystemCrates, crateReport.Ecosystem)
+	require.Equal(t, "0.2.0", crateReport.Version)
 }
 
 func TestFetchEndToEndUsesTarballCache(t *testing.T) {

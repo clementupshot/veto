@@ -168,6 +168,7 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 	// npm). See internal/intel/normalize.go.
 	verdict := Verdict{Ref: ref}
 	lookupName := NormalizeName(ref.Ecosystem, ref.Name)
+	lookupVersion := NormalizeVersion(ref.Ecosystem, ref.Version)
 
 	if ref.Version == "" {
 		if reports, ok := s.byName[nameKey{ref.Ecosystem, lookupName}]; ok {
@@ -177,13 +178,13 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 	}
 
 	// Exact (name, version) match — every entry here applies.
-	if reports, ok := s.byVersion[versionKey{ref.Ecosystem, lookupName, ref.Version}]; ok {
+	if reports, ok := s.byVersion[versionKey{ref.Ecosystem, lookupName, lookupVersion}]; ok {
 		verdict.Reports = append(verdict.Reports, reports...)
 	}
 	// Range-bearing and legacy "all versions" findings. byName holds
 	// every report (pinned, ranged, and the rare empty-Version-empty-Range
 	// case from non-OSV sources). We pick out the entries that apply to
-	// ref.Version here:
+	// lookupVersion here:
 	//   - r.Range != nil: defer to the per-ecosystem comparator. An
 	//     unbounded range short-circuits to true; a bounded range
 	//     calls into the semver parser.
@@ -195,7 +196,7 @@ func (s *memStore) Lookup(ref PackageRef) Verdict {
 		for _, r := range reports {
 			switch {
 			case r.Range != nil:
-				if InRange(ref.Ecosystem, ref.Version, *r.Range) {
+				if InRange(ref.Ecosystem, lookupVersion, *r.Range) {
 					verdict.Reports = append(verdict.Reports, r)
 				}
 			case r.Version == "":
@@ -431,11 +432,12 @@ func buildIndices(resolved map[sourceEcoKey][]MalwareReport) (
 			// reported it so the verdict surface still shows the upstream
 			// spelling. See internal/intel/normalize.go.
 			indexName := NormalizeName(report.Ecosystem, report.Name)
+			indexVersion := NormalizeVersion(report.Ecosystem, report.Version)
 			k := dedupKey{
 				SourceID:  report.SourceID,
 				Ecosystem: report.Ecosystem,
 				Name:      indexName,
-				Version:   report.Version,
+				Version:   indexVersion,
 			}
 			if report.Range != nil {
 				k.Introduced = report.Range.Introduced
@@ -447,7 +449,7 @@ func buildIndices(resolved map[sourceEcoKey][]MalwareReport) (
 			}
 			seen[k] = struct{}{}
 			if report.Version != "" {
-				vk := versionKey{report.Ecosystem, indexName, report.Version}
+				vk := versionKey{report.Ecosystem, indexName, indexVersion}
 				byVersion[vk] = append(byVersion[vk], report)
 			}
 			nk := nameKey{report.Ecosystem, indexName}

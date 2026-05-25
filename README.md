@@ -124,9 +124,9 @@ versions, not only active supply-chain malware.
 intel/             ← parent: Source interface, MalwareReport, Store
 intel/normalize.go ← PEP 503 + npm name normalization at lookup + ingest
 intel/range.go     ← VersionRange + per-ecosystem InRange comparator
-                     (semver via Masterminds/semver for npm; PyPI
-                     over-blocks bounded ranges with a debug log —
-                     no PEP 440 today, feed has no bounded PyPI entries)
+                     (semver via Masterminds/semver for npm/Go/crates.io;
+                     PyPI over-blocks bounded ranges with a debug log —
+                     no PEP 440 today)
 intel/sources/
   aikido/          ← https://malware-list.aikido.dev (implemented)
   openssf/         ← github.com/ossf/malicious-packages (implemented)
@@ -144,6 +144,8 @@ packagemanager/
   jsmanifest/ pymanifest/     ← package.json / pyproject.toml expanders
   jslock/ pylock/             ← lockfile expanders (transitive coverage)
   pyreq/                      ← requirements.txt expander
+  gomod/                      ← go.mod / go.sum scan expander
+  cargomanifest/ cargolock/    ← Cargo.toml / Cargo.lock scan expanders
   pmlist/                     ← canonical PM-name set (single source of truth
                                 consumed by isShimName, install-shims,
                                 install-wrappers, the hook, AND the C
@@ -186,18 +188,23 @@ positive). Veto filters those at ingest so a retracted MAL-* entry
 can't keep refusing a clean package indefinitely — the advisory stays
 in the feed for audit continuity but is treated as inactive.
 
-**Transitive coverage via lockfiles and npm resolver pre-scan.** When an
-install verb runs in a project with a lockfile (`package-lock.json`,
-`pnpm-lock.yaml`, `yarn.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`),
-veto parses the full resolved transitive tree and gates every (name,
-version) tuple in it — not just the verb's explicit argv. For npm
-install-family commands, veto also runs the real npm resolver first in
-an isolated temp copy with
+**Live transitive coverage via lockfiles and npm resolver pre-scan.**
+When an install verb runs in a supported npm-family or Python-family
+project with a lockfile (`package-lock.json`, `pnpm-lock.yaml`,
+`yarn.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`), veto parses the
+full resolved transitive tree and gates every (name, version) tuple in
+it — not just the verb's explicit argv. For npm install-family
+commands, veto also runs the real npm resolver first in an isolated
+temp copy with
 `--package-lock=true --package-lock-only --ignore-scripts --audit=false --fund=false`, then
 gates the generated `package-lock.json`/`npm-shrinkwrap.json` before the
 real install is allowed to run. If the resolver probe fails, does not
 produce an expected lockfile, or the generated lockfile does not include
 the argv-named packages, veto aborts fail-closed.
+
+`veto scan` also parses committed Go and Rust files (`go.mod`,
+`go.sum`, `Cargo.toml`, `Cargo.lock`) to detect existing exposure, but
+live `go` and `cargo` invocations are not gated yet.
 
 **Fail-closed defaults.** Per-source malware feeds are fetched
 concurrently with etag-based caching in `~/.cache/veto/`.
@@ -247,6 +254,12 @@ roots for flagged package artifacts, and agent surfaces for persistence
 or fetch-and-run hooks across Claude, Codex, Cursor, Sirene, MCP configs,
 and launchd. Use negative flags only when you intentionally want to
 narrow the sweep:
+
+Project scanning currently covers npm-family, Python-family, Go, and
+Rust committed dependency files: `package.json`, npm/pnpm/yarn lockfiles,
+`requirements*.txt`, `constraints*.txt`, `pyproject.toml`, `uv.lock`,
+`poetry.lock`, `pdm.lock`, `go.mod`, `go.sum`, `Cargo.toml`, and
+`Cargo.lock`.
 
 ```sh
 veto scan --json
@@ -403,17 +416,20 @@ these):
   floor catches the worst case (literally empty), but a feed that
   omits most malware while still returning hundreds of entries would
   slip through. Track-and-alert on report-count drops is future work.
-- **PyPI bounded-range advisories over-block**. The current OSV PyPI
-  feed only uses `{introduced: "0"}` ("all versions"), so no PyPI
-  feed today emits a bounded range. If one ever does, the comparator
-  falls back to "over-block" (refuse the install) with a debug log
-  rather than under-block — safe posture but a known precision gap
-  until PEP 440 range matching lands.
+- **PyPI bounded-range advisories over-block**. The comparator falls
+  back to "over-block" (refuse the install) with a debug log rather
+  than under-block — safe posture but a known precision gap until PEP
+  440 range matching lands.
 - **Resolver pre-scan is npm-only today.** Existing lockfiles are gated
-  for npm, pnpm, yarn, bun, uv, poetry, and pdm, but only npm currently
-  gets a temp-dir resolver probe for newly named packages. Other
-  ecosystems still rely on argv, manifests, and already-present lockfiles
-  until their safe resolver modes are wired in.
+  for live npm-family and Python-family install commands, but only npm
+  currently gets a temp-dir resolver probe for newly named packages.
+  Other ecosystems still rely on argv, manifests, and already-present
+  lockfiles until their safe resolver modes are wired in.
+- **Go and Cargo live command gating is not implemented yet.** `veto
+  scan` detects exposure in `go.mod`/`go.sum` and `Cargo.toml`/
+  `Cargo.lock`, and OSV/GHSA intel can represent Go and crates.io
+  findings. The actual `go` and `cargo` binaries are not yet in the
+  package-manager shim/wrapper set.
 - **Statically-linked binaries that bypass libc**. Theoretical; no
   real PM does this today.
 

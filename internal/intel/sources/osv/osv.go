@@ -291,6 +291,10 @@ func ecosystemPath(eco intel.Ecosystem) (string, bool) {
 		return "npm", true
 	case intel.EcosystemPyPI:
 		return "PyPI", true
+	case intel.EcosystemGo:
+		return "Go", true
+	case intel.EcosystemCrates:
+		return "crates.io", true
 	default:
 		return "", false
 	}

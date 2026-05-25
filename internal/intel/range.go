@@ -63,6 +63,10 @@ func InRange(eco Ecosystem, v string, rng VersionRange) bool {
 	switch eco {
 	case EcosystemNPM:
 		return inRangeSemver(v, rng)
+	case EcosystemGo:
+		return inRangeSemver(NormalizeVersion(eco, v), normalizeRangeVersions(eco, rng))
+	case EcosystemCrates:
+		return inRangeSemver(v, rng)
 	case EcosystemPyPI:
 		log.Debug().
 			Str("version", v).
@@ -79,9 +83,16 @@ func InRange(eco Ecosystem, v string, rng VersionRange) bool {
 	}
 }
 
+func normalizeRangeVersions(eco Ecosystem, rng VersionRange) VersionRange {
+	rng.Introduced = NormalizeVersion(eco, rng.Introduced)
+	rng.Fixed = NormalizeVersion(eco, rng.Fixed)
+	rng.LastAffected = NormalizeVersion(eco, rng.LastAffected)
+	return rng
+}
+
 // inRangeSemver answers InRange for ecosystems that follow semver
-// 2.0.0 (today: npm). Returns true on any parse error so a malformed
-// query or feed value over-blocks.
+// 2.0.0. Returns true on any parse error so a malformed query or feed value
+// over-blocks.
 func inRangeSemver(v string, rng VersionRange) bool {
 	ver, err := semver.NewVersion(v)
 	if err != nil {

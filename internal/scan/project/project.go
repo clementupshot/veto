@@ -170,6 +170,14 @@ func manifestKind(path string) (packagemanager.ManifestKind, bool) {
 		return packagemanager.ManifestKindPoetryLock, true
 	case "pdm.lock":
 		return packagemanager.ManifestKindPdmLock, true
+	case "go.mod":
+		return packagemanager.ManifestKindGoMod, true
+	case "go.sum":
+		return packagemanager.ManifestKindGoSum, true
+	case "Cargo.toml":
+		return packagemanager.ManifestKindCargoToml, true
+	case "Cargo.lock":
+		return packagemanager.ManifestKindCargoLock, true
 	}
 	lower := strings.ToLower(base)
 	if strings.HasPrefix(lower, "requirements") && strings.HasSuffix(lower, ".txt") {

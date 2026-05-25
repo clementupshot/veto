@@ -36,7 +36,10 @@ import (
 	"github.com/brynbellomy/veto/internal/intel/sources/pypa"
 	"github.com/brynbellomy/veto/internal/packagemanager"
 	"github.com/brynbellomy/veto/internal/packagemanager/bun"
+	"github.com/brynbellomy/veto/internal/packagemanager/cargolock"
+	"github.com/brynbellomy/veto/internal/packagemanager/cargomanifest"
 	pmexec "github.com/brynbellomy/veto/internal/packagemanager/exec"
+	"github.com/brynbellomy/veto/internal/packagemanager/gomod"
 	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
 	"github.com/brynbellomy/veto/internal/packagemanager/jsmanifest"
 	"github.com/brynbellomy/veto/internal/packagemanager/npm"
@@ -1002,6 +1005,9 @@ type compoundExpander struct {
 	pyPrj  *pymanifest.Expander
 	jsLock *jslock.Expander
 	pyLock *pylock.Expander
+	goMod  *gomod.Expander
+	cargo  *cargomanifest.Expander
+	cLock  *cargolock.Expander
 }
 
 // newCompoundExpander wires the leaf expanders behind a single
@@ -1013,6 +1019,9 @@ func newCompoundExpander() *compoundExpander {
 		pyPrj:  pymanifest.New(),
 		jsLock: jslock.New(),
 		pyLock: pylock.New(),
+		goMod:  gomod.New(),
+		cargo:  cargomanifest.New(),
+		cLock:  cargolock.New(),
 	}
 }
 
@@ -1037,6 +1046,13 @@ func (c *compoundExpander) Expand(ref packagemanager.ManifestRef) ([]packagemana
 		packagemanager.ManifestKindPoetryLock,
 		packagemanager.ManifestKindPdmLock:
 		return c.pyLock.Expand(ref)
+	case packagemanager.ManifestKindGoMod,
+		packagemanager.ManifestKindGoSum:
+		return c.goMod.Expand(ref)
+	case packagemanager.ManifestKindCargoToml:
+		return c.cargo.Expand(ref)
+	case packagemanager.ManifestKindCargoLock:
+		return c.cLock.Expand(ref)
 	default:
 		return nil, nil
 	}
@@ -1088,6 +1104,8 @@ Usage:
   veto scan [--root DIR] [--json] [--no-projects] [--no-caches] [--no-agent-surface]
                             scan projects, package-manager caches, and agent
                             surfaces for existing exposure (read-only)
+                            Project files include npm-family, Python-family,
+                            Go, and Rust manifests and lockfiles.
   veto quarantine-cache [--dry-run] [--purge] [--json]
                             scan cache exposure and optionally purge confirmed
                             malicious cache artifacts
@@ -1153,6 +1171,10 @@ Supported package managers:
   python, python3 (only the `+"`python -m {pip,uv,pipx,poetry,pdm}`"+` form
                    is gated; every other invocation fast-paths to
                    real python with no intel-store touch)
+
+Project scan-only ecosystems:
+  Go and Rust are currently covered by `+"`veto scan`"+` through go.mod/go.sum
+  and Cargo.toml/Cargo.lock. Live `+"`go`"+`/`+"`cargo`"+` command gating is not wired yet.
 
 Environment:
   VETO_CACHE_DIR     override cache location (default: $XDG_CACHE_HOME/veto)

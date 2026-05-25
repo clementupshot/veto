@@ -298,7 +298,7 @@ cooperation needed.
 ### Install
 
 ```sh
-veto install-wrappers              # discover + wrap homebrew + mise + asdf + .bun
+veto install-wrappers              # discover + wrap homebrew + mise + asdf + pyenv + nvm + .bun
 veto install-wrappers --dry-run    # show what would change without writing
 veto install-wrappers --only npm   # restrict to one PM
 veto install-wrappers --dir /path  # add an extra discovery root

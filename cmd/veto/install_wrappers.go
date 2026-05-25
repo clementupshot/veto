@@ -365,31 +365,17 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 	// 2) mise install dirs: ~/.local/share/mise/installs/<tool>/<v>/bin/<pm>.
 	if home, err := os.UserHomeDir(); err == nil {
 		miseRoot := filepath.Join(home, ".local", "share", "mise", "installs")
-		for _, binDir := range globMiseBinDirs(miseRoot) {
-			for _, pm := range wrappedManagers {
-				if !pmFilter(pm) {
-					continue
-				}
-				p := filepath.Join(binDir, pm)
-				if include(p) {
-					candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "mise"})
-				}
-			}
-		}
+		candidates = appendWrapCandidates(candidates, globToolVersionBinDirs(miseRoot), wrappedManagers, pmFilter, include, "mise")
 		// 3) asdf: ~/.asdf/installs/<tool>/<v>/bin/<pm>.
 		asdfRoot := filepath.Join(home, ".asdf", "installs")
-		for _, binDir := range globMiseBinDirs(asdfRoot) {
-			for _, pm := range wrappedManagers {
-				if !pmFilter(pm) {
-					continue
-				}
-				p := filepath.Join(binDir, pm)
-				if include(p) {
-					candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: "asdf"})
-				}
-			}
-		}
-		// 4) Direct bun install: ~/.bun/bin
+		candidates = appendWrapCandidates(candidates, globToolVersionBinDirs(asdfRoot), wrappedManagers, pmFilter, include, "asdf")
+		// 4) pyenv: ~/.pyenv/versions/<v>/bin/<pm>.
+		pyenvRoot := filepath.Join(home, ".pyenv", "versions")
+		candidates = appendWrapCandidates(candidates, globVersionBinDirs(pyenvRoot), wrappedManagers, pmFilter, include, "pyenv")
+		// 5) nvm: ~/.nvm/versions/node/<v>/bin/<pm>.
+		nvmRoot := filepath.Join(home, ".nvm", "versions", "node")
+		candidates = appendWrapCandidates(candidates, globVersionBinDirs(nvmRoot), wrappedManagers, pmFilter, include, "nvm")
+		// 6) Direct bun install: ~/.bun/bin
 		bunDir := filepath.Join(home, ".bun", "bin")
 		for _, pm := range []string{"bun", "bunx"} {
 			if !pmFilter(pm) {
@@ -402,7 +388,7 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 		}
 	}
 
-	// 5) User-supplied --dir entries.
+	// 7) User-supplied --dir entries.
 	for _, dir := range opts.dirs {
 		for _, pm := range wrappedManagers {
 			if !pmFilter(pm) {
@@ -418,11 +404,24 @@ func discoverWrapCandidates(opts wrapperFlags, vetoPath string) ([]wrapCandidate
 	return candidates, nil
 }
 
-// globMiseBinDirs returns every `<tool>/<version>/bin` directory under
-// the given root (mise's installs root, or asdf's). We do this by
-// listing the two intermediate levels rather than using filepath.Glob
-// so we get reasonable behavior when the tree is empty or partial.
-func globMiseBinDirs(root string) []string {
+func appendWrapCandidates(candidates []wrapCandidate, binDirs []string, managers []string, pmFilter func(string) bool, include func(string) bool, source string) []wrapCandidate {
+	for _, binDir := range binDirs {
+		for _, pm := range managers {
+			if !pmFilter(pm) {
+				continue
+			}
+			p := filepath.Join(binDir, pm)
+			if include(p) {
+				candidates = append(candidates, wrapCandidate{path: p, pm: pm, source: source})
+			}
+		}
+	}
+	return candidates
+}
+
+// globToolVersionBinDirs returns every `<tool>/<version>/bin` directory under
+// a version-manager root such as mise's installs root or asdf's installs root.
+func globToolVersionBinDirs(root string) []string {
 	out := []string{}
 	tools, err := os.ReadDir(root)
 	if err != nil {
@@ -445,6 +444,27 @@ func globMiseBinDirs(root string) []string {
 			if info, err := os.Stat(binDir); err == nil && info.IsDir() {
 				out = append(out, binDir)
 			}
+		}
+	}
+	return out
+}
+
+// globVersionBinDirs returns every `<version>/bin` directory under a
+// version-manager root such as pyenv's versions root or nvm's node versions
+// root.
+func globVersionBinDirs(root string) []string {
+	out := []string{}
+	versions, err := os.ReadDir(root)
+	if err != nil {
+		return out
+	}
+	for _, v := range versions {
+		if !v.IsDir() {
+			continue
+		}
+		binDir := filepath.Join(root, v.Name(), "bin")
+		if info, err := os.Stat(binDir); err == nil && info.IsDir() {
+			out = append(out, binDir)
 		}
 	}
 	return out
@@ -734,4 +754,3 @@ func saveWrapperState(cfg config, state wrapperState) error {
 	}
 	return os.Rename(tmpPath, path)
 }
-

@@ -233,6 +233,59 @@ func TestDiscoverWrapCandidates_IncludesAlreadyOurs(t *testing.T) {
 	require.Contains(t, paths, npm, "already-ours path must surface as a candidate so reconciliation can register it")
 }
 
+func TestDiscoverWrapCandidates_IncludesPyenvAndNvmInstalls(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	veto := filepath.Join(home, ".local", "bin", "veto")
+	require.NoError(t, os.MkdirAll(filepath.Dir(veto), 0o755))
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+
+	pyenvPip := filepath.Join(home, ".pyenv", "versions", "3.12.0", "bin", "pip")
+	nvmNpm := filepath.Join(home, ".nvm", "versions", "node", "24.7.0", "bin", "npm")
+	for _, p := range []string{pyenvPip, nvmNpm} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	}
+
+	candidates, err := discoverWrapCandidates(wrapperFlags{only: map[string]struct{}{"pip": {}, "npm": {}}}, veto)
+	require.NoError(t, err)
+
+	byPath := map[string]wrapCandidate{}
+	for _, c := range candidates {
+		byPath[c.path] = c
+	}
+	require.Equal(t, "pyenv", byPath[pyenvPip].source)
+	require.Equal(t, "pip", byPath[pyenvPip].pm)
+	require.Equal(t, "nvm", byPath[nvmNpm].source)
+	require.Equal(t, "npm", byPath[nvmNpm].pm)
+}
+
+func TestDiscoverWrapCandidates_ReconcilesAlreadyWrappedPyenvAndNvm(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	veto := filepath.Join(home, ".local", "bin", "veto")
+	require.NoError(t, os.MkdirAll(filepath.Dir(veto), 0o755))
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+
+	pyenvPip := filepath.Join(home, ".pyenv", "versions", "3.12.0", "bin", "pip")
+	nvmNpm := filepath.Join(home, ".nvm", "versions", "node", "24.7.0", "bin", "npm")
+	for _, p := range []string{pyenvPip, nvmNpm} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.Symlink(veto, p))
+		require.NoError(t, os.WriteFile(p+wrapperSuffix, []byte("real"), 0o755))
+	}
+
+	candidates, err := discoverWrapCandidates(wrapperFlags{only: map[string]struct{}{"pip": {}, "npm": {}}}, veto)
+	require.NoError(t, err)
+
+	paths := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		paths = append(paths, c.path)
+	}
+	require.Contains(t, paths, pyenvPip)
+	require.Contains(t, paths, nvmNpm)
+}
+
 // TestApplyWrapper_DryRun_TouchesNothing: --dry-run mode reports what
 // would happen without making filesystem changes.
 func TestApplyWrapper_DryRun_TouchesNothing(t *testing.T) {

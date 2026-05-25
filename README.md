@@ -1,17 +1,32 @@
 # veto
 
-A command-level malware scanner for package managers. Aggregates intel
-from four default upstream feeds (Aikido, OpenSSF malicious-packages,
-OSV, PyPA advisory-db), supports optional GitHub Advisory Database
-CVE/GHSA blocking, deduplicates, and refuses to let an install proceed
-if any source flags the requested (package, version) tuple — honoring
-the advisory's recorded version pins or affected ranges, with an
-unbounded "all versions" fallback for advisories that don't narrow it
-down.
+A command-level malware scanner for package managers. Veto aggregates
+package-intelligence feeds, blocks known malicious package installs by
+default, optionally gates broader CVE/GHSA advisories, scans existing
+projects and caches for exposure, and audits common agent persistence
+surfaces before they can launch package-manager code.
 
-**Status:** ready for colleague use on macOS. Linux untested in this
-revision; the C interposer should build but layer 4's mise/asdf
-discovery paths haven't been verified on a Linux box.
+## Quickstart
+
+```sh
+git clone https://github.com/brynbellomy/veto.git
+cd veto
+make install
+veto install-all --force
+```
+
+`install-all` installs the shims, managed shell block, Claude hook,
+native interposer, real-binary wrappers, intel cache, and doctor checks.
+Open a new terminal or source your shell rc file, then verify the setup:
+
+```sh
+veto doctor
+veto scan
+```
+
+Use `veto npm install <pkg>`, `veto pip install <pkg>`, `veto uv pip
+install <pkg>`, `veto go get <pkg>`, or `veto cargo add <crate>` to run
+one package-manager command through the gate explicitly.
 
 ## What it actually blocks
 
@@ -52,18 +67,11 @@ used to refuse popular packages over a single rogue release of an
 otherwise-legitimate name. For an unversioned query, ANY flagged
 version of the name refuses, since the caller hasn't pinned.
 
-## Quick install (60 seconds)
+## Installation Details
 
-```sh
-git clone https://github.com/brynbellomy/veto.git
-cd veto
-make install                                # builds → ~/.local/bin/veto
-veto install-all --force                    # shims, shell block, hook,
-                                           # interposer, wrappers, sync, doctor
-```
-
-`install-all` builds `libveto_interpose.dylib`/`.so` with `make interposer`
-when needed. Then `source ~/.zshrc` (or open a new terminal) for the
+`make install` builds `veto` into `~/.local/bin/veto`. `install-all`
+builds `libveto_interpose.dylib`/`.so` with `make interposer` when
+needed. Open a new terminal, or source your shell rc file, for the
 managed shell block and interposer env vars to take effect.
 
 If you want to install the layers one at a time, the equivalent commands are
@@ -113,9 +121,9 @@ package names against an aggregated malware database, and refuses or
 passes through. Because the check happens before the package manager
 runs, none of the failure modes above apply.
 
-Optional broad vulnerability feeds can also be enabled for teams that
-want install-time CVE/GHSA blocking. They are intentionally separate
-from the default malware feed set because they block ordinary vulnerable
+An optional broad vulnerability feed can also be enabled for teams that
+want install-time CVE/GHSA blocking. It is intentionally separate from
+the default malware feed set because it blocks ordinary vulnerable
 versions, not only active supply-chain malware.
 
 ## Architecture
@@ -126,7 +134,7 @@ intel/normalize.go ← PEP 503 + npm name normalization at lookup + ingest
 intel/range.go     ← VersionRange + per-ecosystem InRange comparator
                      (semver via Masterminds/semver for npm/Go/crates.io;
                      PyPI over-blocks bounded ranges with a debug log —
-                     no PEP 440 today)
+                     no PEP 440 bounded-range comparator)
 intel/sources/
   aikido/          ← https://malware-list.aikido.dev (implemented)
   openssf/         ← github.com/ossf/malicious-packages (implemented)
@@ -202,12 +210,12 @@ real install is allowed to run. If the resolver probe fails, does not
 produce an expected lockfile, or the generated lockfile does not include
 the argv-named packages, veto aborts fail-closed.
 
-Go and Cargo phase-1 live gating covers fetch/mutate commands that can
-introduce or download dependency code (`go get`, `go install`, remote
-`go run pkg@version`, `go mod download`, `go mod tidy`, `cargo add`,
-`cargo update`, `cargo fetch`, and `cargo install`). Build/test/run
-preflight over already-present project state is intentionally left for
-phase 2.
+Go and Cargo live gating covers fetch/mutate commands that can introduce
+or download dependency code (`go get`, `go install`, remote `go run
+pkg@version`, `go mod download`, `go mod tidy`, `cargo add`, `cargo
+update`, `cargo fetch`, and `cargo install`). Local build/test/run
+commands are not preflighted yet; `veto scan` covers already-present Go
+and Cargo project state.
 
 **Fail-closed defaults.** Per-source malware feeds are fetched
 concurrently with etag-based caching in `~/.cache/veto/`.
@@ -258,8 +266,8 @@ or fetch-and-run hooks across Claude, Codex, Cursor, Sirene, MCP configs,
 and launchd. Use negative flags only when you intentionally want to
 narrow the sweep:
 
-Project scanning currently covers npm-family, Python-family, Go, and
-Rust committed dependency files: `package.json`, npm/pnpm/yarn lockfiles,
+Project scanning covers npm-family, Python-family, Go, and Rust committed
+dependency files: `package.json`, npm/pnpm/yarn lockfiles,
 `requirements*.txt`, `constraints*.txt`, `pyproject.toml`, `uv.lock`,
 `poetry.lock`, `pdm.lock`, `go.mod`, `go.sum`, `Cargo.toml`, and
 `Cargo.lock`.
@@ -274,8 +282,8 @@ veto scan --no-projects --no-agent-surface  # cache exposure only
 confirmed malicious cache artifacts. It defaults to dry-run; `--purge`
 deletes only confirmed flagged artifacts after resolving symlinks and
 verifying the target remains inside a known cache root. IOC-only residue,
-such as `_npx` MCP cache entries without an intel hit, is reported but
-not purged by the MVP.
+such as `_npx` MCP cache entries without an intel hit, is reported for
+manual review.
 
 `veto audit-agent-surface` runs only the agent persistence audit. It does
 not need a healthy intel store because it is checking local hook and MCP
@@ -391,12 +399,6 @@ these):
 
 **Known limitations** (what veto cannot protect against):
 
-- **Socket and SafeDep PMG are not cached bulk sources yet.** Socket's
-  public vuln path is a website/API surface, and PMG queries SafeDep's
-  real-time analysis service per package. Those are good candidates for
-  a future authenticated online lookup layer, but veto does not scrape
-  them into the cached source set.
-
 - **SIP-protected binaries on macOS** (`/usr/bin/pip3`,
   `/usr/bin/python3 -m pip …`). `DYLD_INSERT_LIBRARIES` is stripped
   by dyld for `/usr/bin/*` and `/System/...`; the dir is also
@@ -417,22 +419,20 @@ these):
   upgrades.
 - **Compromised upstream returning near-empty feeds**. The 1000-report
   floor catches the worst case (literally empty), but a feed that
-  omits most malware while still returning hundreds of entries would
-  slip through. Track-and-alert on report-count drops is future work.
+  omits most malware while still returning hundreds of entries could
+  slip through.
 - **PyPI bounded-range advisories over-block**. The comparator falls
   back to "over-block" (refuse the install) with a debug log rather
-  than under-block — safe posture but a known precision gap until PEP
-  440 range matching lands.
-- **Resolver pre-scan is npm-only today.** Existing lockfiles are gated
-  for live npm-family, Python-family, Go, and Cargo install/fetch
-  commands, but only npm currently gets a temp-dir resolver probe for
-  newly named packages. Other ecosystems still rely on argv,
-  manifests, and already-present lockfiles until their safe resolver
-  modes are wired in.
-- **Go and Cargo build/test/run preflight is phase 2.** `go build`,
-  `go test`, local `go run`, `cargo build`, `cargo test`, and local
-  `cargo run` still pass through today; phase 1 gates dependency
-  fetch/mutate commands only.
+  than under-block. This is a safe posture, but PEP 440 bounded-range
+  matching is not implemented.
+- **Resolver pre-scan is npm-only.** Existing lockfiles are gated for
+  live npm-family, Python-family, Go, and Cargo install/fetch commands,
+  but only npm gets a temp-dir resolver probe for newly named packages.
+  Other ecosystems rely on argv, manifests, and already-present lockfiles.
+- **Go and Cargo build/test/run preflight is not implemented.** `go
+  build`, `go test`, local `go run`, `cargo build`, `cargo test`, and
+  local `cargo run` still pass through. Dependency fetch/mutate commands
+  are gated.
 - **Statically-linked binaries that bypass libc**. Theoretical; no
   real PM does this today.
 
@@ -456,7 +456,3 @@ Run `veto doctor` in a fresh terminal. It checks:
 
 Each row is PASS / WARN / FAIL with a one-line fix. The command exits
 1 if any row is FAIL — useful as a CI tripwire or a shell-rc check.
-
-## License
-
-TBD (planning open source once the design has settled).

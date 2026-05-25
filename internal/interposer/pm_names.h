@@ -23,6 +23,8 @@ static const char *const PM_NAMES[] = {
   "poetry",
   "pipx",
   "pdm",
+  "go",
+  "cargo",
   "python",
   "python3",
   NULL,

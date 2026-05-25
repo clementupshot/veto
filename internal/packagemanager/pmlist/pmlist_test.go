@@ -38,6 +38,8 @@ func TestShimmedIsSubsetOfInterposer(t *testing.T) {
 // expected outcomes for a few representative PMs.
 func TestMembershipHelpers(t *testing.T) {
 	require.True(t, IsShimmed("npm"))
+	require.True(t, IsShimmed("go"))
+	require.True(t, IsShimmed("cargo"))
 	require.True(t, IsShimmed("python"))
 	require.True(t, IsShimmed("python3"))
 	require.False(t, IsShimmed("rush"), "rush is NOT shimmed; install-shims does not wire it up")
@@ -45,11 +47,15 @@ func TestMembershipHelpers(t *testing.T) {
 	require.False(t, IsShimmed(""))
 
 	require.True(t, IsWrapped("npm"))
+	require.True(t, IsWrapped("go"))
+	require.True(t, IsWrapped("cargo"))
 	require.False(t, IsWrapped("python"), "python is shimmed but NOT wrapped (see package doc)")
 	require.False(t, IsWrapped("python3"), "python3 is shimmed but NOT wrapped (see package doc)")
 	require.False(t, IsWrapped("rush"))
 
 	require.True(t, IsInterposerPM("npm"))
+	require.True(t, IsInterposerPM("go"))
+	require.True(t, IsInterposerPM("cargo"))
 	require.True(t, IsInterposerPM("python"))
 	require.True(t, IsInterposerPM("rush"), "rush is recognised by Layer 3 / Layer 1 even though we don't shim it")
 	require.True(t, IsInterposerPM("rushx"))

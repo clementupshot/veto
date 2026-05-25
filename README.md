@@ -202,9 +202,12 @@ real install is allowed to run. If the resolver probe fails, does not
 produce an expected lockfile, or the generated lockfile does not include
 the argv-named packages, veto aborts fail-closed.
 
-`veto scan` also parses committed Go and Rust files (`go.mod`,
-`go.sum`, `Cargo.toml`, `Cargo.lock`) to detect existing exposure, but
-live `go` and `cargo` invocations are not gated yet.
+Go and Cargo phase-1 live gating covers fetch/mutate commands that can
+introduce or download dependency code (`go get`, `go install`, remote
+`go run pkg@version`, `go mod download`, `go mod tidy`, `cargo add`,
+`cargo update`, `cargo fetch`, and `cargo install`). Build/test/run
+preflight over already-present project state is intentionally left for
+phase 2.
 
 **Fail-closed defaults.** Per-source malware feeds are fetched
 concurrently with etag-based caching in `~/.cache/veto/`.
@@ -421,15 +424,15 @@ these):
   than under-block — safe posture but a known precision gap until PEP
   440 range matching lands.
 - **Resolver pre-scan is npm-only today.** Existing lockfiles are gated
-  for live npm-family and Python-family install commands, but only npm
-  currently gets a temp-dir resolver probe for newly named packages.
-  Other ecosystems still rely on argv, manifests, and already-present
-  lockfiles until their safe resolver modes are wired in.
-- **Go and Cargo live command gating is not implemented yet.** `veto
-  scan` detects exposure in `go.mod`/`go.sum` and `Cargo.toml`/
-  `Cargo.lock`, and OSV/GHSA intel can represent Go and crates.io
-  findings. The actual `go` and `cargo` binaries are not yet in the
-  package-manager shim/wrapper set.
+  for live npm-family, Python-family, Go, and Cargo install/fetch
+  commands, but only npm currently gets a temp-dir resolver probe for
+  newly named packages. Other ecosystems still rely on argv,
+  manifests, and already-present lockfiles until their safe resolver
+  modes are wired in.
+- **Go and Cargo build/test/run preflight is phase 2.** `go build`,
+  `go test`, local `go run`, `cargo build`, `cargo test`, and local
+  `cargo run` still pass through today; phase 1 gates dependency
+  fetch/mutate commands only.
 - **Statically-linked binaries that bypass libc**. Theoretical; no
   real PM does this today.
 

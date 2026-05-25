@@ -483,15 +483,16 @@ Documented limits, in addition to the threat-model section in
   most malware while still returning hundreds of entries would slip
   through.
 - **Resolver pre-scan beyond npm.** Existing lockfiles are gated for
-  live npm-family and Python-family install commands, and `npm
-  install`/`npm update` get a temp-dir `--package-lock=true
+  live npm-family, Python-family, Go, and Cargo install/fetch commands,
+  and `npm install`/`npm update` get a temp-dir `--package-lock=true
   --package-lock-only --ignore-scripts` pre-scan before the real
   install. Other ecosystems do not yet get a resolver probe for newly
   named packages; they rely on argv, manifests, and already-present
   lockfiles where live command gating exists.
-- **Go and Cargo live command gating.** `veto scan` covers `go.mod`,
-  `go.sum`, `Cargo.toml`, and `Cargo.lock`, but the `go` and `cargo`
-  binaries are not yet in the live shim/wrapper set.
+- **Go and Cargo build/test/run preflight.** Phase 1 live gating covers
+  dependency fetch/mutate commands only. `go build`, `go test`, local
+  `go run`, `cargo build`, `cargo test`, and local `cargo run` are phase
+  2 work.
 
 Veto is one layer of defense, not a substitute for code review of
 unpinned/unverified dependencies.

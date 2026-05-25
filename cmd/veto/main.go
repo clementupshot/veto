@@ -36,9 +36,11 @@ import (
 	"github.com/brynbellomy/veto/internal/intel/sources/pypa"
 	"github.com/brynbellomy/veto/internal/packagemanager"
 	"github.com/brynbellomy/veto/internal/packagemanager/bun"
+	"github.com/brynbellomy/veto/internal/packagemanager/cargo"
 	"github.com/brynbellomy/veto/internal/packagemanager/cargolock"
 	"github.com/brynbellomy/veto/internal/packagemanager/cargomanifest"
 	pmexec "github.com/brynbellomy/veto/internal/packagemanager/exec"
+	"github.com/brynbellomy/veto/internal/packagemanager/golang"
 	"github.com/brynbellomy/veto/internal/packagemanager/gomod"
 	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
 	"github.com/brynbellomy/veto/internal/packagemanager/jsmanifest"
@@ -1071,6 +1073,8 @@ func buildPackageManagers() map[string]packagemanager.PackageManager {
 		"uv":     uv.New(),
 		"poetry": poetry.New(),
 		"pdm":    pdm.New(),
+		"go":     golang.New(),
+		"cargo":  cargo.New(),
 
 		// Fetch-and-run binaries — every non-help invocation is treated as install.
 		"npx":  pmexec.New(pmexec.Options{Name: "npx", Ecosystem: intel.EcosystemNPM, FlagsWithValues: pmexec.NpxFlagsWithValues, SpecFlags: pmexec.NpxSpecFlags}),
@@ -1166,15 +1170,16 @@ Install everything:
                                with `+"`make interposer`"+` when run from the repo.
 
 Supported package managers:
-  npm, pnpm, yarn, bun, pip, pip3, uv, poetry, pdm,
+  npm, pnpm, yarn, bun, pip, pip3, uv, poetry, pdm, go, cargo,
   npx, pnpx, bunx, uvx, pipx,
   python, python3 (only the `+"`python -m {pip,uv,pipx,poetry,pdm}`"+` form
                    is gated; every other invocation fast-paths to
                    real python with no intel-store touch)
 
-Project scan-only ecosystems:
-  Go and Rust are currently covered by `+"`veto scan`"+` through go.mod/go.sum
-  and Cargo.toml/Cargo.lock. Live `+"`go`"+`/`+"`cargo`"+` command gating is not wired yet.
+Go/Cargo live gating phase 1:
+  go get/install/run pkg@version, go mod download/tidy, and cargo
+  add/update/fetch/install are gated. Build/test/run preflight over existing
+  project state is phase 2 work.
 
 Environment:
   VETO_CACHE_DIR     override cache location (default: $XDG_CACHE_HOME/veto)

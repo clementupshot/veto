@@ -117,6 +117,7 @@ static const char *const PIPX_VERBS[]   = {"install","upgrade","inject","run",NU
 static const char *const UV_VERBS[]     = {"add","sync","install","tool","run","pip",NULL};
 static const char *const POETRY_VERBS[] = {"install","add","update","lock",NULL};
 static const char *const PDM_VERBS[]    = {"install","add","update","sync",NULL};
+static const char *const CARGO_VERBS[]  = {"add","update","fetch","install",NULL};
 
 static const char *const *verbs_for(const char *name) {
   if (!strcmp(name, "npm"))    return NPM_VERBS;
@@ -129,6 +130,7 @@ static const char *const *verbs_for(const char *name) {
   if (!strcmp(name, "uv"))     return UV_VERBS;
   if (!strcmp(name, "poetry")) return POETRY_VERBS;
   if (!strcmp(name, "pdm"))    return PDM_VERBS;
+  if (!strcmp(name, "cargo"))  return CARGO_VERBS;
   return NULL;
 }
 
@@ -162,6 +164,36 @@ static const char *python_m_target(char *const argv[]) {
   if (strcmp(argv[1], "-m") != 0) return NULL;
   for (const char *const *p = PYTHON_DASH_M_TARGETS; *p; p++) {
     if (!strcmp(argv[2], *p)) return *p;
+  }
+  return NULL;
+}
+
+static const char *risky_go(char *const argv[]) {
+  if (!argv) return NULL;
+  int verb_idx = -1;
+  const char *verb = NULL;
+  for (int i = 1; argv[i]; i++) {
+    if (argv[i][0] == '-') continue;
+    verb_idx = i;
+    verb = argv[i];
+    break;
+  }
+  if (!verb) return NULL;
+  if (!strcmp(verb, "get") || !strcmp(verb, "install")) return "go";
+  if (!strcmp(verb, "run")) {
+    for (int i = verb_idx + 1; argv[i]; i++) {
+      const char *a = argv[i];
+      if (a[0] == '-') continue;
+      if (strchr(a, '@') && strncmp(a, "./", 2) && strncmp(a, "../", 3) && a[0] != '/') return "go";
+      return NULL;
+    }
+    return NULL;
+  }
+  if (!strcmp(verb, "mod")) {
+    for (int i = verb_idx + 1; argv[i]; i++) {
+      if (argv[i][0] == '-') continue;
+      return (!strcmp(argv[i], "download") || !strcmp(argv[i], "tidy")) ? "go" : NULL;
+    }
   }
   return NULL;
 }
@@ -215,6 +247,8 @@ static const char *is_risky(const char *path, char *const argv[]) {
   if (!strcmp(bn, "python") || !strcmp(bn, "python3")) {
     return python_m_target(argv); // PM name or NULL
   }
+
+  if (!strcmp(bn, "go")) return risky_go(argv);
 
   // Fetch-and-run binaries: any non-flag arg that isn't help → risky.
   if (in_list(bn, EXEC_PMS)) {

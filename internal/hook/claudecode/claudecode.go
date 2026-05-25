@@ -78,6 +78,7 @@ var dangerousVerbs = map[string]map[string]struct{}{
 	"uv":     setOf("add", "sync", "install", "tool", "run", "pip"),
 	"poetry": setOf("install", "add", "update", "lock"),
 	"pdm":    setOf("install", "add", "update", "sync"),
+	"cargo":  setOf("add", "update", "fetch", "install"),
 }
 
 // execPMs are the fetch-and-run binaries: every non-help invocation pulls
@@ -500,6 +501,9 @@ func isRisky(tokens []string) (string, bool) {
 	if !isInterposerPM(b) {
 		return "", false
 	}
+	if b == "go" {
+		return riskyGo(tokens)
+	}
 	if _, exec := execPMs[b]; exec {
 		var rest []string
 		for _, a := range tokens[1:] {
@@ -525,6 +529,47 @@ func isRisky(tokens []string) (string, bool) {
 			return b, true
 		}
 		return "", false
+	}
+	return "", false
+}
+
+func riskyGo(tokens []string) (string, bool) {
+	verbIdx := -1
+	verb := ""
+	for i, a := range tokens[1:] {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		verbIdx = i + 1
+		verb = a
+		break
+	}
+	switch verb {
+	case "get", "install":
+		return "go", true
+	case "run":
+		for _, a := range tokens[verbIdx+1:] {
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			if strings.Contains(a, "@") && !strings.HasPrefix(a, "./") && !strings.HasPrefix(a, "../") && !strings.HasPrefix(a, "/") {
+				return "go", true
+			}
+			return "", false
+		}
+		return "", false
+	case "mod":
+		for _, a := range tokens[verbIdx+1:] {
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			switch a {
+			case "download", "tidy":
+				return "go", true
+			default:
+				return "", false
+			}
+		}
 	}
 	return "", false
 }

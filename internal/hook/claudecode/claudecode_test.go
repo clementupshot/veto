@@ -116,6 +116,23 @@ func TestAnalyze(t *testing.T) {
 		{"python -m pip with wrapper", "timeout 30 python -m pip install foo", "pip"},
 		{"python -m pip with env assignment", "FOO=bar python -m pip install foo", "pip"},
 		{"python -m pip chained", "cd /tmp && python -m pip install foo", "pip"},
+
+		{"go get", "go get github.com/evil/module@v1.2.3", "go"},
+		{"go install", "go install github.com/evil/cmd@v0.2.0", "go"},
+		{"remote go run", "go run github.com/evil/cmd@latest", "go"},
+		{"go mod download", "go mod download github.com/evil/module@v1.2.3", "go"},
+		{"go mod tidy", "go mod tidy", "go"},
+		{"local go run is phase 2", "go run ./cmd/app", ""},
+		{"go mod edit is not phase 1", "go mod edit -require=example.com/mod@v1.0.0", ""},
+		{"go build is phase 2", "go build ./...", ""},
+		{"go test is phase 2", "go test ./...", ""},
+
+		{"cargo add", "cargo add serde", "cargo"},
+		{"cargo update", "cargo update", "cargo"},
+		{"cargo fetch", "cargo fetch", "cargo"},
+		{"cargo install", "cargo install ripgrep", "cargo"},
+		{"cargo build is phase 2", "cargo build", ""},
+		{"cargo test is phase 2", "cargo test", ""},
 	}
 
 	for _, tc := range cases {

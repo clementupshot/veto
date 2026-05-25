@@ -132,6 +132,5 @@ func TestIsShimName(t *testing.T) {
 		require.True(t, isShimName(name), "isShimName must recognize %s", name)
 	}
 	require.False(t, isShimName("veto"))
-	require.False(t, isShimName("cargo"))
 	require.False(t, isShimName(""))
 }

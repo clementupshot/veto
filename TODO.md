@@ -9,8 +9,6 @@ current user-facing behavior.
 - Add an authenticated online lookup layer for vulnerability surfaces that do
   not fit the cached bulk-source model yet, especially Socket.dev vuln data and
   SafeDep PMG real-time package analysis.
-- Track source report-count drops over time and alert on suspicious declines
-  that remain above the current 1000-report sanity floor.
 - Implement PEP 440 bounded-range matching for PyPI advisories instead of the
   current safe over-block behavior.
 - Add remaining safe resolver pre-scans where practical: project-level uv verbs,

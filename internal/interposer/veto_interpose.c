@@ -25,9 +25,11 @@
 //   Linux:  export LD_PRELOAD=/path/to/libveto_interpose.so
 //   Both:   export VETO_PATH=/abs/path/to/veto   (resolved at install-preload time)
 //
-// Escape hatch: VETO_BYPASS=1 in the env of the *child* — checked at
-// spawn time, so an agent can opt one process out without disabling the
-// whole interposer.
+// No env-based escape hatch: the legacy VETO_BYPASS env was removed
+// because it had subtle scope bugs (parent's getenv vs child's envp)
+// and competed with the canonical `veto <pm> ...` argv form. Any
+// per-invocation bypass must go through that form; veto's own startup
+// handles the request without depending on env inheritance.
 //
 // Fail-OPEN paths (documented, not bugs):
 //   - SIP-protected binaries on macOS (system /usr/bin/*) ignore
@@ -230,25 +232,6 @@ static const char *risky_go(char *const argv[]) {
 // VETO_PYTHON_M_ORIGINAL in the child env so veto re-execs the
 // interpreter (not the bare PM) on the allow path.
 static const char *is_risky(const char *path, char *const argv[]) {
-  // VETO_BYPASS env var honored at child-spawn time. We can only see
-  // the parent's env here, but a Claude-Code-like `VETO_BYPASS=1 npm
-  // install foo` is implemented as a child-env var the parent sets — for
-  // libc execve, that goes through the env argument we don't have on
-  // this function signature, so we fall through to the rewrite logic and
-  // let veto itself notice the bypass via its env at startup.
-  //
-  // The check is strictly `VETO_BYPASS=1`; any other value (including
-  // `VETO_BYPASS=0`, `VETO_BYPASS=false`, or empty-string) does NOT
-  // disable the gate. This matches the hook side
-  // (internal/hook/claudecode/claudecode.go) and the runGate
-  // short-circuit so the documented escape hatch behaves the same at
-  // every layer — and so a user can't accidentally disable Layer 3 by
-  // exporting `VETO_BYPASS=0` thinking it means "off."
-  {
-    const char *v = getenv("VETO_BYPASS");
-    if (v && !strcmp(v, "1")) return NULL;
-  }
-
   if (!path || !argv || !argv[0]) return NULL;
   const char *bn = basename_of(path);
   if (!bn || !*bn) return NULL;

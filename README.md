@@ -449,6 +449,8 @@ Run `veto doctor` in a fresh terminal. It checks:
   shadow is detected, the `veto install-shell` fix
   appears inline in the output.
 - The Claude Code Bash hook is wired in `~/.claude/settings.json`.
+- Agent posture beyond Claude: Codex shell PATH policy, the current
+  project's Cursor veto rule, and Sirene's launch PATH where inspectable.
 - The native interposer env vars are exported and the library file
   exists.
 - Layer 4 wrappers — every recorded wrapper still points at veto

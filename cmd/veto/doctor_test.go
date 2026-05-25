@@ -170,6 +170,67 @@ func TestCheckShellIntegrationWarnsWhenOneBashFileMissing(t *testing.T) {
 	require.Contains(t, got.detail, ".bash_profile")
 }
 
+func TestCodexPostureResult(t *testing.T) {
+	cases := []struct {
+		name string
+		rep  codexEnvReport
+		want status
+	}{
+		{name: "missing config inherits shell", rep: codexEnvReport{}, want: statusPass},
+		{name: "no shell policy inherits shell", rep: codexEnvReport{ConfigExists: true}, want: statusPass},
+		{name: "inherit all", rep: codexEnvReport{ConfigExists: true, HasShellPolicy: true, InheritMode: "all"}, want: statusPass},
+		{name: "inherit core strips path", rep: codexEnvReport{ConfigExists: true, HasShellPolicy: true, InheritMode: "core"}, want: statusFail},
+		{name: "inherit core with path override needs verification", rep: codexEnvReport{ConfigExists: true, HasShellPolicy: true, InheritMode: "core", HasUserPathEntry: true}, want: statusWarn},
+		{name: "unknown inherit mode", rep: codexEnvReport{ConfigExists: true, HasShellPolicy: true, InheritMode: "sandboxed"}, want: statusWarn},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := codexPostureResult(c.rep)
+			require.Equal(t, c.want, got.status)
+			require.Equal(t, "Codex PATH policy", got.label)
+		})
+	}
+}
+
+func TestCursorPostureResult(t *testing.T) {
+	dir := t.TempDir()
+
+	missing := cursorPostureResult(dir)
+	require.Equal(t, statusWarn, missing.status)
+	require.Contains(t, missing.howToFix, "install-cursor")
+
+	rulePath := filepath.Join(dir, ".cursor", "rules", "veto.mdc")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rulePath), 0o755))
+	require.NoError(t, os.WriteFile(rulePath, []byte("not a useful rule"), 0o644))
+	bad := cursorPostureResult(dir)
+	require.Equal(t, statusFail, bad.status)
+	require.Contains(t, bad.howToFix, "--force")
+
+	require.NoError(t, os.WriteFile(rulePath, []byte(cursorRuleBody), 0o644))
+	good := cursorPostureResult(dir)
+	require.Equal(t, statusPass, good.status)
+	require.Contains(t, good.detail, "global User Rules")
+}
+
+func TestSirenePostureResult(t *testing.T) {
+	dir := t.TempDir()
+	shimDir := filepath.Join(dir, ".local", "bin")
+	require.NoError(t, os.MkdirAll(shimDir, 0o755))
+
+	noSirene := sirenePostureResult(dir, shimDir, shimDir)
+	require.Equal(t, statusPass, noSirene.status)
+	require.Contains(t, noSirene.detail, "not detected")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".sirene"), 0o755))
+	missingShim := sirenePostureResult(dir, shimDir, filepath.Join(dir, "bin"))
+	require.Equal(t, statusFail, missingShim.status)
+	require.Contains(t, missingShim.howToFix, "install-shell")
+
+	covered := sirenePostureResult(dir, shimDir, shimDir)
+	require.Equal(t, statusPass, covered.status)
+	require.Contains(t, covered.detail, "includes veto shim dir")
+}
+
 // TestEarlierRealBinary covers the "shim shadowed by mise/homebrew"
 // detection: a real `npm` earlier in PATH than our shim dir must be
 // flagged. A `veto`-pointing symlink earlier in PATH is NOT a

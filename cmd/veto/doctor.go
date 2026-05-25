@@ -64,6 +64,9 @@ func runDoctor(logger zerolog.Logger, cfg config, args []string) int {
 	results = append(results, checkShimDir()...)
 	results = append(results, checkShellIntegration())
 	results = append(results, checkClaudeHook())
+	results = append(results, checkCodexPosture())
+	results = append(results, checkCursorPosture())
+	results = append(results, checkSirenePosture())
 	results = append(results, checkInterposer()...)
 	results = append(results, checkWrappers(cfg)...)
 	intelResults := checkIntel(logger, cfg)
@@ -443,6 +446,162 @@ func isDoctorVetoHookCommand(cmd string) bool {
 		return true
 	}
 	return false
+}
+
+// checkCodexPosture confirms Codex agent shells will inherit a PATH that can
+// reach veto's shims. Codex has no per-tool hook, so this is the enforceable
+// local posture check for that agent.
+func checkCodexPosture() checkResult {
+	report, err := inspectCodexEnv()
+	if err != nil {
+		return checkResult{
+			status:   statusWarn,
+			label:    "Codex PATH policy",
+			detail:   "cannot inspect Codex config: " + err.Error(),
+			howToFix: "Run `veto install-codex` and confirm Codex agent shells inherit the veto shim PATH.",
+		}
+	}
+	return codexPostureResult(report)
+}
+
+func codexPostureResult(report codexEnvReport) checkResult {
+	if !report.ConfigExists {
+		return checkResult{status: statusPass, label: "Codex PATH policy", detail: "no config; Codex inherits shell PATH by default"}
+	}
+	if !report.HasShellPolicy {
+		return checkResult{status: statusPass, label: "Codex PATH policy", detail: "no shell_environment_policy; Codex inherits shell PATH"}
+	}
+	switch report.InheritMode {
+	case "", "all":
+		return checkResult{status: statusPass, label: "Codex PATH policy", detail: "inherit=all; user PATH carries through"}
+	case "core":
+		if report.HasUserPathEntry {
+			return checkResult{
+				status:   statusWarn,
+				label:    "Codex PATH policy",
+				detail:   "inherit=core, but policy mentions PATH; confirm the shim dir is first inside Codex",
+				howToFix: "Inside a fresh Codex session, run `which npm`; it should resolve under ~/.local/bin.",
+			}
+		}
+		return checkResult{
+			status:   statusFail,
+			label:    "Codex PATH policy",
+			detail:   "inherit=core strips the user PATH before Codex agent shells run",
+			howToFix: "Set `[shell_environment_policy].inherit = \"all\"` or add a PATH policy that prepends ~/.local/bin, then restart Codex.",
+		}
+	default:
+		return checkResult{
+			status:   statusWarn,
+			label:    "Codex PATH policy",
+			detail:   "unrecognized inherit value: " + report.InheritMode,
+			howToFix: "Run `veto install-codex`, then verify `which npm` inside a Codex session points at the veto shim dir.",
+		}
+	}
+}
+
+// checkCursorPosture reports whether the current project has veto's Cursor
+// rule. Cursor's global user-rule state is stored in private app data, so doctor
+// only verifies the project rule it can safely inspect.
+func checkCursorPosture() checkResult {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return checkResult{status: statusWarn, label: "Cursor rule", detail: "cannot resolve current project: " + err.Error()}
+	}
+	return cursorPostureResult(cwd)
+}
+
+func cursorPostureResult(projectDir string) checkResult {
+	rulePath := filepath.Join(projectDir, ".cursor", "rules", "veto.mdc")
+	data, err := os.ReadFile(rulePath)
+	if os.IsNotExist(err) {
+		return checkResult{
+			status:   statusWarn,
+			label:    "Cursor rule",
+			detail:   "project rule not installed at " + rulePath,
+			howToFix: "Run `veto install-cursor --project-dir " + projectDir + "`; add the same rule manually to Cursor User Rules for global coverage.",
+		}
+	}
+	if err != nil {
+		return checkResult{status: statusFail, label: "Cursor rule", detail: "read " + rulePath + ": " + err.Error()}
+	}
+	if !isVetoCursorRule(string(data)) {
+		return checkResult{
+			status:   statusFail,
+			label:    "Cursor rule",
+			detail:   rulePath + " exists but does not look like a veto rule",
+			howToFix: "Run `veto install-cursor --project-dir " + projectDir + " --force` to replace it.",
+		}
+	}
+	return checkResult{status: statusPass, label: "Cursor rule", detail: rulePath + " installed; global User Rules remain manually inspectable only"}
+}
+
+func isVetoCursorRule(text string) bool {
+	return strings.Contains(text, "veto") && strings.Contains(text, "package-manager")
+}
+
+// checkSirenePosture confirms the current shell environment that would launch
+// Sirene can reach veto's shim dir. Sirene inherits its parent process PATH, so
+// this is the inspectable local posture check.
+func checkSirenePosture() checkResult {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return checkResult{status: statusWarn, label: "Sirene launch PATH", detail: "cannot resolve home: " + err.Error()}
+	}
+	shimDir, err := defaultShellShimDir()
+	if err != nil {
+		return checkResult{status: statusWarn, label: "Sirene launch PATH", detail: "cannot resolve shim dir: " + err.Error()}
+	}
+	return sirenePostureResult(home, shimDir, os.Getenv("PATH"))
+}
+
+func sirenePostureResult(home, shimDir, pathEnv string) checkResult {
+	detected := executableOnPath("sirene", pathEnv) != "" || pathExists(filepath.Join(home, ".sirene"))
+	if !pathListContains(pathEnv, shimDir) {
+		status := statusWarn
+		detail := "shim dir is not on current PATH"
+		if detected {
+			status = statusFail
+			detail = "Sirene detected, but shim dir is not on current PATH"
+		}
+		return checkResult{
+			status:   status,
+			label:    "Sirene launch PATH",
+			detail:   detail,
+			howToFix: "Run `veto install-shell`, open a new terminal, and launch Sirene from that shell.",
+		}
+	}
+	if !detected {
+		return checkResult{status: statusPass, label: "Sirene launch PATH", detail: "Sirene not detected; current PATH includes veto shim dir if you launch it later"}
+	}
+	return checkResult{status: statusPass, label: "Sirene launch PATH", detail: "current launch PATH includes veto shim dir"}
+}
+
+func executableOnPath(name, pathEnv string) string {
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func pathListContains(pathEnv, want string) bool {
+	for _, p := range filepath.SplitList(pathEnv) {
+		if absEqual(p, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // checkInterposer validates the native-interposer layer. Three checks:

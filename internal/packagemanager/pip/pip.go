@@ -2,6 +2,8 @@
 package pip
 
 import (
+	"strings"
+
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/packagemanager"
 	"github.com/brynbellomy/veto/internal/packagemanager/argv"
@@ -47,6 +49,7 @@ var flagsWithValues = argv.FlagsWithValues{
 	"--no-binary":       {},
 	"--only-binary":     {},
 	"--global-option":   {},
+	"--report":          {},
 }
 
 // Manager parses pip install commands.
@@ -55,6 +58,7 @@ type Manager struct {
 }
 
 var _ packagemanager.PackageManager = (*Manager)(nil)
+var _ packagemanager.ResolverPreScanner = (*Manager)(nil)
 
 // New builds a pip Manager. binName lets callers register both "pip" and
 // "pip3" with the same parser.
@@ -114,6 +118,77 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 		return nil
 	}
 	return collectManifestRefs(rest)
+}
+
+// ResolverPreScan implements packagemanager.ResolverPreScanner. Modern pip can
+// emit the resolved install set as JSON without installing packages. Veto forces
+// wheel-only dry-run resolution so the pre-scan does not build sdists or execute
+// setup code in the temporary workdir.
+func (Manager) ResolverPreScan(args []string) (packagemanager.ResolverPreScanPlan, bool) {
+	verb, _, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
+	if !ok || verb != "install" {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	directInstalls := Manager{}.ParseInstalls(args)
+	manifestRefs := Manager{}.ManifestRefs(args)
+	if len(directInstalls) == 0 && len(manifestRefs) == 0 {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	if hasUnsafeResolverPreScanSpec(directInstalls) || hasUnsafeResolverPreScanFlag(args) {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	seedFiles := make([]string, 0, len(manifestRefs)+1)
+	seedFiles = append(seedFiles, "pyproject.toml")
+	for _, ref := range manifestRefs {
+		seedFiles = append(seedFiles, ref.Path)
+	}
+	return packagemanager.ResolverPreScanPlan{
+		Args: appendResolverFlags(args,
+			"--dry-run",
+			"--ignore-installed",
+			"--report", "veto-pip-report.json",
+			"--only-binary", ":all:",
+			"--disable-pip-version-check",
+			"--no-input",
+		),
+		ManifestRefs: []packagemanager.ManifestRef{
+			{Path: "veto-pip-report.json", Kind: packagemanager.ManifestKindPipReportJSON},
+		},
+		SeedFiles:      seedFiles,
+		DirectInstalls: directInstalls,
+	}, true
+}
+
+func hasUnsafeResolverPreScanSpec(installs []packagemanager.Install) bool {
+	for _, ins := range installs {
+		if ins.LocalPath || ins.OpaqueRemote {
+			return true
+		}
+	}
+	return false
+}
+
+func hasUnsafeResolverPreScanFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--no-binary" || strings.HasPrefix(arg, "--no-binary=") {
+			return true
+		}
+	}
+	return false
+}
+
+func appendResolverFlags(args []string, flags ...string) []string {
+	out := make([]string, 0, len(args)+len(flags))
+	for i, arg := range args {
+		if arg == "--" {
+			out = append(out, flags...)
+			out = append(out, args[i:]...)
+			return out
+		}
+		out = append(out, arg)
+	}
+	out = append(out, flags...)
+	return out
 }
 
 // collectManifestRefs walks rest in a single pass so requirements and

@@ -181,3 +181,51 @@ func TestManifestRefs(t *testing.T) {
 		})
 	}
 }
+
+func TestResolverPreScan(t *testing.T) {
+	m := pip.New("pip")
+
+	t.Run("install specs produce wheel-only dry-run report plan", func(t *testing.T) {
+		plan, ok := m.ResolverPreScan([]string{"install", "clean-direct"})
+		require.True(t, ok)
+		require.Equal(t, []packagemanager.ManifestRef{{Path: "veto-pip-report.json", Kind: packagemanager.ManifestKindPipReportJSON}}, plan.ManifestRefs)
+		require.Contains(t, plan.Args, "--dry-run")
+		require.Contains(t, plan.Args, "--ignore-installed")
+		require.Contains(t, plan.Args, "--report")
+		require.Contains(t, plan.Args, "veto-pip-report.json")
+		require.Contains(t, plan.Args, "--only-binary")
+		require.Contains(t, plan.Args, ":all:")
+		require.Equal(t, []packagemanager.Install{{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "clean-direct"}, RawSpec: "clean-direct"}}, plan.DirectInstalls)
+	})
+
+	t.Run("requirements file is seeded", func(t *testing.T) {
+		plan, ok := m.ResolverPreScan([]string{"install", "-r", "requirements.txt"})
+		require.True(t, ok)
+		require.Contains(t, plan.SeedFiles, "requirements.txt")
+	})
+
+	t.Run("download is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"download", "clean-direct"})
+		require.False(t, ok)
+	})
+
+	t.Run("empty install is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"install"})
+		require.False(t, ok)
+	})
+
+	t.Run("local path is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"install", "./local-pkg"})
+		require.False(t, ok)
+	})
+
+	t.Run("opaque remote is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"install", "https://example.com/pkg.whl"})
+		require.False(t, ok)
+	})
+
+	t.Run("user no-binary flag is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"install", "--no-binary", ":all:", "clean-direct"})
+		require.False(t, ok)
+	})
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/brynbellomy/veto/internal/packagemanager"
 	"github.com/brynbellomy/veto/internal/packagemanager/golang"
 	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
+	"github.com/brynbellomy/veto/internal/packagemanager/pipreport"
 )
 
 // TestSanitizedEnv covers the env-scrub helper that execReal applies
@@ -308,7 +309,67 @@ func TestRunResolverPreScanRequiresOutputLockfile(t *testing.T) {
 		},
 	}, jslock.New())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "resolver pre-scan did not produce an expected lockfile")
+	require.Contains(t, err.Error(), "resolver pre-scan did not produce expected output")
+}
+
+func TestRunPipResolverPreScanExtractsGeneratedTransitives(t *testing.T) {
+	projectDir := t.TempDir()
+	oldwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(projectDir))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
+
+	fakeBin := t.TempDir()
+	pipPath := filepath.Join(fakeBin, "pip")
+	fakePIP := `#!/bin/sh
+set -eu
+case " $* " in
+  *" --dry-run "*) ;;
+  *) echo "missing --dry-run" >&2; exit 40 ;;
+esac
+case " $* " in
+  *" --report veto-pip-report.json "*) ;;
+  *) echo "missing --report" >&2; exit 41 ;;
+esac
+case " $* " in
+  *" --only-binary :all: "*) ;;
+  *) echo "missing --only-binary" >&2; exit 42 ;;
+esac
+if [ -n "${VETO_PATH:-}" ]; then
+  echo "VETO_PATH leaked into resolver" >&2
+  exit 43
+fi
+cat > veto-pip-report.json <<'JSON'
+{
+  "install": [
+    {"metadata": {"name": "clean-direct", "version": "1.0.0"}},
+    {"metadata": {"name": "evil-transitive", "version": "9.9.9"}}
+  ]
+}
+JSON
+`
+	require.NoError(t, os.WriteFile(pipPath, []byte(fakePIP), 0o755))
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("VETO_PATH", "/tmp/veto")
+
+	got, err := runResolverPreScan(zerolog.Nop(), config{CacheDir: t.TempDir()}, "pip", packagemanager.ResolverPreScanPlan{
+		Args: []string{"install", "clean-direct", "--dry-run", "--ignore-installed", "--report", "veto-pip-report.json", "--only-binary", ":all:"},
+		ManifestRefs: []packagemanager.ManifestRef{
+			{Path: "veto-pip-report.json", Kind: packagemanager.ManifestKindPipReportJSON},
+		},
+		DirectInstalls: []packagemanager.Install{
+			{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "clean-direct"}, RawSpec: "clean-direct"},
+		},
+	}, pipreport.New())
+	require.NoError(t, err)
+	require.Contains(t, got, packagemanager.Install{
+		Ref: intel.PackageRef{
+			Ecosystem: intel.EcosystemPyPI,
+			Name:      "evil-transitive",
+			Version:   "9.9.9",
+		},
+		RawSpec: "evil-transitive==9.9.9",
+	})
 }
 
 func TestProjectPreflightExpanderRequiresAuthoritativeManifest(t *testing.T) {

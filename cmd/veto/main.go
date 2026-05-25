@@ -47,6 +47,7 @@ import (
 	"github.com/brynbellomy/veto/internal/packagemanager/npm"
 	"github.com/brynbellomy/veto/internal/packagemanager/pdm"
 	"github.com/brynbellomy/veto/internal/packagemanager/pip"
+	"github.com/brynbellomy/veto/internal/packagemanager/pipreport"
 	"github.com/brynbellomy/veto/internal/packagemanager/pmlist"
 	"github.com/brynbellomy/veto/internal/packagemanager/pnpm"
 	"github.com/brynbellomy/veto/internal/packagemanager/poetry"
@@ -611,7 +612,7 @@ func runResolverPreScan(
 		installs = append(installs, extra...)
 	}
 	if !foundOutput {
-		return nil, errors.WithNew("resolver pre-scan did not produce an expected lockfile").Set("pm", pmName)
+		return nil, errors.WithNew("resolver pre-scan did not produce expected output").Set("pm", pmName)
 	}
 	if missing := unresolvedPreScanInstalls(plan.DirectInstalls, installs); len(missing) > 0 {
 		return nil, errors.WithNew("resolver pre-scan output did not include every requested package").Set(
@@ -1070,6 +1071,7 @@ type compoundExpander struct {
 	pyPrj  *pymanifest.Expander
 	jsLock *jslock.Expander
 	pyLock *pylock.Expander
+	pipRep *pipreport.Expander
 	goMod  *gomod.Expander
 	cargo  *cargomanifest.Expander
 	cLock  *cargolock.Expander
@@ -1084,6 +1086,7 @@ func newCompoundExpander() *compoundExpander {
 		pyPrj:  pymanifest.New(),
 		jsLock: jslock.New(),
 		pyLock: pylock.New(),
+		pipRep: pipreport.New(),
 		goMod:  gomod.New(),
 		cargo:  cargomanifest.New(),
 		cLock:  cargolock.New(),
@@ -1111,6 +1114,8 @@ func (c *compoundExpander) Expand(ref packagemanager.ManifestRef) ([]packagemana
 		packagemanager.ManifestKindPoetryLock,
 		packagemanager.ManifestKindPdmLock:
 		return c.pyLock.Expand(ref)
+	case packagemanager.ManifestKindPipReportJSON:
+		return c.pipRep.Expand(ref)
 	case packagemanager.ManifestKindGoMod,
 		packagemanager.ManifestKindGoSum:
 		return c.goMod.Expand(ref)

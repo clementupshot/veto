@@ -196,7 +196,7 @@ positive). Veto filters those at ingest so a retracted MAL-* entry
 can't keep refusing a clean package indefinitely — the advisory stays
 in the feed for audit continuity but is treated as inactive.
 
-**Live transitive coverage via lockfiles and npm resolver pre-scan.**
+**Live transitive coverage via lockfiles and resolver pre-scans.**
 When an install verb runs in a supported npm-family or Python-family
 project with a lockfile (`package-lock.json`, `pnpm-lock.yaml`,
 `yarn.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`), veto parses the
@@ -206,9 +206,13 @@ commands, veto also runs the real npm resolver first in an isolated
 temp copy with
 `--package-lock=true --package-lock-only --ignore-scripts --audit=false --fund=false`, then
 gates the generated `package-lock.json`/`npm-shrinkwrap.json` before the
-real install is allowed to run. If the resolver probe fails, does not
-produce an expected lockfile, or the generated lockfile does not include
-the argv-named packages, veto aborts fail-closed.
+real install is allowed to run. For `pip install` / `pip3 install`, veto
+runs pip's resolver with `--dry-run --ignore-installed --report` in an
+isolated temp copy and forces `--only-binary=:all:` so the probe does not
+build sdists or run setup code. It gates the generated report before the
+real install. If a resolver probe fails, does not produce expected output,
+or the generated output does not include the argv-named packages, veto
+aborts fail-closed.
 
 Go and Cargo live gating covers fetch/mutate commands that can introduce
 or download dependency code (`go get`, `go install`, remote `go run
@@ -431,10 +435,10 @@ these):
   back to "over-block" (refuse the install) with a debug log rather
   than under-block. This is a safe posture, but PEP 440 bounded-range
   matching is not implemented.
-- **Resolver pre-scan is npm-only.** Existing lockfiles are gated for
-  live npm-family, Python-family, Go, and Cargo install/fetch commands,
-  but only npm gets a temp-dir resolver probe for newly named packages.
-  Other ecosystems rely on argv, manifests, and already-present lockfiles.
+- **Resolver pre-scan is partial.** npm and pip/pip3 get isolated resolver
+  probes for newly named packages. Other package managers rely on argv,
+  manifests, and already-present lockfiles until a safe resolver mode is
+  implemented for them.
 - **Statically-linked binaries that bypass libc**. Theoretical; no
   real PM does this today.
 

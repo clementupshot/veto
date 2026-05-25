@@ -106,6 +106,11 @@ const (
 	// ManifestKindPdmLock is pdm's pdm.lock (TOML).
 	ManifestKindPdmLock ManifestKind = "pdm.lock"
 
+	// ManifestKindPipReportJSON is pip's --dry-run --report JSON output. Resolver
+	// pre-scan uses it as a wheel-only, side-effect-free view of pip's resolved
+	// install set.
+	ManifestKindPipReportJSON ManifestKind = "pip-report.json"
+
 	// ManifestKindGoMod is Go's go.mod module manifest. It lists direct and
 	// indirect module requirements with exact module versions.
 	ManifestKindGoMod ManifestKind = "go.mod"
@@ -144,11 +149,11 @@ type ManifestRef struct {
 //
 // SeedFiles are relative paths copied from the user's cwd into the temp
 // workdir before running the resolver. Package managers use these to preserve
-// lockfile/config context without mutating the user's checkout.
+// resolver/config context without mutating the user's checkout.
 //
 // DirectInstalls are the argv-named packages the resolver output must contain.
-// The caller uses this as a sanity check that a package-manager config did not
-// suppress lockfile updates and leave veto looking at stale seeded output.
+// The caller uses this as a sanity check that package-manager config did not
+// suppress resolver output updates and leave veto looking at stale seeded data.
 type ResolverPreScanPlan struct {
 	Args           []string
 	ManifestRefs   []ManifestRef

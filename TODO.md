@@ -13,8 +13,8 @@ current user-facing behavior.
   that remain above the current 1000-report sanity floor.
 - Implement PEP 440 bounded-range matching for PyPI advisories instead of the
   current safe over-block behavior.
-- Add safe resolver pre-scans beyond npm where practical, starting with
-  Python-family package managers and then Go/Cargo if their tooling can resolve
+- Add remaining safe resolver pre-scans where practical: uv/poetry/pdm next for
+  Python-family workflows, then Go/Cargo only if their tooling can resolve
   without executing project code.
 - Improve Go/Cargo project-root discovery for project preflight: walk upward for
   `go.mod`, `Cargo.toml`, and Cargo workspace roots when commands run from

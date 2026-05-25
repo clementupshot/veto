@@ -299,7 +299,8 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 
 	installs := pm.ParseInstalls(pmArgs)
 	manifestRefs := pm.ManifestRefs(pmArgs)
-	if installs == nil && len(manifestRefs) == 0 {
+	preflight, hasPreflight := projectPreflightPlan(pm, pmArgs, installs, manifestRefs)
+	if installs == nil && len(manifestRefs) == 0 && !hasPreflight {
 		// Not an install verb — pass through immediately, no intel needed.
 		return execPMOrPythonM(cfg, pmName, pmArgs)
 	}
@@ -346,6 +347,25 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 		policy.AllowOpaqueRemote = true
 		logger.Warn().Msg("VETO_ALLOW_OPAQUE=1 set; opaque remote specs (URL/git/tarball) will NOT be refused")
 	}
+	if hasPreflight {
+		preflightPolicy := policy
+		preflightPolicy.ManifestExpander = projectPreflightExpander{delegate: expander}
+		decision := gate.New(store, preflightPolicy, logger).Evaluate([]packagemanager.Install{}, preflight.ManifestRefs...)
+		switch decision.Outcome {
+		case gate.OutcomeRefuse:
+			printRefusal(os.Stderr, decision)
+			return exitRefused
+		case gate.OutcomeAbort:
+			printAbort(os.Stderr, decision)
+			return exitInternal
+		case gate.OutcomePassThrough, gate.OutcomeAllow:
+			return execPMOrPythonM(cfg, pmName, pmArgs)
+		default:
+			logger.Error().Str("outcome", string(decision.Outcome)).Msg("unknown project preflight gate outcome")
+			return exitInternal
+		}
+	}
+
 	g := gate.New(store, policy, logger)
 	decision := g.Evaluate(installs, manifestRefs...)
 	switch decision.Outcome {
@@ -390,6 +410,49 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 		}
 	}
 	return execPMOrPythonM(cfg, pmName, pmArgs)
+}
+
+func projectPreflightPlan(pm packagemanager.PackageManager, args []string, installs []packagemanager.Install, manifestRefs []packagemanager.ManifestRef) (packagemanager.ProjectPreflightPlan, bool) {
+	if installs != nil || len(manifestRefs) > 0 {
+		return packagemanager.ProjectPreflightPlan{}, false
+	}
+	preflighter, ok := pm.(packagemanager.ProjectPreflighter)
+	if !ok {
+		return packagemanager.ProjectPreflightPlan{}, false
+	}
+	plan, ok := preflighter.ProjectPreflight(args)
+	if !ok || len(plan.ManifestRefs) == 0 {
+		return packagemanager.ProjectPreflightPlan{}, false
+	}
+	return plan, true
+}
+
+type projectPreflightExpander struct {
+	delegate gate.ManifestExpander
+}
+
+var _ gate.ManifestExpander = projectPreflightExpander{}
+
+func (e projectPreflightExpander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Install, error) {
+	if projectPreflightRequires(ref.Kind) {
+		info, err := os.Stat(ref.Path)
+		if err != nil {
+			return nil, errors.With(err, "required project manifest unavailable").Set("path", ref.Path).Set("kind", string(ref.Kind))
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.WithNew("required project manifest is not a regular file").Set("path", ref.Path).Set("kind", string(ref.Kind))
+		}
+	}
+	return e.delegate.Expand(ref)
+}
+
+func projectPreflightRequires(kind packagemanager.ManifestKind) bool {
+	switch kind {
+	case packagemanager.ManifestKindGoMod, packagemanager.ManifestKindCargoToml:
+		return true
+	default:
+		return false
+	}
 }
 
 func runSync(logger zerolog.Logger, cfg config) int {
@@ -1176,10 +1239,10 @@ Supported package managers:
                    is gated; every other invocation fast-paths to
                    real python with no intel-store touch)
 
-Go/Cargo live gating phase 1:
+Go/Cargo live gating:
   go get/install/run pkg@version, go mod download/tidy, and cargo
-  add/update/fetch/install are gated. Build/test/run preflight over existing
-  project state is phase 2 work.
+  add/update/fetch/install are gated. Go build/test/local run/vet and cargo
+  build/check/test/run/bench/clippy preflight project files before exec.
 
 Environment:
   VETO_CACHE_DIR     override cache location (default: $XDG_CACHE_HOME/veto)

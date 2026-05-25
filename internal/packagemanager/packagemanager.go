@@ -156,6 +156,14 @@ type ResolverPreScanPlan struct {
 	DirectInstalls []Install
 }
 
+// ProjectPreflightPlan describes read-only project state that must be checked
+// before a non-install command runs. Build/test/run commands can compile or
+// execute dependency code that is already declared in the checkout; package
+// managers return refs here so the CLI can gate those files before exec.
+type ProjectPreflightPlan struct {
+	ManifestRefs []ManifestRef
+}
+
 // PackageManager parses install-style commands for one binary.
 //
 // Name returns the binary name we shadow (e.g. "npm"). Ecosystem identifies
@@ -191,4 +199,12 @@ type PackageManager interface {
 // packages or running lifecycle scripts.
 type ResolverPreScanner interface {
 	ResolverPreScan(args []string) (ResolverPreScanPlan, bool)
+}
+
+// ProjectPreflighter is an optional PackageManager capability for commands
+// that do not install dependencies directly but still execute project code.
+// Implementations must parse argv only; filesystem checks and manifest reads
+// stay in the gate layer via ManifestExpander.
+type ProjectPreflighter interface {
+	ProjectPreflight(args []string) (ProjectPreflightPlan, bool)
 }

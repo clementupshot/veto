@@ -213,9 +213,11 @@ the argv-named packages, veto aborts fail-closed.
 Go and Cargo live gating covers fetch/mutate commands that can introduce
 or download dependency code (`go get`, `go install`, remote `go run
 pkg@version`, `go mod download`, `go mod tidy`, `cargo add`, `cargo
-update`, `cargo fetch`, and `cargo install`). Local build/test/run
-commands are not preflighted yet; `veto scan` covers already-present Go
-and Cargo project state.
+update`, `cargo fetch`, and `cargo install`). It also preflights local
+Go and Cargo build/test/run commands by reading already-present project
+state before execution: `go build`, `go test`, local `go run`, `go vet`,
+`cargo build`, `cargo check`, `cargo test`, `cargo run`, `cargo bench`,
+and `cargo clippy`.
 
 **Fail-closed defaults.** Per-source malware feeds are fetched
 concurrently with etag-based caching in `~/.cache/veto/`.
@@ -429,10 +431,6 @@ these):
   live npm-family, Python-family, Go, and Cargo install/fetch commands,
   but only npm gets a temp-dir resolver probe for newly named packages.
   Other ecosystems rely on argv, manifests, and already-present lockfiles.
-- **Go and Cargo build/test/run preflight is not implemented.** `go
-  build`, `go test`, local `go run`, `cargo build`, `cargo test`, and
-  local `cargo run` still pass through. Dependency fetch/mutate commands
-  are gated.
 - **Statically-linked binaries that bypass libc**. Theoretical; no
   real PM does this today.
 

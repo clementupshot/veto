@@ -16,9 +16,6 @@ current user-facing behavior.
 - Add safe resolver pre-scans beyond npm where practical, starting with
   Python-family package managers and then Go/Cargo if their tooling can resolve
   without executing project code.
-- Add Go and Cargo preflight for local build/test/run commands by checking
-  already-present project state before allowing `go build`, `go test`, local
-  `go run`, `cargo build`, `cargo test`, and local `cargo run`.
 - Decide whether IOC-only cache residue can be promoted from report-only to
   purge-safe quarantine rules.
 - Choose and add an explicit license before public distribution.

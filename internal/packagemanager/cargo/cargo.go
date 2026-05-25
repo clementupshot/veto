@@ -2,6 +2,7 @@
 package cargo
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/brynbellomy/veto/internal/intel"
@@ -54,6 +55,7 @@ var flagsWithValues = argv.FlagsWithValues{
 type Manager struct{}
 
 var _ packagemanager.PackageManager = (*Manager)(nil)
+var _ packagemanager.ProjectPreflighter = (*Manager)(nil)
 
 // New builds a Cargo manager.
 func New() *Manager { return &Manager{} }
@@ -90,9 +92,24 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 	}
 	switch verb {
 	case "add", "update", "fetch":
-		return cargoProjectRefs()
+		return cargoProjectRefs(args)
 	default:
 		return nil
+	}
+}
+
+// ProjectPreflight implements packagemanager.ProjectPreflighter for Cargo
+// build/test/run commands that execute local project code.
+func (Manager) ProjectPreflight(args []string) (packagemanager.ProjectPreflightPlan, bool) {
+	verb, _, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
+	if !ok {
+		return packagemanager.ProjectPreflightPlan{}, false
+	}
+	switch verb {
+	case "build", "check", "test", "run", "bench", "clippy":
+		return packagemanager.ProjectPreflightPlan{ManifestRefs: cargoProjectRefs(args)}, true
+	default:
+		return packagemanager.ProjectPreflightPlan{}, false
 	}
 }
 
@@ -233,9 +250,17 @@ func firstFlagValue(args []string, flag string) (string, bool) {
 	return "", false
 }
 
-func cargoProjectRefs() []packagemanager.ManifestRef {
+func cargoProjectRefs(args []string) []packagemanager.ManifestRef {
+	manifestPath, ok := firstFlagValue(args, "--manifest-path")
+	if !ok || manifestPath == "" {
+		manifestPath = "Cargo.toml"
+	}
+	lockPath, ok := firstFlagValue(args, "--lockfile-path")
+	if !ok || lockPath == "" {
+		lockPath = filepath.Join(filepath.Dir(manifestPath), "Cargo.lock")
+	}
 	return []packagemanager.ManifestRef{
-		{Path: "Cargo.toml", Kind: packagemanager.ManifestKindCargoToml},
-		{Path: "Cargo.lock", Kind: packagemanager.ManifestKindCargoLock},
+		{Path: manifestPath, Kind: packagemanager.ManifestKindCargoToml},
+		{Path: lockPath, Kind: packagemanager.ManifestKindCargoLock},
 	}
 }

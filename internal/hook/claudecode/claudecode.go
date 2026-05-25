@@ -78,8 +78,23 @@ var dangerousVerbs = map[string]map[string]struct{}{
 	"uv":     setOf("add", "sync", "install", "tool", "run", "pip"),
 	"poetry": setOf("install", "add", "update", "lock"),
 	"pdm":    setOf("install", "add", "update", "sync"),
-	"cargo":  setOf("add", "update", "fetch", "install"),
+	"cargo":  setOf("add", "update", "fetch", "install", "build", "check", "test", "run", "bench", "clippy"),
 }
+
+var goFlagsWithValues = setOf(
+	"-C", "-mod", "-modfile", "-overlay", "-tags", "-exec", "-asmflags", "-gcflags",
+	"-ldflags", "-gccgoflags", "-toolexec", "-pkgdir", "-p", "-o", "-buildmode",
+	"-compiler", "-coverpkg", "-coverprofile", "-run", "-bench", "-benchtime", "-count",
+	"-cpu", "-list", "-parallel", "-timeout", "-vet", "-reuse",
+)
+
+var cargoFlagsWithValues = setOf(
+	"--color", "--config", "-Z", "--manifest-path", "--lockfile-path", "--target",
+	"--target-dir", "--package", "-p", "--features", "-F", "--jobs", "-j", "--profile",
+	"--message-format", "--example", "--bin", "--test", "--bench", "--index",
+	"--registry", "--version", "--vers", "--git", "--tag", "--rev", "--branch",
+	"--path", "--root", "--precise", "--aggressive", "--rename",
+)
 
 // execPMs are the fetch-and-run binaries: every non-help invocation pulls
 // and executes remote code, so any non-trivial argv is treated as risky.
@@ -504,6 +519,9 @@ func isRisky(tokens []string) (string, bool) {
 	if b == "go" {
 		return riskyGo(tokens)
 	}
+	if b == "cargo" {
+		return riskyByVerb(tokens, b, dangerousVerbs[b], cargoFlagsWithValues)
+	}
 	if _, exec := execPMs[b]; exec {
 		var rest []string
 		for _, a := range tokens[1:] {
@@ -520,56 +538,70 @@ func isRisky(tokens []string) (string, bool) {
 		}
 		return b, true
 	}
-	verbs := dangerousVerbs[b]
-	for _, a := range tokens[1:] {
-		if strings.HasPrefix(a, "-") {
-			continue
-		}
-		if _, hit := verbs[a]; hit {
-			return b, true
-		}
+	return riskyByVerb(tokens, b, dangerousVerbs[b], nil)
+}
+
+func riskyGo(tokens []string) (string, bool) {
+	verbIdx, verb, ok := firstNonFlagWithValues(tokens, 1, goFlagsWithValues)
+	if !ok {
 		return "", false
+	}
+	switch verb {
+	case "get", "install", "build", "test", "vet":
+		return "go", true
+	case "run":
+		_, a, ok := firstNonFlagWithValues(tokens, verbIdx+1, goFlagsWithValues)
+		if !ok {
+			return "", false
+		}
+		if strings.Contains(a, "@") && !strings.HasPrefix(a, "./") && !strings.HasPrefix(a, "../") && !strings.HasPrefix(a, "/") {
+			return "go", true
+		}
+		return "go", true
+	case "mod":
+		_, a, ok := firstNonFlagWithValues(tokens, verbIdx+1, goFlagsWithValues)
+		if !ok {
+			return "", false
+		}
+		switch a {
+		case "download", "tidy":
+			return "go", true
+		default:
+			return "", false
+		}
 	}
 	return "", false
 }
 
-func riskyGo(tokens []string) (string, bool) {
-	verbIdx := -1
-	verb := ""
-	for i, a := range tokens[1:] {
-		if strings.HasPrefix(a, "-") {
-			continue
-		}
-		verbIdx = i + 1
-		verb = a
-		break
-	}
-	switch verb {
-	case "get", "install":
-		return "go", true
-	case "run":
-		for _, a := range tokens[verbIdx+1:] {
-			if strings.HasPrefix(a, "-") {
-				continue
-			}
-			if strings.Contains(a, "@") && !strings.HasPrefix(a, "./") && !strings.HasPrefix(a, "../") && !strings.HasPrefix(a, "/") {
-				return "go", true
-			}
-			return "", false
-		}
+func riskyByVerb(tokens []string, pm string, verbs map[string]struct{}, flagsWithValues map[string]struct{}) (string, bool) {
+	_, verb, ok := firstNonFlagWithValues(tokens, 1, flagsWithValues)
+	if !ok {
 		return "", false
-	case "mod":
-		for _, a := range tokens[verbIdx+1:] {
-			if strings.HasPrefix(a, "-") {
-				continue
-			}
-			switch a {
-			case "download", "tidy":
-				return "go", true
-			default:
-				return "", false
-			}
-		}
+	}
+	if _, hit := verbs[verb]; hit {
+		return pm, true
 	}
 	return "", false
+}
+
+func firstNonFlagWithValues(tokens []string, start int, flagsWithValues map[string]struct{}) (int, string, bool) {
+	for i := start; i < len(tokens); i++ {
+		tok := tokens[i]
+		if tok == "--" {
+			if i+1 < len(tokens) {
+				return i + 1, tokens[i+1], true
+			}
+			return -1, "", false
+		}
+		if !strings.HasPrefix(tok, "-") {
+			return i, tok, true
+		}
+		if strings.Contains(tok, "=") {
+			continue
+		}
+		if _, takesValue := flagsWithValues[tok]; takesValue && i+1 < len(tokens) {
+			i++
+		}
+	}
+	return -1, "", false
 }

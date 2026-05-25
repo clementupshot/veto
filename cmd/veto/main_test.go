@@ -13,6 +13,7 @@ import (
 	"github.com/brynbellomy/veto/internal/gate"
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/packagemanager"
+	"github.com/brynbellomy/veto/internal/packagemanager/golang"
 	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
 )
 
@@ -310,6 +311,63 @@ func TestRunResolverPreScanRequiresOutputLockfile(t *testing.T) {
 	require.Contains(t, err.Error(), "resolver pre-scan did not produce an expected lockfile")
 }
 
+func TestProjectPreflightExpanderRequiresAuthoritativeManifest(t *testing.T) {
+	expander := projectPreflightExpander{delegate: newCompoundExpander()}
+
+	_, err := expander.Expand(packagemanager.ManifestRef{Path: filepath.Join(t.TempDir(), "go.mod"), Kind: packagemanager.ManifestKindGoMod})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "required project manifest unavailable")
+
+	_, err = expander.Expand(packagemanager.ManifestRef{Path: filepath.Join(t.TempDir(), "Cargo.toml"), Kind: packagemanager.ManifestKindCargoToml})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "required project manifest unavailable")
+}
+
+func TestProjectPreflightExpanderTreatsEvidenceFilesAsOptional(t *testing.T) {
+	expander := projectPreflightExpander{delegate: newCompoundExpander()}
+
+	goSum, err := expander.Expand(packagemanager.ManifestRef{Path: filepath.Join(t.TempDir(), "go.sum"), Kind: packagemanager.ManifestKindGoSum})
+	require.NoError(t, err)
+	require.Empty(t, goSum)
+
+	cargoLock, err := expander.Expand(packagemanager.ManifestRef{Path: filepath.Join(t.TempDir(), "Cargo.lock"), Kind: packagemanager.ManifestKindCargoLock})
+	require.NoError(t, err)
+	require.Empty(t, cargoLock)
+}
+
+func TestProjectPreflightDecisionRefusesGoProjectDependency(t *testing.T) {
+	projectDir := t.TempDir()
+	goMod := filepath.Join(projectDir, "go.mod")
+	require.NoError(t, os.WriteFile(goMod, []byte("module example.com/app\n\nrequire github.com/evil/module v1.2.3\n"), 0o644))
+
+	store := storeWithFakeReports(t, []intel.MalwareReport{
+		{
+			PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemGo, Name: "github.com/evil/module", Version: "v1.2.3"},
+			SourceID:   "test-feed",
+			Reason:     "known malicious go module",
+		},
+	})
+	policy := gate.DefaultPolicy()
+	policy.ManifestExpander = newCompoundExpander()
+	g := gate.New(store, policy, zerolog.Nop())
+	decision := g.Evaluate([]packagemanager.Install{}, packagemanager.ManifestRef{Path: goMod, Kind: packagemanager.ManifestKindGoMod})
+
+	require.Equal(t, gate.OutcomeRefuse, decision.Outcome)
+	require.Len(t, decision.Flagged(), 1)
+	require.Equal(t, "github.com/evil/module", decision.Flagged()[0].Ref.Name)
+}
+
+func TestProjectPreflightPlanOnlyForPassThroughCommands(t *testing.T) {
+	pm := golang.New()
+
+	plan, ok := projectPreflightPlan(pm, []string{"test", "./..."}, nil, nil)
+	require.True(t, ok)
+	require.NotEmpty(t, plan.ManifestRefs)
+
+	_, ok = projectPreflightPlan(pm, []string{"get", "github.com/evil/module@v1.2.3"}, []packagemanager.Install{{RawSpec: "github.com/evil/module@v1.2.3"}}, nil)
+	require.False(t, ok)
+}
+
 func TestResolverPreScanDecisionRefusesGeneratedTransitive(t *testing.T) {
 	g := gateWithFakeStore(t, []intel.MalwareReport{
 		{
@@ -331,9 +389,14 @@ func TestResolverPreScanDecisionRefusesGeneratedTransitive(t *testing.T) {
 
 func gateWithFakeStore(t *testing.T, reports []intel.MalwareReport) *gate.Gate {
 	t.Helper()
+	return gate.New(storeWithFakeReports(t, reports), gate.DefaultPolicy(), zerolog.Nop())
+}
+
+func storeWithFakeReports(t *testing.T, reports []intel.MalwareReport) intel.Store {
+	t.Helper()
 	store := intel.NewStore(zerolog.Nop(), fakeSource{reports: reports})
 	require.NoError(t, store.Refresh(context.Background()))
-	return gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
+	return store
 }
 
 type fakeSource struct {

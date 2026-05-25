@@ -117,7 +117,22 @@ static const char *const PIPX_VERBS[]   = {"install","upgrade","inject","run",NU
 static const char *const UV_VERBS[]     = {"add","sync","install","tool","run","pip",NULL};
 static const char *const POETRY_VERBS[] = {"install","add","update","lock",NULL};
 static const char *const PDM_VERBS[]    = {"install","add","update","sync",NULL};
-static const char *const CARGO_VERBS[]  = {"add","update","fetch","install",NULL};
+static const char *const CARGO_VERBS[]  = {"add","update","fetch","install","build","check","test","run","bench","clippy",NULL};
+
+static const char *const GO_FLAGS_WITH_VALUES[] = {
+  "-C","-mod","-modfile","-overlay","-tags","-exec","-asmflags","-gcflags",
+  "-ldflags","-gccgoflags","-toolexec","-pkgdir","-p","-o","-buildmode",
+  "-compiler","-coverpkg","-coverprofile","-run","-bench","-benchtime","-count",
+  "-cpu","-list","-parallel","-timeout","-vet","-reuse",NULL,
+};
+
+static const char *const CARGO_FLAGS_WITH_VALUES[] = {
+  "--color","--config","-Z","--manifest-path","--lockfile-path","--target",
+  "--target-dir","--package","-p","--features","-F","--jobs","-j","--profile",
+  "--message-format","--example","--bin","--test","--bench","--index",
+  "--registry","--version","--vers","--git","--tag","--rev","--branch",
+  "--path","--root","--precise","--aggressive","--rename",NULL,
+};
 
 static const char *const *verbs_for(const char *name) {
   if (!strcmp(name, "npm"))    return NPM_VERBS;
@@ -139,6 +154,18 @@ static int in_list(const char *s, const char *const *list) {
     if (!strcmp(s, *list)) return 1;
   }
   return 0;
+}
+
+static int first_nonflag(char *const argv[], int start, const char *const *flags_with_values) {
+  if (!argv) return -1;
+  for (int i = start; argv[i]; i++) {
+    const char *a = argv[i];
+    if (!strcmp(a, "--")) return argv[i + 1] ? i + 1 : -1;
+    if (a[0] != '-') return i;
+    if (strchr(a, '=')) continue;
+    if (flags_with_values && in_list(a, flags_with_values) && argv[i + 1]) i++;
+  }
+  return -1;
 }
 
 static const char *basename_of(const char *path) {
@@ -170,30 +197,20 @@ static const char *python_m_target(char *const argv[]) {
 
 static const char *risky_go(char *const argv[]) {
   if (!argv) return NULL;
-  int verb_idx = -1;
-  const char *verb = NULL;
-  for (int i = 1; argv[i]; i++) {
-    if (argv[i][0] == '-') continue;
-    verb_idx = i;
-    verb = argv[i];
-    break;
-  }
-  if (!verb) return NULL;
-  if (!strcmp(verb, "get") || !strcmp(verb, "install")) return "go";
+  int verb_idx = first_nonflag(argv, 1, GO_FLAGS_WITH_VALUES);
+  if (verb_idx < 0) return NULL;
+  const char *verb = argv[verb_idx];
+  if (!strcmp(verb, "get") || !strcmp(verb, "install") || !strcmp(verb, "build") ||
+      !strcmp(verb, "test") || !strcmp(verb, "vet")) return "go";
   if (!strcmp(verb, "run")) {
-    for (int i = verb_idx + 1; argv[i]; i++) {
-      const char *a = argv[i];
-      if (a[0] == '-') continue;
-      if (strchr(a, '@') && strncmp(a, "./", 2) && strncmp(a, "../", 3) && a[0] != '/') return "go";
-      return NULL;
-    }
-    return NULL;
+    int spec_idx = first_nonflag(argv, verb_idx + 1, GO_FLAGS_WITH_VALUES);
+    if (spec_idx < 0) return NULL;
+    return "go";
   }
   if (!strcmp(verb, "mod")) {
-    for (int i = verb_idx + 1; argv[i]; i++) {
-      if (argv[i][0] == '-') continue;
-      return (!strcmp(argv[i], "download") || !strcmp(argv[i], "tidy")) ? "go" : NULL;
-    }
+    int sub_idx = first_nonflag(argv, verb_idx + 1, GO_FLAGS_WITH_VALUES);
+    if (sub_idx < 0) return NULL;
+    return (!strcmp(argv[sub_idx], "download") || !strcmp(argv[sub_idx], "tidy")) ? "go" : NULL;
   }
   return NULL;
 }
@@ -264,11 +281,9 @@ static const char *is_risky(const char *path, char *const argv[]) {
 
   const char *const *verbs = verbs_for(bn);
   if (!verbs) return NULL;
-  for (int i = 1; argv[i]; i++) {
-    if (argv[i][0] == '-') continue;
-    return in_list(argv[i], verbs) ? bn : NULL;
-  }
-  return NULL;
+  int verb_idx = first_nonflag(argv, 1, !strcmp(bn, "cargo") ? CARGO_FLAGS_WITH_VALUES : NULL);
+  if (verb_idx < 0) return NULL;
+  return in_list(argv[verb_idx], verbs) ? bn : NULL;
 }
 
 // rewrite_argv returns a newly-allocated argv array of the form

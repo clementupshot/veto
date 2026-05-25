@@ -1,6 +1,7 @@
 package golang_test
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -46,7 +47,7 @@ func TestParseInstalls(t *testing.T) {
 		require.Empty(t, out)
 	})
 
-	t.Run("non fetching commands pass through", func(t *testing.T) {
+	t.Run("non dependency-fetching commands parse no installs", func(t *testing.T) {
 		require.Nil(t, m.ParseInstalls([]string{"build", "./..."}))
 		require.Nil(t, m.ParseInstalls([]string{"test", "./..."}))
 		require.Nil(t, m.ParseInstalls([]string{"version"}))
@@ -73,6 +74,48 @@ func TestManifestRefs(t *testing.T) {
 	require.Nil(t, m.ManifestRefs([]string{"install", "github.com/evil/cmd@v0.2.0"}))
 	require.Nil(t, m.ManifestRefs([]string{"run", "github.com/evil/cmd@v0.2.0"}))
 	require.Nil(t, m.ManifestRefs([]string{"build", "./..."}))
+}
+
+func TestProjectPreflight(t *testing.T) {
+	m := golang.New()
+
+	for _, args := range [][]string{
+		{"build", "./..."},
+		{"test", "./..."},
+		{"vet", "./..."},
+		{"run", "./cmd/app"},
+		{"run", "main.go"},
+	} {
+		plan, ok := m.ProjectPreflight(args)
+		require.True(t, ok, "expected project preflight for %v", args)
+		require.Equal(t, []packagemanager.ManifestRef{
+			{Path: "go.mod", Kind: packagemanager.ManifestKindGoMod},
+			{Path: "go.sum", Kind: packagemanager.ManifestKindGoSum},
+		}, plan.ManifestRefs)
+	}
+
+	plan, ok := m.ProjectPreflight([]string{"-C", "nested", "test", "./..."})
+	require.True(t, ok)
+	require.Equal(t, []packagemanager.ManifestRef{
+		{Path: filepath.Join("nested", "go.mod"), Kind: packagemanager.ManifestKindGoMod},
+		{Path: filepath.Join("nested", "go.sum"), Kind: packagemanager.ManifestKindGoSum},
+	}, plan.ManifestRefs)
+
+	plan, ok = m.ProjectPreflight([]string{"-modfile", "alt.mod", "build", "./..."})
+	require.True(t, ok)
+	require.Equal(t, []packagemanager.ManifestRef{
+		{Path: "alt.mod", Kind: packagemanager.ManifestKindGoMod},
+		{Path: "alt.sum", Kind: packagemanager.ManifestKindGoSum},
+	}, plan.ManifestRefs)
+
+	_, ok = m.ProjectPreflight([]string{"run", "github.com/evil/cmd@v0.2.0"})
+	require.False(t, ok, "remote versioned go run stays install-style gating")
+	_, ok = m.ProjectPreflight([]string{"run"})
+	require.False(t, ok, "go run without a local target should not force project preflight")
+	_, ok = m.ProjectPreflight([]string{"version"})
+	require.False(t, ok)
+	_, ok = m.ProjectPreflight([]string{"env"})
+	require.False(t, ok)
 }
 
 func requireContains(t *testing.T, installs []packagemanager.Install, name, version string, localPath, opaque bool) {

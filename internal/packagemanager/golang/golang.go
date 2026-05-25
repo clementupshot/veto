@@ -2,6 +2,7 @@
 package golang
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/brynbellomy/veto/internal/intel"
@@ -13,7 +14,7 @@ const binaryName = "go"
 
 // flagsWithValues lists Go flags whose next argv token is the value. The Go
 // command accepts many command-specific flags after the verb, so this table is
-// intentionally shared across the phase-1 verbs to avoid mistaking flag values
+// intentionally shared across covered verbs to avoid mistaking flag values
 // for module specs.
 var flagsWithValues = argv.FlagsWithValues{
 	"-C":            {},
@@ -50,6 +51,7 @@ var flagsWithValues = argv.FlagsWithValues{
 type Manager struct{}
 
 var _ packagemanager.PackageManager = (*Manager)(nil)
+var _ packagemanager.ProjectPreflighter = (*Manager)(nil)
 
 // New builds a Go manager.
 func New() *Manager { return &Manager{} }
@@ -90,6 +92,7 @@ func (Manager) ParseInstalls(args []string) []packagemanager.Install {
 
 // ManifestRefs implements packagemanager.PackageManager.
 func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
+	baseDir, modFile := goProjectPaths(args)
 	verb, rest, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
 	if !ok {
 		return nil
@@ -102,7 +105,7 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 		if len(argv.CollectPositionalsWithTable(rest, flagsWithValues)) == 0 {
 			return nil
 		}
-		return goModuleRefs()
+		return goModuleRefs(baseDir, modFile)
 	case "mod":
 		subVerb, _, subOK := argv.FirstNonFlagWithTable(rest, flagsWithValues)
 		if !subOK {
@@ -110,10 +113,31 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 		}
 		switch subVerb {
 		case "download", "tidy":
-			return goModuleRefs()
+			return goModuleRefs(baseDir, modFile)
 		}
 	}
 	return nil
+}
+
+// ProjectPreflight implements packagemanager.ProjectPreflighter for Go
+// build/test/run commands that execute local project code.
+func (Manager) ProjectPreflight(args []string) (packagemanager.ProjectPreflightPlan, bool) {
+	baseDir, modFile := goProjectPaths(args)
+	verb, rest, ok := argv.FirstNonFlagWithTable(args, flagsWithValues)
+	if !ok {
+		return packagemanager.ProjectPreflightPlan{}, false
+	}
+	switch verb {
+	case "build", "test", "vet":
+		return packagemanager.ProjectPreflightPlan{ManifestRefs: goModuleRefs(baseDir, modFile)}, true
+	case "run":
+		if !goRunIsLocal(rest) {
+			return packagemanager.ProjectPreflightPlan{}, false
+		}
+		return packagemanager.ProjectPreflightPlan{ManifestRefs: goModuleRefs(baseDir, modFile)}, true
+	default:
+		return packagemanager.ProjectPreflightPlan{}, false
+	}
 }
 
 type parseMode int
@@ -238,9 +262,61 @@ func removalOnly(rest []string) bool {
 	return true
 }
 
-func goModuleRefs() []packagemanager.ManifestRef {
+func goProjectPaths(args []string) (string, string) {
+	baseDir := firstFlagValue(args, "-C")
+	modFile := firstFlagValue(args, "-modfile")
+	if baseDir == "" {
+		baseDir = "."
+	}
+	return baseDir, modFile
+}
+
+func firstFlagValue(args []string, flag string) string {
+	for i := 0; i < len(args); i++ {
+		tok := args[i]
+		if tok == "--" {
+			return ""
+		}
+		if value, ok := strings.CutPrefix(tok, flag+"="); ok {
+			return value
+		}
+		if tok == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func goRunIsLocal(rest []string) bool {
+	specs := argv.CollectPositionalsWithTable(rest, flagsWithValues)
+	if len(specs) == 0 {
+		return false
+	}
+	_, _, hasVersion := splitModuleVersion(specs[0])
+	if !hasVersion {
+		return true
+	}
+	ins, ok := parseModuleSpec(specs[0])
+	return !ok || ins.LocalPath || ins.OpaqueRemote
+}
+
+func goModuleRefs(baseDir, modFile string) []packagemanager.ManifestRef {
+	if baseDir == "" {
+		baseDir = "."
+	}
+	if modFile == "" {
+		return []packagemanager.ManifestRef{
+			{Path: filepath.Join(baseDir, "go.mod"), Kind: packagemanager.ManifestKindGoMod},
+			{Path: filepath.Join(baseDir, "go.sum"), Kind: packagemanager.ManifestKindGoSum},
+		}
+	}
+	modPath := modFile
+	if !filepath.IsAbs(modPath) {
+		modPath = filepath.Join(baseDir, modPath)
+	}
+	sumPath := strings.TrimSuffix(modPath, filepath.Ext(modPath)) + ".sum"
 	return []packagemanager.ManifestRef{
-		{Path: "go.mod", Kind: packagemanager.ManifestKindGoMod},
-		{Path: "go.sum", Kind: packagemanager.ManifestKindGoSum},
+		{Path: modPath, Kind: packagemanager.ManifestKindGoMod},
+		{Path: sumPath, Kind: packagemanager.ManifestKindGoSum},
 	}
 }

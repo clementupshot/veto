@@ -1,6 +1,7 @@
 package cargo_test
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -49,7 +50,7 @@ func TestParseInstalls(t *testing.T) {
 		require.Empty(t, m.ParseInstalls([]string{"fetch"}))
 	})
 
-	t.Run("non fetching commands pass through", func(t *testing.T) {
+	t.Run("non dependency-fetching commands parse no installs", func(t *testing.T) {
 		require.Nil(t, m.ParseInstalls([]string{"build"}))
 		require.Nil(t, m.ParseInstalls([]string{"test"}))
 		require.Nil(t, m.ParseInstalls([]string{"version"}))
@@ -72,6 +73,45 @@ func TestManifestRefs(t *testing.T) {
 
 	require.Nil(t, m.ManifestRefs([]string{"install", "ripgrep"}))
 	require.Nil(t, m.ManifestRefs([]string{"build"}))
+}
+
+func TestProjectPreflight(t *testing.T) {
+	m := cargo.New()
+
+	for _, args := range [][]string{
+		{"build"},
+		{"check"},
+		{"test"},
+		{"run"},
+		{"bench"},
+		{"clippy"},
+	} {
+		plan, ok := m.ProjectPreflight(args)
+		require.True(t, ok, "expected project preflight for %v", args)
+		require.Equal(t, []packagemanager.ManifestRef{
+			{Path: "Cargo.toml", Kind: packagemanager.ManifestKindCargoToml},
+			{Path: "Cargo.lock", Kind: packagemanager.ManifestKindCargoLock},
+		}, plan.ManifestRefs)
+	}
+
+	plan, ok := m.ProjectPreflight([]string{"test", "--manifest-path", filepath.Join("nested", "Cargo.toml")})
+	require.True(t, ok)
+	require.Equal(t, []packagemanager.ManifestRef{
+		{Path: filepath.Join("nested", "Cargo.toml"), Kind: packagemanager.ManifestKindCargoToml},
+		{Path: filepath.Join("nested", "Cargo.lock"), Kind: packagemanager.ManifestKindCargoLock},
+	}, plan.ManifestRefs)
+
+	plan, ok = m.ProjectPreflight([]string{"build", "--manifest-path", filepath.Join("nested", "Cargo.toml"), "--lockfile-path", filepath.Join("locks", "Cargo.lock")})
+	require.True(t, ok)
+	require.Equal(t, []packagemanager.ManifestRef{
+		{Path: filepath.Join("nested", "Cargo.toml"), Kind: packagemanager.ManifestKindCargoToml},
+		{Path: filepath.Join("locks", "Cargo.lock"), Kind: packagemanager.ManifestKindCargoLock},
+	}, plan.ManifestRefs)
+
+	_, ok = m.ProjectPreflight([]string{"version"})
+	require.False(t, ok)
+	_, ok = m.ProjectPreflight([]string{"metadata"})
+	require.False(t, ok)
 }
 
 func requireContains(t *testing.T, installs []packagemanager.Install, name, version string, localPath, opaque bool) {

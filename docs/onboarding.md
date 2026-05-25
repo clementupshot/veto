@@ -489,10 +489,10 @@ Documented limits, in addition to the threat-model section in
   install. Other ecosystems do not yet get a resolver probe for newly
   named packages; they rely on argv, manifests, and already-present
   lockfiles where live command gating exists.
-- **Go and Cargo build/test/run preflight.** Phase 1 live gating covers
-  dependency fetch/mutate commands only. `go build`, `go test`, local
-  `go run`, `cargo build`, `cargo test`, and local `cargo run` are phase
-  2 work.
+- **Go and Cargo project preflight.** Dependency fetch/mutate commands
+  are gated, and local build/test/run commands preflight project files
+  before execution. Go checks `go.mod` plus optional `go.sum`; Cargo
+  checks `Cargo.toml` plus optional `Cargo.lock`.
 
 Veto is one layer of defense, not a substitute for code review of
 unpinned/unverified dependencies.

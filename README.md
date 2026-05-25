@@ -209,10 +209,12 @@ gates the generated `package-lock.json`/`npm-shrinkwrap.json` before the
 real install is allowed to run. For `pip install` / `pip3 install`, veto
 runs pip's resolver with `--dry-run --ignore-installed --report` in an
 isolated temp copy and forces `--only-binary=:all:` so the probe does not
-build sdists or run setup code. It gates the generated report before the
-real install. If a resolver probe fails, does not produce expected output,
-or the generated output does not include the argv-named packages, veto
-aborts fail-closed.
+build sdists or run setup code. For `uv pip install`, veto runs
+`uv pip compile --format pylock.toml` against seeded or synthetic
+requirements input with `--only-binary=:all:` and gates the generated
+pylock before the real install. If a resolver probe fails, does not
+produce expected output, or the generated output does not include the
+argv-named packages, veto aborts fail-closed.
 
 Go and Cargo live gating covers fetch/mutate commands that can introduce
 or download dependency code (`go get`, `go install`, remote `go run
@@ -438,10 +440,10 @@ these):
   back to "over-block" (refuse the install) with a debug log rather
   than under-block. This is a safe posture, but PEP 440 bounded-range
   matching is not implemented.
-- **Resolver pre-scan is partial.** npm and pip/pip3 get isolated resolver
-  probes for newly named packages. Other package managers rely on argv,
-  manifests, and already-present lockfiles until a safe resolver mode is
-  implemented for them.
+- **Resolver pre-scan is partial.** npm, pip/pip3, and `uv pip install` get
+  isolated resolver probes for newly named packages. Project-level uv verbs,
+  Poetry, PDM, Go, and Cargo rely on argv, manifests, and already-present
+  lockfiles until a safe resolver mode is implemented for them.
 - **Statically-linked binaries that bypass libc**. Theoretical; no
   real PM does this today.
 

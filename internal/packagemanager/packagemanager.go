@@ -151,6 +151,10 @@ type ManifestRef struct {
 // workdir before running the resolver. Package managers use these to preserve
 // resolver/config context without mutating the user's checkout.
 //
+// GeneratedFiles are relative paths written into the temp workdir before the
+// resolver runs. Use them for synthetic resolver inputs, not for copying user
+// files.
+//
 // DirectInstalls are the argv-named packages the resolver output must contain.
 // The caller uses this as a sanity check that package-manager config did not
 // suppress resolver output updates and leave veto looking at stale seeded data.
@@ -158,6 +162,7 @@ type ResolverPreScanPlan struct {
 	Args           []string
 	ManifestRefs   []ManifestRef
 	SeedFiles      []string
+	GeneratedFiles map[string][]byte
 	DirectInstalls []Install
 }
 

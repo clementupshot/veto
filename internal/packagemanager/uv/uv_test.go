@@ -205,6 +205,59 @@ func TestManifestRefs(t *testing.T) {
 	}
 }
 
+func TestResolverPreScan(t *testing.T) {
+	m := uv.New()
+
+	t.Run("uv pip install specs produce wheel-only pylock compile plan", func(t *testing.T) {
+		plan, ok := m.ResolverPreScan([]string{"pip", "install", "clean-direct"})
+		require.True(t, ok)
+		require.Equal(t, []string{
+			"pip", "compile",
+			"veto-uv-requirements.in",
+			"--output-file", "pylock.veto.toml",
+			"--format", "pylock.toml",
+			"--only-binary", ":all:",
+			"--no-progress",
+		}, plan.Args)
+		require.Equal(t, []packagemanager.ManifestRef{{Path: "pylock.veto.toml", Kind: packagemanager.ManifestKindUvLock}}, plan.ManifestRefs)
+		require.Equal(t, map[string][]byte{"veto-uv-requirements.in": []byte("clean-direct\n")}, plan.GeneratedFiles)
+		require.Equal(t, []packagemanager.Install{{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "clean-direct"}, RawSpec: "clean-direct"}}, plan.DirectInstalls)
+	})
+
+	t.Run("requirements and constraints are compiled and seeded", func(t *testing.T) {
+		plan, ok := m.ResolverPreScan([]string{"pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"})
+		require.True(t, ok)
+		require.Equal(t, []string{"pip", "compile", "requirements.txt", "--constraint", "constraints.txt", "--output-file", "pylock.veto.toml", "--format", "pylock.toml", "--only-binary", ":all:", "--no-progress"}, plan.Args)
+		require.ElementsMatch(t, []string{"requirements.txt", "constraints.txt"}, plan.SeedFiles)
+		require.Empty(t, plan.GeneratedFiles)
+	})
+
+	t.Run("project uv verbs are not pre-scanned by this path", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"add", "clean-direct"})
+		require.False(t, ok)
+	})
+
+	t.Run("empty install is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"pip", "install"})
+		require.False(t, ok)
+	})
+
+	t.Run("local path is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"pip", "install", "./local-pkg"})
+		require.False(t, ok)
+	})
+
+	t.Run("opaque remote is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"pip", "install", "https://example.com/pkg.whl"})
+		require.False(t, ok)
+	})
+
+	t.Run("user no-binary flag is not pre-scanned", func(t *testing.T) {
+		_, ok := m.ResolverPreScan([]string{"pip", "install", "--no-binary", ":all:", "clean-direct"})
+		require.False(t, ok)
+	})
+}
+
 func requireKindUv(t *testing.T, refs []packagemanager.ManifestRef, kind packagemanager.ManifestKind) {
 	t.Helper()
 	for _, r := range refs {

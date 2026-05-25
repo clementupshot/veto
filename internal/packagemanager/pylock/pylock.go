@@ -1,9 +1,11 @@
 // Package pylock reads Python-ecosystem lockfiles (uv.lock, poetry.lock,
 // pdm.lock) and emits Install records against the resolved transitive tree.
 //
-// All three formats share a near-identical TOML schema — an array of
-// `[[package]]` tables, each with `name` and `version`. The leaf differences
-// (extras, source URLs, hashes) don't affect name-keyed gating.
+// Existing uv.lock, poetry.lock, and pdm.lock files share a near-identical TOML
+// schema — an array of `[[package]]` tables, each with `name` and `version`.
+// PEP 751 pylock.toml output, including `uv pip compile --format pylock.toml`,
+// uses `[[packages]]` instead. The leaf differences (extras, source URLs,
+// hashes) don't affect name-keyed gating.
 //
 // Missing files return (nil, nil) — the package-manager parsers emit lock
 // refs speculatively and the expander tolerates absence.
@@ -45,7 +47,8 @@ func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Inst
 // emit `[[package]]` arrays; the difference is in surrounding metadata
 // (which we ignore).
 type lockfile struct {
-	Package []packageEntry `toml:"package"`
+	Package  []packageEntry `toml:"package"`
+	Packages []packageEntry `toml:"packages"`
 }
 
 type packageEntry struct {
@@ -65,8 +68,10 @@ func expand(path string) ([]packagemanager.Install, error) {
 	if err := toml.Unmarshal(data, &lf); err != nil {
 		return nil, vetoerrors.With(err, "parse lockfile TOML").Set("path", path)
 	}
-	out := make([]packagemanager.Install, 0, len(lf.Package))
-	for _, p := range lf.Package {
+	packages := append([]packageEntry{}, lf.Package...)
+	packages = append(packages, lf.Packages...)
+	out := make([]packagemanager.Install, 0, len(packages))
+	for _, p := range packages {
 		if p.Name == "" || p.Version == "" {
 			continue
 		}

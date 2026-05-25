@@ -53,6 +53,28 @@ version = "3.3.0"
 	}
 }
 
+func TestExpand_PEP751PylockPackagesShape(t *testing.T) {
+	const body = `lock-version = "1.0"
+created-by = "uv"
+
+[[packages]]
+name = "requests"
+version = "2.31.0"
+
+[[packages]]
+name = "urllib3"
+version = "2.0.7"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pylock.veto.toml")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+
+	out, err := pylock.New().Expand(packagemanager.ManifestRef{Path: path, Kind: packagemanager.ManifestKindUvLock})
+	require.NoError(t, err)
+	requireContains(t, out, "requests", "2.31.0")
+	requireContains(t, out, "urllib3", "2.0.7")
+}
+
 // TestExpand_MissingFile_ReturnsNilNil: PMs emit lock refs speculatively,
 // so missing files must not error.
 func TestExpand_MissingFile_ReturnsNilNil(t *testing.T) {

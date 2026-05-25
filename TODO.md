@@ -13,9 +13,9 @@ current user-facing behavior.
   that remain above the current 1000-report sanity floor.
 - Implement PEP 440 bounded-range matching for PyPI advisories instead of the
   current safe over-block behavior.
-- Add remaining safe resolver pre-scans where practical: uv/poetry/pdm next for
-  Python-family workflows, then Go/Cargo only if their tooling can resolve
-  without executing project code.
+- Add remaining safe resolver pre-scans where practical: project-level uv verbs,
+  poetry, and pdm next for Python-family workflows, then Go/Cargo only if their
+  tooling can resolve without executing project code.
 - Decide whether IOC-only cache residue can be promoted from report-only to
   purge-safe quarantine rules.
 - Choose and add an explicit license before public distribution.

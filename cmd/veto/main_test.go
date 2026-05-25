@@ -17,6 +17,7 @@ import (
 	"github.com/brynbellomy/veto/internal/packagemanager/golang"
 	"github.com/brynbellomy/veto/internal/packagemanager/jslock"
 	"github.com/brynbellomy/veto/internal/packagemanager/pipreport"
+	"github.com/brynbellomy/veto/internal/packagemanager/pylock"
 )
 
 // TestSanitizedEnv covers the env-scrub helper that execReal applies
@@ -362,6 +363,80 @@ JSON
 			{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "clean-direct"}, RawSpec: "clean-direct"},
 		},
 	}, pipreport.New())
+	require.NoError(t, err)
+	require.Contains(t, got, packagemanager.Install{
+		Ref: intel.PackageRef{
+			Ecosystem: intel.EcosystemPyPI,
+			Name:      "evil-transitive",
+			Version:   "9.9.9",
+		},
+		RawSpec: "evil-transitive==9.9.9",
+	})
+}
+
+func TestRunUvResolverPreScanExtractsGeneratedTransitives(t *testing.T) {
+	projectDir := t.TempDir()
+	oldwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(projectDir))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldwd)) })
+
+	fakeBin := t.TempDir()
+	uvPath := filepath.Join(fakeBin, "uv")
+	fakeUV := `#!/bin/sh
+set -eu
+if [ "$1" != "pip" ] || [ "$2" != "compile" ]; then
+  echo "unexpected uv command: $*" >&2
+  exit 40
+fi
+case " $* " in
+  *" veto-uv-requirements.in "*) ;;
+  *) echo "missing generated input" >&2; exit 41 ;;
+esac
+case " $* " in
+  *" --output-file pylock.veto.toml "*) ;;
+  *) echo "missing output file" >&2; exit 42 ;;
+esac
+case " $* " in
+  *" --format pylock.toml "*) ;;
+  *) echo "missing pylock format" >&2; exit 43 ;;
+esac
+case " $* " in
+  *" --only-binary :all: "*) ;;
+  *) echo "missing wheel-only flag" >&2; exit 44 ;;
+esac
+if [ -n "${VETO_PATH:-}" ]; then
+  echo "VETO_PATH leaked into resolver" >&2
+  exit 45
+fi
+grep -qx 'clean-direct' veto-uv-requirements.in
+cat > pylock.veto.toml <<'TOML'
+lock-version = "1.0"
+created-by = "uv"
+
+[[packages]]
+name = "clean-direct"
+version = "1.0.0"
+
+[[packages]]
+name = "evil-transitive"
+version = "9.9.9"
+TOML
+`
+	require.NoError(t, os.WriteFile(uvPath, []byte(fakeUV), 0o755))
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("VETO_PATH", "/tmp/veto")
+
+	got, err := runResolverPreScan(zerolog.Nop(), config{CacheDir: t.TempDir()}, "uv", packagemanager.ResolverPreScanPlan{
+		Args: []string{"pip", "compile", "veto-uv-requirements.in", "--output-file", "pylock.veto.toml", "--format", "pylock.toml", "--only-binary", ":all:", "--no-progress"},
+		ManifestRefs: []packagemanager.ManifestRef{
+			{Path: "pylock.veto.toml", Kind: packagemanager.ManifestKindUvLock},
+		},
+		GeneratedFiles: map[string][]byte{"veto-uv-requirements.in": []byte("clean-direct\n")},
+		DirectInstalls: []packagemanager.Install{
+			{Ref: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "clean-direct"}, RawSpec: "clean-direct"},
+		},
+	}, pylock.New())
 	require.NoError(t, err)
 	require.Contains(t, got, packagemanager.Install{
 		Ref: intel.PackageRef{

@@ -482,13 +482,12 @@ Documented limits, in addition to the threat-model section in
   gate against fewer than 1000 reports total, but a feed that drops
   most malware while still returning hundreds of entries would slip
   through.
-- **Resolver pre-scan beyond npm.** Existing lockfiles are gated for
-  live npm-family, Python-family, Go, and Cargo install/fetch commands,
-  and `npm install`/`npm update` get a temp-dir `--package-lock=true
-  --package-lock-only --ignore-scripts` pre-scan before the real
-  install. Other ecosystems do not yet get a resolver probe for newly
-  named packages; they rely on argv, manifests, and already-present
-  lockfiles where live command gating exists.
+- **Resolver pre-scan is partial.** Existing lockfiles are gated for live
+  npm-family, Python-family, Go, and Cargo install/fetch commands. npm,
+  pip/pip3, and `uv pip install` also get isolated resolver probes before
+  the real install. Project-level uv verbs, Poetry, PDM, Go, and Cargo do
+  not yet get resolver probes for newly named packages; they rely on argv,
+  manifests, and already-present lockfiles where live command gating exists.
 - **Go and Cargo project preflight.** Dependency fetch/mutate commands
   are gated, and local build/test/run commands preflight project files
   before execution. Go checks `go.mod` plus optional `go.sum`; Cargo

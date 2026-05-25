@@ -2,6 +2,8 @@
 package uv
 
 import (
+	"strings"
+
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/packagemanager"
 	"github.com/brynbellomy/veto/internal/packagemanager/argv"
@@ -15,37 +17,37 @@ const binaryName = "uv"
 // own (--python, --index, --extra-index-url, --resolution, etc.) for the
 // `uv add`/`uv sync` shape.
 var flagsWithValues = argv.FlagsWithValues{
-	"--python":          {},
-	"-p":                {},
-	"--index":           {},
-	"--default-index":   {},
-	"--index-url":       {},
-	"-i":                {},
-	"--extra-index-url": {},
-	"--find-links":      {},
-	"-f":                {},
-	"--cache-dir":       {},
-	"--config-file":     {},
-	"--directory":       {},
-	"--project":         {},
-	"--resolution":      {},
-	"--prerelease":      {},
-	"--target":          {},
-	"--prefix":          {},
-	"--link-mode":       {},
-	"--index-strategy":  {},
-	"--keyring-provider": {},
+	"--python":            {},
+	"-p":                  {},
+	"--index":             {},
+	"--default-index":     {},
+	"--index-url":         {},
+	"-i":                  {},
+	"--extra-index-url":   {},
+	"--find-links":        {},
+	"-f":                  {},
+	"--cache-dir":         {},
+	"--config-file":       {},
+	"--directory":         {},
+	"--project":           {},
+	"--resolution":        {},
+	"--prerelease":        {},
+	"--target":            {},
+	"--prefix":            {},
+	"--link-mode":         {},
+	"--index-strategy":    {},
+	"--keyring-provider":  {},
 	"--python-preference": {},
-	"-r":                {},
-	"--requirement":     {},
-	"-c":                {},
-	"--constraint":      {},
-	"--override":        {},
-	"--extra":           {},
-	"--group":           {},
-	"--with":            {},
+	"-r":                  {},
+	"--requirement":       {},
+	"-c":                  {},
+	"--constraint":        {},
+	"--override":          {},
+	"--extra":             {},
+	"--group":             {},
+	"--with":              {},
 	"--with-requirements": {},
-	"--package":         {},
+	"--package":           {},
 }
 
 // Manager parses uv install commands. Handles both `uv pip install ...` and
@@ -53,6 +55,7 @@ var flagsWithValues = argv.FlagsWithValues{
 type Manager struct{}
 
 var _ packagemanager.PackageManager = (*Manager)(nil)
+var _ packagemanager.ResolverPreScanner = (*Manager)(nil)
 
 // New builds a uv manager.
 func New() *Manager { return &Manager{} }
@@ -184,6 +187,95 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 		return nil
 	}
 	return refs
+}
+
+// ResolverPreScan implements packagemanager.ResolverPreScanner for uv's
+// pip-compatible install shape. uv pip compile can resolve requirements into a
+// pylock.toml file without installing packages. Veto feeds it a synthetic input
+// file for argv-named specs, seeds user requirements/constraints, and forces
+// wheel-only resolution so sdists are not built in the temporary workdir.
+func (Manager) ResolverPreScan(args []string) (packagemanager.ResolverPreScanPlan, bool) {
+	verb, rest, ok := installVerbAndRest(args)
+	if !ok || verb != "pip-install" {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	directInstalls := Manager{}.ParseInstalls(args)
+	manifestRefs := Manager{}.ManifestRefs(args)
+	if len(directInstalls) == 0 && len(manifestRefs) == 0 {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	if hasUnsafeResolverPreScanSpec(directInstalls) || hasUnsafeResolverPreScanFlag(rest) {
+		return packagemanager.ResolverPreScanPlan{}, false
+	}
+	compileArgs := []string{"pip", "compile"}
+	generatedFiles := map[string][]byte{}
+	if len(directInstalls) > 0 {
+		generatedFiles["veto-uv-requirements.in"] = []byte(directRequirementsInput(directInstalls))
+		compileArgs = append(compileArgs, "veto-uv-requirements.in")
+	}
+	compileArgs = append(compileArgs, compileRequirementArgs(manifestRefs)...)
+	compileArgs = append(compileArgs,
+		"--output-file", "pylock.veto.toml",
+		"--format", "pylock.toml",
+		"--only-binary", ":all:",
+		"--no-progress",
+	)
+	seedFiles := make([]string, 0, len(manifestRefs))
+	for _, ref := range manifestRefs {
+		seedFiles = append(seedFiles, ref.Path)
+	}
+	return packagemanager.ResolverPreScanPlan{
+		Args: compileArgs,
+		ManifestRefs: []packagemanager.ManifestRef{
+			{Path: "pylock.veto.toml", Kind: packagemanager.ManifestKindUvLock},
+		},
+		SeedFiles:      seedFiles,
+		GeneratedFiles: generatedFiles,
+		DirectInstalls: directInstalls,
+	}, true
+}
+
+func compileRequirementArgs(refs []packagemanager.ManifestRef) []string {
+	out := make([]string, 0, len(refs)*2)
+	for _, ref := range refs {
+		switch ref.Kind {
+		case packagemanager.ManifestKindRequirements:
+			out = append(out, ref.Path)
+		case packagemanager.ManifestKindConstraint:
+			out = append(out, "--constraint", ref.Path)
+		}
+	}
+	return out
+}
+
+func directRequirementsInput(installs []packagemanager.Install) string {
+	var b strings.Builder
+	for _, ins := range installs {
+		if ins.RawSpec == "" {
+			continue
+		}
+		b.WriteString(ins.RawSpec)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func hasUnsafeResolverPreScanSpec(installs []packagemanager.Install) bool {
+	for _, ins := range installs {
+		if ins.LocalPath || ins.OpaqueRemote {
+			return true
+		}
+	}
+	return false
+}
+
+func hasUnsafeResolverPreScanFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--no-binary" || strings.HasPrefix(arg, "--no-binary=") {
+			return true
+		}
+	}
+	return false
 }
 
 // installVerbAndRest returns the canonical install verb and the argv tail to

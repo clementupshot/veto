@@ -717,6 +717,9 @@ func runResolverPreScan(
 	if err := seedResolverWorkdir(workdir, plan.SeedFiles); err != nil {
 		return nil, err
 	}
+	if err := writeGeneratedResolverFiles(workdir, plan.GeneratedFiles); err != nil {
+		return nil, err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), resolverPreScanTimeout)
 	defer cancel()
@@ -827,6 +830,23 @@ func seedResolverWorkdir(workdir string, relPaths []string) error {
 		seen[cleanRel] = struct{}{}
 		if err := copySeedPath(cleanRel, filepath.Join(workdir, cleanRel)); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func writeGeneratedResolverFiles(workdir string, files map[string][]byte) error {
+	for rel, data := range files {
+		cleanRel, ok := cleanSeedPath(rel)
+		if !ok {
+			return errors.WithNew("generated resolver file path must be relative").Set("path", rel)
+		}
+		dst := filepath.Join(workdir, cleanRel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return errors.With(err, "mkdir generated resolver file parent").Set("path", dst)
+		}
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return errors.With(err, "write generated resolver file").Set("path", dst)
 		}
 	}
 	return nil

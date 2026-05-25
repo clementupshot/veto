@@ -13,10 +13,6 @@ current user-facing behavior.
   that remain above the current 1000-report sanity floor.
 - Implement PEP 440 bounded-range matching for PyPI advisories instead of the
   current safe over-block behavior.
-- Add Go/Cargo cache scanning and quarantine coverage: discover `$GOMODCACHE`,
-  `~/go/pkg/mod`, `~/.cargo/registry`, and `~/.cargo/git`; identify package and
-  version metadata conservatively; purge only confirmed flagged artifacts inside
-  known cache roots.
 - Extend `install-all` and `doctor` to cover agent posture beyond Claude: Codex
   PATH inheritance policy, Cursor project/global rule posture where inspectable,
   and Sirene launch-environment coverage where inspectable.

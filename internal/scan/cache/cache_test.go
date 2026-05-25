@@ -85,6 +85,98 @@ func TestPlanPurgeDeletesOnlyConfirmedInsideCacheRoot(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 }
 
+func TestScannerFindsFlaggedGoModuleCacheDirectory(t *testing.T) {
+	root := t.TempDir()
+	modDir := filepath.Join(root, "github.com", "!evil", "pkg@v1.2.3")
+	require.NoError(t, os.MkdirAll(modDir, 0o755))
+	store := buildStore(t, intel.MalwareReport{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemGo, Name: "github.com/Evil/pkg", Version: "v1.2.3"}, SourceID: "fake"})
+
+	result := cache.New(cache.Options{RootEntries: []cache.Root{cache.GoRoot(root)}, Store: store}).Scan(context.Background())
+
+	require.Empty(t, result.Errors)
+	require.Equal(t, 1, result.FilesScanned)
+	require.Equal(t, 1, result.PackagesChecked)
+	require.Len(t, result.Findings, 1)
+	require.Equal(t, intel.EcosystemGo, result.Findings[0].PackageRef.Ecosystem)
+	require.Equal(t, "github.com/Evil/pkg", result.Findings[0].PackageRef.Name)
+	require.Equal(t, "v1.2.3", result.Findings[0].PackageRef.Version)
+	require.Equal(t, modDir, result.Findings[0].PurgePath)
+}
+
+func TestScannerFindsFlaggedGoDownloadCacheFile(t *testing.T) {
+	root := t.TempDir()
+	zip := filepath.Join(root, "cache", "download", "example.com", "evil", "pkg", "@v", "v0.4.0.zip")
+	require.NoError(t, os.MkdirAll(filepath.Dir(zip), 0o755))
+	require.NoError(t, os.WriteFile(zip, []byte("zip"), 0o644))
+	store := buildStore(t, intel.MalwareReport{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemGo, Name: "example.com/evil/pkg", Version: "v0.4.0"}, SourceID: "fake"})
+
+	result := cache.New(cache.Options{RootEntries: []cache.Root{cache.GoRoot(root)}, Store: store}).Scan(context.Background())
+
+	require.Empty(t, result.Errors)
+	require.Len(t, result.Findings, 1)
+	require.Equal(t, zip, result.Findings[0].PurgePath)
+}
+
+func TestScannerFindsFlaggedCargoRegistryArchive(t *testing.T) {
+	root := t.TempDir()
+	crate := filepath.Join(root, "cache", "index.crates.io-6f17d22bba15001f", "evil-crate-1.2.3.crate")
+	require.NoError(t, os.MkdirAll(filepath.Dir(crate), 0o755))
+	require.NoError(t, os.WriteFile(crate, []byte("crate"), 0o644))
+	store := buildStore(t, intel.MalwareReport{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemCrates, Name: "evil-crate", Version: "1.2.3"}, SourceID: "fake"})
+
+	result := cache.New(cache.Options{RootEntries: []cache.Root{cache.CargoRegistryRoot(root)}, Store: store}).Scan(context.Background())
+
+	require.Empty(t, result.Errors)
+	require.Len(t, result.Findings, 1)
+	require.Equal(t, intel.EcosystemCrates, result.Findings[0].PackageRef.Ecosystem)
+	require.Equal(t, "evil-crate", result.Findings[0].PackageRef.Name)
+	require.Equal(t, "1.2.3", result.Findings[0].PackageRef.Version)
+	require.Equal(t, crate, result.Findings[0].PurgePath)
+}
+
+func TestScannerFindsFlaggedCargoRegistrySourceDirectory(t *testing.T) {
+	root := t.TempDir()
+	crateDir := filepath.Join(root, "src", "index.crates.io-6f17d22bba15001f", "evil-crate-1.2.3")
+	require.NoError(t, os.MkdirAll(crateDir, 0o755))
+	store := buildStore(t, intel.MalwareReport{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemCrates, Name: "evil-crate", Version: "1.2.3"}, SourceID: "fake"})
+
+	result := cache.New(cache.Options{RootEntries: []cache.Root{cache.CargoRegistryRoot(root)}, Store: store}).Scan(context.Background())
+
+	require.Empty(t, result.Errors)
+	require.Len(t, result.Findings, 1)
+	require.Equal(t, crateDir, result.Findings[0].PurgePath)
+}
+
+func TestScannerFindsFlaggedCargoGitCheckout(t *testing.T) {
+	root := t.TempDir()
+	manifest := filepath.Join(root, "checkouts", "evil-crate-abcd", "1234567", "Cargo.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(manifest), 0o755))
+	require.NoError(t, os.WriteFile(manifest, []byte("[package]\nname = \"evil-crate\"\nversion = \"1.2.3\"\n"), 0o644))
+	store := buildStore(t, intel.MalwareReport{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemCrates, Name: "evil-crate", Version: "1.2.3"}, SourceID: "fake"})
+
+	result := cache.New(cache.Options{RootEntries: []cache.Root{cache.CargoGitRoot(root)}, Store: store}).Scan(context.Background())
+
+	require.Empty(t, result.Errors)
+	require.Len(t, result.Findings, 1)
+	require.Equal(t, filepath.Dir(manifest), result.Findings[0].PurgePath)
+}
+
+func TestPlanPurgeDeletesGoCacheArtifact(t *testing.T) {
+	root := t.TempDir()
+	modDir := filepath.Join(root, "example.com", "evil@v1.0.0")
+	require.NoError(t, os.MkdirAll(modDir, 0o755))
+	store := buildStore(t, intel.MalwareReport{PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemGo, Name: "example.com/evil", Version: "v1.0.0"}, SourceID: "fake"})
+	result := cache.New(cache.Options{RootEntries: []cache.Root{cache.GoRoot(root)}, Store: store}).Scan(context.Background())
+	require.Len(t, result.Findings, 1)
+
+	actions := cache.PlanPurge(result.Findings, []string{root}, true)
+
+	require.Len(t, actions, 1)
+	require.Equal(t, "deleted", actions[0].Status)
+	_, err := os.Stat(modDir)
+	require.True(t, os.IsNotExist(err))
+}
+
 func TestPlanPurgeSkipsSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

@@ -280,6 +280,10 @@ veto scan --root ~/projects/work --no-caches
 veto scan --no-projects --no-agent-surface  # cache exposure only
 ```
 
+Cache scanning covers npm, pnpm, bun, pip, uv, poetry, Go module caches
+(`$GOMODCACHE`, `$GOPATH/pkg/mod`, `~/go/pkg/mod`), and Cargo registry/git
+caches (`$CARGO_HOME/registry`, `$CARGO_HOME/git`, or `~/.cargo/...`).
+
 `veto quarantine-cache` runs the cache scanner and plans removals for
 confirmed malicious cache artifacts. It defaults to dry-run; `--purge`
 deletes only confirmed flagged artifacts after resolving symlinks and

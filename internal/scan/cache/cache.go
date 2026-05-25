@@ -12,20 +12,51 @@ import (
 	"strings"
 
 	"github.com/brynbellomy/go-utils/errors"
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/brynbellomy/veto/internal/intel"
 	"github.com/brynbellomy/veto/internal/scan"
 )
 
+type rootKind string
+
+const (
+	rootKindGeneric       rootKind = "generic"
+	rootKindGo            rootKind = "go"
+	rootKindCargoRegistry rootKind = "cargo-registry"
+	rootKindCargoGit      rootKind = "cargo-git"
+)
+
+// Root is one package-manager cache root and the scanner semantics to use for
+// metadata discovered beneath it.
+type Root struct {
+	Path string
+	kind rootKind
+}
+
+// GenericRoot returns a cache root that uses package.json and Python metadata
+// heuristics.
+func GenericRoot(path string) Root { return Root{Path: path, kind: rootKindGeneric} }
+
+// GoRoot returns a Go module cache root.
+func GoRoot(path string) Root { return Root{Path: path, kind: rootKindGo} }
+
+// CargoRegistryRoot returns a Cargo registry cache root.
+func CargoRegistryRoot(path string) Root { return Root{Path: path, kind: rootKindCargoRegistry} }
+
+// CargoGitRoot returns a Cargo git checkout cache root.
+func CargoGitRoot(path string) Root { return Root{Path: path, kind: rootKindCargoGit} }
+
 // Options configures a cache Scanner.
 type Options struct {
-	Roots []string
-	Store intel.Store
+	Roots       []string
+	RootEntries []Root
+	Store       intel.Store
 }
 
 // Scanner scans package-manager cache roots for package metadata.
 type Scanner struct {
-	roots []string
+	roots []Root
 	store intel.Store
 }
 
@@ -33,15 +64,40 @@ var _ scan.Scanner = (*Scanner)(nil)
 
 // New builds a cache scanner.
 func New(opts Options) *Scanner {
-	return &Scanner{roots: append([]string{}, opts.Roots...), store: opts.Store}
+	roots := append([]Root{}, opts.RootEntries...)
+	for _, root := range opts.Roots {
+		roots = append(roots, GenericRoot(root))
+	}
+	return &Scanner{roots: roots, store: opts.Store}
 }
 
 // DefaultRoots returns known package-manager cache roots for the current user.
 func DefaultRoots(home string) []string {
+	entries := DefaultRootEntries(home)
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.Path)
+	}
+	return out
+}
+
+// DefaultRootEntries returns known package-manager cache roots and their cache
+// semantics for the current user.
+func DefaultRootEntries(home string) []Root {
 	if home == "" {
 		return nil
 	}
-	return []string{
+	out := []Root{}
+	add := func(kind rootKind, paths ...string) {
+		for _, path := range paths {
+			if path == "" {
+				continue
+			}
+			out = append(out, Root{Path: path, kind: kind})
+		}
+	}
+
+	add(rootKindGeneric,
 		filepath.Join(home, ".npm"),
 		filepath.Join(home, ".cache", "npm"),
 		filepath.Join(home, "Library", "pnpm", "store"),
@@ -53,7 +109,15 @@ func DefaultRoots(home string) []string {
 		filepath.Join(home, ".cache", "uv"),
 		filepath.Join(home, "Library", "Caches", "pypoetry"),
 		filepath.Join(home, ".cache", "pypoetry"),
+	)
+	add(rootKindGo, goModuleCacheRoots(home)...)
+	cargoHome := os.Getenv("CARGO_HOME")
+	if cargoHome == "" {
+		cargoHome = filepath.Join(home, ".cargo")
 	}
+	add(rootKindCargoRegistry, filepath.Join(cargoHome, "registry"))
+	add(rootKindCargoGit, filepath.Join(cargoHome, "git"))
+	return out
 }
 
 // Scan implements scan.Scanner.
@@ -64,15 +128,15 @@ func (s *Scanner) Scan(ctx context.Context) scan.Result {
 		return result
 	}
 	seen := map[string]struct{}{}
-	for _, root := range s.roots {
+	for _, rootEntry := range s.roots {
 		if err := ctx.Err(); err != nil {
 			result.Errors = append(result.Errors, err)
 			return result
 		}
-		if root == "" {
+		if rootEntry.Path == "" {
 			continue
 		}
-		cleanRoot := filepath.Clean(root)
+		cleanRoot := filepath.Clean(rootEntry.Path)
 		if _, dup := seen[cleanRoot]; dup {
 			continue
 		}
@@ -88,24 +152,36 @@ func (s *Scanner) Scan(ctx context.Context) scan.Result {
 		if !info.IsDir() {
 			continue
 		}
-		if err := filepath.WalkDir(cleanRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := filepath.WalkDir(cleanRoot, func(path string, dirEntry fs.DirEntry, walkErr error) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			if walkErr != nil {
 				result.Errors = append(result.Errors, errors.With(walkErr, "walk cache path").Set("path", path))
-				if entry != nil && entry.IsDir() {
+				if dirEntry != nil && dirEntry.IsDir() {
 					return fs.SkipDir
 				}
 				return nil
 			}
-			if entry.IsDir() {
-				if shouldPruneDir(entry.Name()) {
+			if dirEntry.IsDir() {
+				if shouldPruneDir(dirEntry.Name()) {
+					return fs.SkipDir
+				}
+				findings, checked, scanned, skip, err := s.scanCacheDir(cleanRoot, rootEntry.kind, path)
+				if scanned {
+					result.FilesScanned++
+				}
+				result.PackagesChecked += checked
+				result.Findings = append(result.Findings, findings...)
+				if err != nil {
+					result.Errors = append(result.Errors, err)
+				}
+				if skip {
 					return fs.SkipDir
 				}
 				return nil
 			}
-			findings, checked, scanned, err := s.scanCacheFile(cleanRoot, path)
+			findings, checked, scanned, err := s.scanCacheFile(cleanRoot, rootEntry.kind, path)
 			if scanned {
 				result.FilesScanned++
 			}
@@ -122,7 +198,42 @@ func (s *Scanner) Scan(ctx context.Context) scan.Result {
 	return result
 }
 
-func (s *Scanner) scanCacheFile(root, path string) ([]scan.Finding, int, bool, error) {
+func goModuleCacheRoots(home string) []string {
+	out := []string{}
+	if gomodcache := os.Getenv("GOMODCACHE"); gomodcache != "" {
+		out = append(out, gomodcache)
+	}
+	if gopath := os.Getenv("GOPATH"); gopath != "" {
+		for _, dir := range filepath.SplitList(gopath) {
+			if dir != "" {
+				out = append(out, filepath.Join(dir, "pkg", "mod"))
+			}
+		}
+	}
+	out = append(out, filepath.Join(home, "go", "pkg", "mod"))
+	return out
+}
+
+func (s *Scanner) scanCacheDir(root string, kind rootKind, path string) ([]scan.Finding, int, bool, bool, error) {
+	switch kind {
+	case rootKindGo:
+		meta, ok := readGoModuleDir(root, path)
+		if !ok {
+			return nil, 0, false, false, nil
+		}
+		return s.findingsForMeta(root, path, meta, false), 1, true, true, nil
+	case rootKindCargoRegistry:
+		meta, ok := readCargoRegistryDir(root, path)
+		if !ok {
+			return nil, 0, false, false, nil
+		}
+		return s.findingsForMeta(root, path, meta, false), 1, true, true, nil
+	default:
+		return nil, 0, false, false, nil
+	}
+}
+
+func (s *Scanner) scanCacheFile(root string, kind rootKind, path string) ([]scan.Finding, int, bool, error) {
 	base := filepath.Base(path)
 	switch {
 	case base == "package.json":
@@ -137,6 +248,27 @@ func (s *Scanner) scanCacheFile(root, path string) ([]scan.Finding, int, bool, e
 			return nil, 0, true, err
 		}
 		return s.findingsForMeta(root, path, meta, false), 1, true, nil
+	case kind == rootKindGo:
+		meta, ok := readGoDownloadFile(root, path)
+		if !ok {
+			return nil, 0, false, nil
+		}
+		return s.findingsForMeta(root, path, meta, false), 1, true, nil
+	case kind == rootKindCargoRegistry:
+		meta, ok := readCargoRegistryArchive(root, path)
+		if !ok {
+			return nil, 0, false, nil
+		}
+		return s.findingsForMeta(root, path, meta, false), 1, true, nil
+	case kind == rootKindCargoGit && base == "Cargo.toml":
+		meta, err := readCargoManifest(path)
+		if err != nil {
+			return nil, 0, true, err
+		}
+		if meta.Name == "" {
+			return nil, 0, true, nil
+		}
+		return s.findingsForMeta(root, path, meta, false), 1, true, nil
 	default:
 		return nil, 0, false, nil
 	}
@@ -146,6 +278,7 @@ type packageMeta struct {
 	Ecosystem intel.Ecosystem
 	Name      string
 	Version   string
+	PurgePath string
 }
 
 func readPackageJSON(path string) (packageMeta, error) {
@@ -196,6 +329,148 @@ func readPythonMetadata(path string) (packageMeta, error) {
 	return meta, nil
 }
 
+func readGoModuleDir(root, path string) (packageMeta, bool) {
+	if path == root {
+		return packageMeta{}, false
+	}
+	base := filepath.Base(path)
+	idx := strings.LastIndex(base, "@v")
+	if idx <= 0 {
+		return packageMeta{}, false
+	}
+	version := base[idx+1:]
+	if !looksLikeVersion(version) {
+		return packageMeta{}, false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return packageMeta{}, false
+	}
+	nameRel := filepath.Join(filepath.Dir(rel), base[:idx])
+	name := filepath.ToSlash(nameRel)
+	if name == "." || name == "" {
+		return packageMeta{}, false
+	}
+	return packageMeta{Ecosystem: intel.EcosystemGo, Name: decodeGoEscapedPath(name), Version: version, PurgePath: path}, true
+}
+
+func readGoDownloadFile(root, path string) (packageMeta, bool) {
+	ext := filepath.Ext(path)
+	if ext != ".zip" && ext != ".mod" && ext != ".info" {
+		return packageMeta{}, false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return packageMeta{}, false
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) < 5 || parts[0] != "cache" || parts[1] != "download" {
+		return packageMeta{}, false
+	}
+	versionFile := parts[len(parts)-1]
+	version := strings.TrimSuffix(versionFile, ext)
+	if parts[len(parts)-2] != "@v" || !looksLikeVersion(version) {
+		return packageMeta{}, false
+	}
+	name := strings.Join(parts[2:len(parts)-2], "/")
+	if name == "" {
+		return packageMeta{}, false
+	}
+	return packageMeta{Ecosystem: intel.EcosystemGo, Name: decodeGoEscapedPath(name), Version: version, PurgePath: path}, true
+}
+
+func decodeGoEscapedPath(path string) string {
+	var b strings.Builder
+	b.Grow(len(path))
+	for i := 0; i < len(path); i++ {
+		if path[i] == '!' && i+1 < len(path) {
+			next := path[i+1]
+			if next >= 'a' && next <= 'z' {
+				b.WriteByte(next - 'a' + 'A')
+				i++
+				continue
+			}
+		}
+		b.WriteByte(path[i])
+	}
+	return b.String()
+}
+
+func readCargoRegistryDir(root, path string) (packageMeta, bool) {
+	parts, ok := relParts(root, path)
+	if !ok || len(parts) < 3 || parts[0] != "src" {
+		return packageMeta{}, false
+	}
+	name, version, ok := splitCargoCacheName(filepath.Base(path))
+	if !ok {
+		return packageMeta{}, false
+	}
+	return packageMeta{Ecosystem: intel.EcosystemCrates, Name: name, Version: version, PurgePath: path}, true
+}
+
+func readCargoRegistryArchive(root, path string) (packageMeta, bool) {
+	if filepath.Ext(path) != ".crate" {
+		return packageMeta{}, false
+	}
+	parts, ok := relParts(root, path)
+	if !ok || len(parts) < 3 || parts[0] != "cache" {
+		return packageMeta{}, false
+	}
+	name, version, ok := splitCargoCacheName(strings.TrimSuffix(filepath.Base(path), ".crate"))
+	if !ok {
+		return packageMeta{}, false
+	}
+	return packageMeta{Ecosystem: intel.EcosystemCrates, Name: name, Version: version, PurgePath: path}, true
+}
+
+func relParts(root, path string) ([]string, bool) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return nil, false
+	}
+	return strings.Split(filepath.ToSlash(rel), "/"), true
+}
+
+func readCargoManifest(path string) (packageMeta, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return packageMeta{}, errors.With(err, "read cached Cargo.toml").Set("path", path)
+	}
+	var manifest struct {
+		Package struct {
+			Name    string `toml:"name"`
+			Version string `toml:"version"`
+		} `toml:"package"`
+	}
+	if err := toml.Unmarshal(data, &manifest); err != nil {
+		return packageMeta{}, errors.With(err, "parse cached Cargo.toml").Set("path", path)
+	}
+	return packageMeta{
+		Ecosystem: intel.EcosystemCrates,
+		Name:      manifest.Package.Name,
+		Version:   manifest.Package.Version,
+		PurgePath: filepath.Dir(path),
+	}, nil
+}
+
+func splitCargoCacheName(base string) (string, string, bool) {
+	idx := strings.LastIndex(base, "-")
+	if idx <= 0 || idx == len(base)-1 {
+		return "", "", false
+	}
+	name := base[:idx]
+	version := base[idx+1:]
+	if name == "" || !looksLikeVersion(version) {
+		return "", "", false
+	}
+	return name, version, true
+}
+
+func looksLikeVersion(version string) bool {
+	version = strings.TrimPrefix(version, "v")
+	return version != "" && version[0] >= '0' && version[0] <= '9'
+}
+
 func (s *Scanner) findingsForMeta(root, path string, meta packageMeta, npxResidue bool) []scan.Finding {
 	if meta.Name == "" {
 		return nil
@@ -205,7 +480,10 @@ func (s *Scanner) findingsForMeta(root, path string, meta packageMeta, npxResidu
 	if verdict.Flagged() {
 		v := verdict
 		confidence := "confirmed"
-		purgePath := purgeCandidate(path)
+		purgePath := meta.PurgePath
+		if purgePath == "" {
+			purgePath = purgeCandidate(path)
+		}
 		if meta.Version == "" && !allVersionsVerdict(verdict) {
 			confidence = "name-only"
 			purgePath = ""

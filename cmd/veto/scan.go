@@ -147,9 +147,10 @@ func runScanWithOpts(logger zerolog.Logger, cfg config, opts scanOpts) int {
 	if opts.projects {
 		results = append(results, project.New(project.Options{Roots: roots, Store: store, Expander: newCompoundExpander()}).Scan(ctx))
 	}
-	cacheRoots := cache.DefaultRoots(home)
+	cacheRootEntries := cache.DefaultRootEntries(home)
+	cacheRoots := cachePaths(cacheRootEntries)
 	if opts.caches {
-		results = append(results, cache.New(cache.Options{Roots: cacheRoots, Store: store}).Scan(ctx))
+		results = append(results, cache.New(cache.Options{RootEntries: cacheRootEntries, Store: store}).Scan(ctx))
 	}
 	if opts.agentSurface {
 		results = append(results, agentsurface.New(agentsurface.Options{Home: home, ProjectRoots: roots}).Scan(ctx))
@@ -181,6 +182,14 @@ func runScanWithOpts(logger zerolog.Logger, cfg config, opts scanOpts) int {
 		return exitRefused
 	}
 	return exitOK
+}
+
+func cachePaths(entries []cache.Root) []string {
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.Path)
+	}
+	return out
 }
 
 func printPurgeActions(w io.Writer, actions []scan.PurgeAction, purge bool) {

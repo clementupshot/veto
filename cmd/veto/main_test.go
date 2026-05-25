@@ -104,54 +104,6 @@ func TestSanitizedEnvEmpty(t *testing.T) {
 	require.Empty(t, sanitizedEnv([]string{}))
 }
 
-// TestVetoBypassEnabled pins the contract shared by all three veto
-// layers: the literal value "1" — and ONLY "1" — disables the gate.
-// Any other value (0, true, false, off, empty) leaves the gate in
-// force. The Claude Code hook (Analyze in
-// internal/hook/claudecode/claudecode.go) and the C interposer
-// (is_risky in internal/interposer/veto_interpose.c) honor the same
-// rule; if a future change relaxes this helper, the other layers will
-// drift from it silently. Keep the three checks in sync.
-func TestVetoBypassEnabled(t *testing.T) {
-	cases := []struct {
-		name  string
-		value string
-		set   bool
-		want  bool
-	}{
-		{"unset", "", false, false},
-		{"empty", "", true, false},
-		{"literal 1", "1", true, true},
-		{"literal 0", "0", true, false},
-		{"literal true", "true", true, false},
-		{"literal false", "false", true, false},
-		{"leading space (not normalized)", " 1", true, false},
-		{"trailing space (not normalized)", "1 ", true, false},
-		{"yes", "yes", true, false},
-		{"on", "on", true, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.set {
-				t.Setenv("VETO_BYPASS", tc.value)
-			} else {
-				// t.Setenv to "" still SETS the var; we want it unset.
-				// Save+restore around a manual Unsetenv.
-				orig, had := os.LookupEnv("VETO_BYPASS")
-				require.NoError(t, os.Unsetenv("VETO_BYPASS"))
-				t.Cleanup(func() {
-					if had {
-						_ = os.Setenv("VETO_BYPASS", orig)
-					} else {
-						_ = os.Unsetenv("VETO_BYPASS")
-					}
-				})
-			}
-			require.Equal(t, tc.want, vetoBypassEnabled())
-		})
-	}
-}
-
 func TestSeedResolverWorkdir(t *testing.T) {
 	projectDir := t.TempDir()
 	workdir := t.TempDir()

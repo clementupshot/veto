@@ -256,41 +256,10 @@ func isShimName(basename string) bool {
 	return pmlist.IsShimmed(basename)
 }
 
-// vetoBypassEnabled reports whether the VETO_BYPASS escape hatch is
-// engaged for this invocation. Only the literal string "1" counts;
-// every other value (including "0", "false", "true", or empty) leaves
-// the gate in force. This rule is shared by all three veto layers —
-// the Claude Code hook (internal/hook/claudecode/claudecode.go), the
-// runGate short-circuit, and the C interposer (is_risky in
-// internal/interposer/veto_interpose.c) — so the documented escape
-// hatch behaves identically everywhere a user might wire veto in.
-//
-// Extracted as a helper so unit tests can pin the contract without
-// running runGate end-to-end.
-func vetoBypassEnabled() bool {
-	return os.Getenv("VETO_BYPASS") == "1"
-}
-
 // runGate handles the `veto <pm> <args...>` path: parse the invocation,
 // refresh and consult the intel store, then exec the real PM (or refuse).
 func runGate(logger zerolog.Logger, cfg config, args []string) int {
 	pmName, pmArgs := args[0], args[1:]
-
-	// VETO_BYPASS=1 is the documented per-invocation escape hatch. The
-	// hook and the C interposer both honor it; runGate is the third
-	// touch-point a shimmed command actually passes through, so it must
-	// honor the same contract or the escape hatch silently fails when
-	// Layer 2 is wired up without Layer 3 (interposer) or Layer 1
-	// (hook). We log loudly at INFO so the user SEES that the gate was
-	// skipped — an invisible escape hatch is a footgun.
-	if vetoBypassEnabled() {
-		logger.Info().Str("pm", pmName).Strs("args", pmArgs).Msg("VETO_BYPASS=1 set; skipping gate and exec'ing real package manager")
-		// Use execPMOrPythonM so a `VETO_BYPASS=1 python -m pip install foo`
-		// invocation rebuilds the python -m form (preserving venv-scoped
-		// pip resolution) instead of exec'ing pip directly. For non-python
-		// invocations the helper falls through to execReal.
-		return execPMOrPythonM(cfg, pmName, pmArgs)
-	}
 
 	pms := buildPackageManagers()
 	pm, ok := pms[pmName]
@@ -342,13 +311,6 @@ func runGate(logger zerolog.Logger, cfg config, args []string) int {
 	expander := newCompoundExpander()
 	policy := gate.DefaultPolicy()
 	policy.ManifestExpander = expander
-	// VETO_ALLOW_OPAQUE=1 opts URL/git/tarball/github-shorthand specs
-	// through the gate. The default refuses them — see
-	// gate.DefaultPolicy docs for why.
-	if cfg.AllowOpaqueRemote {
-		policy.AllowOpaqueRemote = true
-		logger.Warn().Msg("VETO_ALLOW_OPAQUE=1 set; opaque remote specs (URL/git/tarball) will NOT be refused")
-	}
 	if hasPreflight {
 		preflightPolicy := policy
 		preflightPolicy.ManifestExpander = projectPreflightExpander{delegate: expander}
@@ -652,7 +614,7 @@ func printRefusal(w io.Writer, decision gate.Decision) {
 			fmt.Fprintf(w, "      [%s] %s\n", r.SourceID, reason)
 		}
 	}
-	fmt.Fprintln(w, "\nTo override (you really shouldn't), set VETO_BYPASS=1 and re-invoke the package manager directly.")
+	fmt.Fprintln(w, "\nIf you've independently verified the package is safe, install it through a non-shimmed path (e.g. directly via the real binary in your toolchain), not by bypassing veto.")
 }
 
 // printAbort writes a loud, distinct error when the gate could not make a
@@ -1135,9 +1097,8 @@ func isExecutableRegularOrSymlink(p string) bool {
 }
 
 type config struct {
-	CacheDir          string
-	Sources           []string // enabled source IDs
-	AllowOpaqueRemote bool     // VETO_ALLOW_OPAQUE=1 opts URL/git/tarball specs through
+	CacheDir string
+	Sources  []string // enabled source IDs
 }
 
 func loadConfig() (config, error) {
@@ -1146,16 +1107,14 @@ func loadConfig() (config, error) {
 	v.AutomaticEnv()
 	v.SetDefault("cache_dir", defaultCacheDir())
 	v.SetDefault("sources", []string{"aikido", "openssf", "osv", "pypa"})
-	v.SetDefault("allow_opaque", false)
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 	v.AddConfigPath(filepath.Join(defaultCacheDir(), ".."))
 	_ = v.ReadInConfig() // optional config file
 
 	cfg := config{
-		CacheDir:          v.GetString("cache_dir"),
-		Sources:           v.GetStringSlice("sources"),
-		AllowOpaqueRemote: v.GetBool("allow_opaque"),
+		CacheDir: v.GetString("cache_dir"),
+		Sources:  v.GetStringSlice("sources"),
 	}
 	if cfg.CacheDir == "" {
 		return cfg, errors.New("cache_dir resolved empty")
@@ -1415,9 +1374,6 @@ Environment:
   VETO_SOURCES       comma-separated source IDs (default: aikido,openssf,osv,pypa)
                        optional broad vulnerability feed: ghsa
   VETO_LOG           set to "debug" for verbose logging
-  VETO_BYPASS        prepend `+"`VETO_BYPASS=1 `"+` to skip the gate for one invocation
-  VETO_ALLOW_OPAQUE  set to 1 to opt URL/git/tarball/github-shorthand specs
-                        through; refused by default (see README)
   VETO_PATH          set by install-preload; consumed by the interposer
 `)
 }

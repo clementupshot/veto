@@ -78,12 +78,11 @@ func TestEvaluateLocalPathInstallAllowedUnderDefaultPolicy(t *testing.T) {
 	require.Empty(t, dec.Verdicts)
 }
 
-// TestEvaluateOpaqueRemoteRefusedByDefault is the core test for the
-// policy shift: URL/git/tarball specs that bypass the registry name
-// lookup must be refused by default. Otherwise an attacker can flag a
-// tarball URL in an upstream feed and we'd let `npm install
-// https://evil.com/foo.tgz` through unchecked.
-func TestEvaluateOpaqueRemoteRefusedByDefault(t *testing.T) {
+// TestEvaluateOpaqueRemoteAlwaysRefused asserts the post-Phase-1.1
+// contract: URL/git/tarball/github-shorthand specs that bypass the
+// registry name lookup are refused unconditionally. There is no
+// override; the prior AllowOpaqueRemote axis is gone.
+func TestEvaluateOpaqueRemoteAlwaysRefused(t *testing.T) {
 	store := buildStore(t)
 	g := gate.New(store, gate.DefaultPolicy(), zerolog.Nop())
 	dec := g.Evaluate([]packagemanager.Install{
@@ -96,26 +95,9 @@ func TestEvaluateOpaqueRemoteRefusedByDefault(t *testing.T) {
 	require.Equal(t, gate.OutcomeRefuse, dec.Outcome)
 	require.Len(t, dec.Flagged(), 1)
 	require.Equal(t, "veto-policy", dec.Flagged()[0].Reports[0].SourceID)
-	require.Contains(t, dec.Flagged()[0].Reports[0].Reason, "VETO_ALLOW_OPAQUE")
-}
-
-// TestEvaluateOpaqueRemoteAllowedWithPolicy: opting in via policy flips
-// opaque refusal back into passthrough, but the install still gets no
-// intel lookup (no name to look up against).
-func TestEvaluateOpaqueRemoteAllowedWithPolicy(t *testing.T) {
-	store := buildStore(t)
-	policy := gate.DefaultPolicy()
-	policy.AllowOpaqueRemote = true
-	g := gate.New(store, policy, zerolog.Nop())
-	dec := g.Evaluate([]packagemanager.Install{
-		{
-			Ref:          intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: "https://example.com/x.tgz"},
-			RawSpec:      "https://example.com/x.tgz",
-			OpaqueRemote: true,
-		},
-	})
-	require.Equal(t, gate.OutcomeAllow, dec.Outcome)
-	require.Empty(t, dec.Verdicts)
+	require.Contains(t, dec.Flagged()[0].Reports[0].Reason, "opaque-spec install refused")
+	require.NotContains(t, dec.Flagged()[0].Reports[0].Reason, "VETO_ALLOW_OPAQUE",
+		"reason text must not advertise the removed override env")
 }
 
 // TestEvaluateLocalPathRefusedUnderStrictPolicy: callers who want the

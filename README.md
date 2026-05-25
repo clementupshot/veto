@@ -309,8 +309,6 @@ configuration rather than package-intel matches.
 | `VETO_CACHE_DIR` | `$XDG_CACHE_HOME/veto` | where intel snapshots live |
 | `VETO_SOURCES` | `aikido,openssf,osv,pypa` | comma-separated source IDs to enable; add `ghsa` to opt into broad GitHub Advisory Database CVE/GHSA blocking |
 | `VETO_LOG` | (info) | set `debug` for verbose logging |
-| `VETO_BYPASS` | (unset) | prepend `VETO_BYPASS=1 ` to skip the gate for one invocation |
-| `VETO_ALLOW_OPAQUE` | `0` | set `1` to opt URL/git/tarball installs through the gate (refused by default) |
 | `VETO_PATH` | (set by install-preload) | consumed by the Layer 3 interposer |
 
 ### Refuse-opaque-by-default
@@ -358,9 +356,9 @@ these):
   refused — package intelligence flagged …". Default sources flag
   malware; opt-in `ghsa` also flags ordinary vulnerable versions.
 - **Opaque-spec install** (URL / git / tarball / `user/repo`
-  github-shorthand): refused by default → exit 1,
-  `[veto-policy]` source. Set `VETO_ALLOW_OPAQUE=1` to opt in
-  after independently verifying the source.
+  github-shorthand): refused unconditionally → exit 1,
+  `[veto-policy]` source. These specs bypass the package-registry
+  name lookup and can carry payloads; there is no opt-in override.
 - **Intel store cannot refresh** (every source failed, no cache):
   exit 70, "INTERNAL ERROR — intel refresh failed"
 - **Intel store implausibly empty** (< 1000 reports total — aikido

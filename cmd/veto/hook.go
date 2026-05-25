@@ -141,8 +141,7 @@ func runClaudeCodeHook(logger zerolog.Logger, stdin io.Reader, stdout io.Writer)
 		"veto-hook: blocked unguarded `%s` invocation.\n"+
 			"Reason: veto only protects you when the command is routed through it. Re-run with an explicit "+
 			"`veto` prefix so the malware scan runs:\n\n  %s\n\n"+
-			"If multiple commands are chained, only the package-manager leaf needs the prefix. To bypass intentionally, "+
-			"prepend `VETO_BYPASS=1 ` to the command.",
+			"If multiple commands are chained, only the package-manager leaf needs the prefix.",
 		finding.PM, corrected,
 	)
 	return writeDecisionOrFail(stdout, msg)

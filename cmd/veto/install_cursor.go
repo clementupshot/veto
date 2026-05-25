@@ -150,10 +150,11 @@ allowing an install to run.
 Applies to: npm, pnpm, yarn, bun, npx, pnpx, bunx, pip, pip3, uv, uvx,
 poetry, pipx, pdm.
 
-If veto refuses an install, **do not** retry with ` + "`VETO_BYPASS=1`" + ` or
-any other workaround. A refusal means the package matches a known-malicious
-record. Stop, surface the refusal verbatim to the user, and wait for
-explicit direction.
+If veto refuses an install, **do not** retry by editing this rule,
+removing the shim, invoking the package manager via an alternate path,
+or any other workaround. A refusal means the package matches a
+known-malicious record. Stop, surface the refusal verbatim to the
+user, and wait for explicit direction.
 
 Read-only commands (` + "`npm list`" + `, ` + "`npm run <script>`" + `, ` + "`pip show`" + `,
 ` + "`yarn info`" + `, etc.) do not need the ` + "`veto`" + ` prefix — only install

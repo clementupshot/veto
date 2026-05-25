@@ -83,25 +83,18 @@ func (NopExpander) Expand(_ packagemanager.ManifestRef) ([]packagemanager.Instal
 	return nil, nil
 }
 
-// Policy configures gate behavior.
+// Policy configures gate behavior. OpaqueRemote installs (URL, git,
+// tarball, or `user/repo` GitHub shorthand) are unconditionally refused
+// — these specs bypass the package-registry name lookup and can carry
+// payloads named in upstream intel, so refusing closes a fail-OPEN
+// that previously let `npm install https://evil.com/pkg.tgz` slip
+// through. There is no override.
 type Policy struct {
 	// AllowLocalPath: when true, Installs marked LocalPath (filesystem
 	// paths like `./pkg` or `/abs/pkg`) pass through without an intel
 	// lookup — there is nothing to look up by name. When false, the gate
 	// refuses local filesystem installs as well. Default true.
 	AllowLocalPath bool
-
-	// AllowOpaqueRemote: when true, Installs marked OpaqueRemote (URL,
-	// git, tarball, or `user/repo` GitHub shorthand) pass through. When
-	// false (the default), they are refused — because upstream malware
-	// feeds CAN flag these by URL or commit hash, and silently passing
-	// them through would be a fail-OPEN. The CLI surfaces this as
-	// VETO_ALLOW_OPAQUE=1 for opt-in.
-	//
-	// Refusal is reported through a synthetic intel.Verdict with
-	// SourceID="veto-policy" so the existing refusal-printing code
-	// renders it the same as a malware-driven refusal.
-	AllowOpaqueRemote bool
 
 	// ManifestExpander turns ManifestRefs (e.g. `-r requirements.txt`) into
 	// additional Install records before lookup. Defaults to NopExpander so
@@ -112,14 +105,12 @@ type Policy struct {
 // DefaultPolicy returns a Policy with the project's chosen defaults:
 //   - LocalPath installs pass (no intel to look up; the user explicitly
 //     pointed at a path they control)
-//   - OpaqueRemote installs are REFUSED (URL/git/tarball/github-shorthand
-//     bypass the registry and can carry payloads named in upstream
-//     intel; refusing by default closes a fail-OPEN that previously let
-//     `npm install https://evil.com/pkg.tgz` slip through)
 //   - Manifest expansion is a no-op (callers wire in pyreq.Expander etc.
 //     to enable requirements.txt gating).
+//
+// OpaqueRemote installs are always refused — see the Policy doc.
 func DefaultPolicy() Policy {
-	return Policy{AllowLocalPath: true, AllowOpaqueRemote: false, ManifestExpander: NopExpander{}}
+	return Policy{AllowLocalPath: true, ManifestExpander: NopExpander{}}
 }
 
 // Gate evaluates Installs against an intel store under a policy.
@@ -208,18 +199,15 @@ func (g *Gate) Evaluate(installs []packagemanager.Install, manifestRefs ...packa
 	decision := Decision{Outcome: OutcomeAllow}
 	for _, ins := range expanded {
 		// Opaque remote specs (URL / git / tarball / github-shorthand)
-		// are refused by default. Synthesize a Verdict so the existing
-		// printer renders the refusal alongside any malware findings.
+		// are refused unconditionally — these bypass the package-registry
+		// name lookup and can carry payloads named in upstream intel.
+		// Synthesize a Verdict so the existing printer renders the
+		// refusal alongside any malware findings.
 		if ins.OpaqueRemote {
-			if !g.policy.AllowOpaqueRemote {
-				decision.Verdicts = append(decision.Verdicts, policyRefusalVerdict(ins,
-					"opaque-spec install refused: URL/git/tarball specs bypass the package "+
-						"registry and can carry payloads. Set VETO_ALLOW_OPAQUE=1 to override "+
-						"after independently verifying the source."))
-				decision.Outcome = OutcomeRefuse
-				continue
-			}
-			// Allow-opaque: passthrough; no name to look up.
+			decision.Verdicts = append(decision.Verdicts, policyRefusalVerdict(ins,
+				"opaque-spec install refused: URL/git/tarball specs bypass the package "+
+					"registry and can carry payloads."))
+			decision.Outcome = OutcomeRefuse
 			continue
 		}
 		if ins.LocalPath {

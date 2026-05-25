@@ -47,11 +47,8 @@ func (r VersionRange) IsUnbounded() bool {
 //     a clean install is annoying; allowing a flagged install is the
 //     failure mode the gate exists to prevent.
 //
-// npm uses Masterminds/semver/v3 which handles pre-release ordering
-// per the semver 2.0.0 spec. PyPI is not implemented today and returns
-// true conservatively while logging a debug-level note. That means an
-// opt-in vulnerability feed with a bounded PyPI range may over-block
-// until PEP 440 range matching lands, but it will not under-block.
+// npm uses Masterminds/semver/v3 which handles pre-release ordering per the
+// semver 2.0.0 spec. PyPI uses a small PEP 440 comparator for bounded ranges.
 //
 // InRange lives in the intel package — rather than a sub-package —
 // so the Store's Lookup can call it without introducing an import
@@ -68,11 +65,7 @@ func InRange(eco Ecosystem, v string, rng VersionRange) bool {
 	case EcosystemCrates:
 		return inRangeSemver(v, rng)
 	case EcosystemPyPI:
-		log.Debug().
-			Str("version", v).
-			Interface("range", rng).
-			Msg("intel.InRange: PyPI bounded-range matching not implemented; over-blocking")
-		return true
+		return inRangePEP440(v, rng)
 	default:
 		log.Debug().
 			Str("ecosystem", string(eco)).
@@ -88,6 +81,53 @@ func normalizeRangeVersions(eco Ecosystem, rng VersionRange) VersionRange {
 	rng.Fixed = NormalizeVersion(eco, rng.Fixed)
 	rng.LastAffected = NormalizeVersion(eco, rng.LastAffected)
 	return rng
+}
+
+// inRangePEP440 answers InRange for PyPI versions. Returns true on parse
+// errors so malformed query or feed values continue to over-block.
+func inRangePEP440(v string, rng VersionRange) bool {
+	ver, ok := parsePEP440Version(v)
+	if !ok {
+		log.Debug().
+			Str("version", v).
+			Msg("intel.InRange: failed to parse PyPI query version; over-blocking")
+		return true
+	}
+
+	if rng.Introduced != "" && rng.Introduced != "0" {
+		lo, ok := parsePEP440Version(rng.Introduced)
+		if !ok {
+			log.Debug().
+				Str("introduced", rng.Introduced).
+				Msg("intel.InRange: failed to parse PyPI Introduced; over-blocking")
+			return true
+		}
+		if comparePEP440(ver, lo) < 0 {
+			return false
+		}
+	}
+
+	if rng.Fixed != "" {
+		hi, ok := parsePEP440Version(rng.Fixed)
+		if !ok {
+			log.Debug().
+				Str("fixed", rng.Fixed).
+				Msg("intel.InRange: failed to parse PyPI Fixed; over-blocking")
+			return true
+		}
+		return comparePEP440(ver, hi) < 0
+	}
+	if rng.LastAffected != "" {
+		hi, ok := parsePEP440Version(rng.LastAffected)
+		if !ok {
+			log.Debug().
+				Str("last_affected", rng.LastAffected).
+				Msg("intel.InRange: failed to parse PyPI LastAffected; over-blocking")
+			return true
+		}
+		return comparePEP440(ver, hi) <= 0
+	}
+	return true
 }
 
 // inRangeSemver answers InRange for ecosystems that follow semver

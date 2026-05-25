@@ -474,10 +474,8 @@ func TestStoreLookupUnboundedRangeRefusesEveryVersion(t *testing.T) {
 	}
 }
 
-// TestStoreLookupPyPIUnboundedRangeRefuses: PyPI bounded-range matching
-// isn't implemented, but the IsUnbounded short-circuit means
-// `{introduced: 0}` advisories (the only shape today's PyPI feeds
-// produce) still refuse every version without invoking PEP 440.
+// TestStoreLookupPyPIUnboundedRangeRefuses: PyPI `{introduced: 0}` advisories
+// are the common all-versions shape and still refuse every concrete version.
 func TestStoreLookupPyPIUnboundedRangeRefuses(t *testing.T) {
 	logger := zerolog.Nop()
 	rng := intel.VersionRange{Introduced: "0"}
@@ -499,8 +497,37 @@ func TestStoreLookupPyPIUnboundedRangeRefuses(t *testing.T) {
 
 	for _, v := range []string{"1.0.0", "2.0.0", "9.9.9"} {
 		verdict := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "evil-py", Version: v})
-		require.True(t, verdict.Flagged(), "unbounded PyPI range must refuse evil-py@%s without PEP 440", v)
+		require.True(t, verdict.Flagged(), "unbounded PyPI range must refuse evil-py@%s", v)
 	}
+}
+
+func TestStoreLookupPyPIBoundedRangeAllowsOutside(t *testing.T) {
+	logger := zerolog.Nop()
+	rng := intel.VersionRange{Introduced: "1.1.5", LastAffected: "1.1.6"}
+	src := &fakeSource{
+		id: "alpha",
+		per: map[intel.Ecosystem][]intel.MalwareReport{
+			intel.EcosystemPyPI: {
+				{
+					PackageRef: intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ranged-py"},
+					SourceID:   "alpha",
+					Reason:     "bounded pypi",
+					Range:      &rng,
+				},
+			},
+		},
+	}
+	store := intel.NewStore(logger, src)
+	require.NoError(t, store.Refresh(context.Background()))
+
+	inside := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ranged-py", Version: "1.1.6"})
+	require.True(t, inside.Flagged(), "1.1.6 is inside [1.1.5, 1.1.6]")
+
+	below := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ranged-py", Version: "1.1.4"})
+	require.False(t, below.Flagged(), "1.1.4 is below [1.1.5, 1.1.6]")
+
+	above := store.Lookup(intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: "ranged-py", Version: "1.1.7"})
+	require.False(t, above.Flagged(), "1.1.7 is above [1.1.5, 1.1.6]")
 }
 
 // TestStoreLookupNPMNameNormalization: npm names are case-insensitive at

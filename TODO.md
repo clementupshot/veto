@@ -9,8 +9,6 @@ current user-facing behavior.
 - Add an authenticated online lookup layer for vulnerability surfaces that do
   not fit the cached bulk-source model yet, especially Socket.dev vuln data and
   SafeDep PMG real-time package analysis.
-- Implement PEP 440 bounded-range matching for PyPI advisories instead of the
-  current safe over-block behavior.
 - Add remaining safe resolver pre-scans where practical: project-level uv verbs,
   poetry, and pdm next for Python-family workflows, then Go/Cargo only if their
   tooling can resolve without executing project code.

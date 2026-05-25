@@ -93,11 +93,40 @@ func TestInRangeParseErrorOverBlocks(t *testing.T) {
 	require.True(t, intel.InRange(intel.EcosystemNPM, "1.0.0", intel.VersionRange{Introduced: "0", Fixed: "garbage"}))
 	// Malformed LastAffected.
 	require.True(t, intel.InRange(intel.EcosystemNPM, "1.0.0", intel.VersionRange{Introduced: "0", LastAffected: "garbage"}))
+	// PyPI parse failures must keep the same fail-closed behavior.
+	require.True(t, intel.InRange(intel.EcosystemPyPI, "not-a-version", intel.VersionRange{Introduced: "1.0.0", Fixed: "2.0.0"}))
+	require.True(t, intel.InRange(intel.EcosystemPyPI, "1.0.0", intel.VersionRange{Introduced: "garbage", Fixed: "2.0.0"}))
 }
 
-func TestInRangePyPIBoundedOverBlocks(t *testing.T) {
-	// PyPI bounded-range matching isn't implemented today (no feeds
-	// emit bounded PyPI ranges in cache). Bounded ranges over-block
-	// conservatively until PEP 440 lands.
-	require.True(t, intel.InRange(intel.EcosystemPyPI, "3.0.0", intel.VersionRange{Introduced: "0", Fixed: "2.0.0"}))
+func TestInRangePyPIPEP440(t *testing.T) {
+	cases := []struct {
+		name string
+		v    string
+		rng  intel.VersionRange
+		want bool
+	}{
+		{"below fixed", "1.9.9", intel.VersionRange{Introduced: "0", Fixed: "2.0.0"}, true},
+		{"at fixed exclusive", "2.0.0", intel.VersionRange{Introduced: "0", Fixed: "2.0.0"}, false},
+		{"above fixed", "3.0.0", intel.VersionRange{Introduced: "0", Fixed: "2.0.0"}, false},
+		{"below introduced", "1.1.4", intel.VersionRange{Introduced: "1.1.5", LastAffected: "1.1.6"}, false},
+		{"at introduced", "1.1.5", intel.VersionRange{Introduced: "1.1.5", LastAffected: "1.1.6"}, true},
+		{"at last affected inclusive", "1.1.6", intel.VersionRange{Introduced: "1.1.5", LastAffected: "1.1.6"}, true},
+		{"above last affected", "1.1.7", intel.VersionRange{Introduced: "1.1.5", LastAffected: "1.1.6"}, false},
+		{"release tuple padding equality", "1.0.0", intel.VersionRange{Introduced: "0", Fixed: "1.0"}, false},
+		{"dev release before alpha lower", "1.0.dev1", intel.VersionRange{Introduced: "1.0a1", Fixed: "1.0"}, false},
+		{"beta between alpha and release", "1.0b1", intel.VersionRange{Introduced: "1.0a1", Fixed: "1.0"}, true},
+		{"rc below final", "1.0rc1", intel.VersionRange{Introduced: "0", Fixed: "1.0"}, true},
+		{"rc above beta", "1.0rc1", intel.VersionRange{Introduced: "1.0b1", Fixed: "1.0"}, true},
+		{"final at fixed exclusive", "1.0", intel.VersionRange{Introduced: "0", Fixed: "1.0"}, false},
+		{"post release inside post bound", "1.0.post0", intel.VersionRange{Introduced: "1.0", Fixed: "1.0.post1"}, true},
+		{"post release at fixed exclusive", "1.0.post1", intel.VersionRange{Introduced: "1.0", Fixed: "1.0.post1"}, false},
+		{"epoch below introduced", "99.0", intel.VersionRange{Introduced: "1!1.0", Fixed: "2!0"}, false},
+		{"epoch inside", "1!2.0", intel.VersionRange{Introduced: "1!1.0", Fixed: "2!0"}, true},
+		{"local sorts after matching public", "1.0+local", intel.VersionRange{Introduced: "0", Fixed: "1.0"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, intel.InRange(intel.EcosystemPyPI, c.v, c.rng))
+		})
+	}
 }

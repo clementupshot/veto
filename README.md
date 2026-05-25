@@ -133,8 +133,7 @@ intel/             ← parent: Source interface, MalwareReport, Store
 intel/normalize.go ← PEP 503 + npm name normalization at lookup + ingest
 intel/range.go     ← VersionRange + per-ecosystem InRange comparator
                      (semver via Masterminds/semver for npm/Go/crates.io;
-                     PyPI over-blocks bounded ranges with a debug log —
-                     no PEP 440 bounded-range comparator)
+                     PEP 440 comparator for PyPI bounded ranges)
 intel/sources/
   aikido/          ← https://malware-list.aikido.dev (implemented)
   openssf/         ← github.com/ossf/malicious-packages (implemented)
@@ -179,9 +178,8 @@ versions or version ranges. Veto honors those claims:
 - **Range-bearing reports** (OSV `affected.ranges` events) match when
   the queried version falls inside the interval per the ecosystem's
   comparison rules. npm uses semver 2.0.0 (Masterminds/semver/v3),
-  including pre-release ordering. PyPI bounded ranges are not yet
-  implemented (no current feed entries use them) and over-block when
-  encountered — see Known Limitations.
+  including pre-release ordering. PyPI uses PEP 440 ordering for
+  bounded ranges, including pre/dev/post releases and epochs.
 - **All-versions reports** (unbounded `introduced: 0` ranges, or
   sources that don't model versions at all) match every version of
   the name. These are the common shape for typosquats and
@@ -436,10 +434,9 @@ these):
   floor catches the worst case (literally empty), but a feed that
   omits most malware while still returning hundreds of entries could
   slip through.
-- **PyPI bounded-range advisories over-block**. The comparator falls
-  back to "over-block" (refuse the install) with a debug log rather
-  than under-block. This is a safe posture, but PEP 440 bounded-range
-  matching is not implemented.
+- **Malformed version strings over-block**. If a queried version or feed
+  range bound cannot be parsed by the ecosystem comparator, veto refuses
+  rather than risk under-blocking.
 - **Resolver pre-scan is partial.** npm, pip/pip3, and `uv pip install` get
   isolated resolver probes for newly named packages. Project-level uv verbs,
   Poetry, PDM, Go, and Cargo rely on argv, manifests, and already-present

@@ -260,15 +260,21 @@ func decodePoetryVersion(raw any) string {
 // range operators, no wildcard) and "" otherwise. Poetry ranges ("^1.0",
 // "~1", "*") collapse to empty so the gate falls back to a name-keyed lookup
 // that catches every flagged version of that package.
+//
+// Phase 1.7: delegate to intel.IsExactPEP440 for the actual parse so
+// the project has one canonical PyPI version semantics. The cheap
+// pre-screen on range characters short-circuits common Poetry/PEP 621
+// shapes without invoking the full parser.
 func exactVersionOrEmpty(version string) string {
 	v := strings.TrimSpace(version)
 	if v == "" || v == "*" {
 		return ""
 	}
-	for _, c := range v {
-		if c == '^' || c == '~' || c == '>' || c == '<' || c == '=' || c == '!' || c == ' ' || c == ',' || c == '*' {
-			return ""
-		}
+	if strings.ContainsAny(v, "^~><=! ,*") {
+		return ""
+	}
+	if !intel.IsExactPEP440(v) {
+		return ""
 	}
 	return v
 }

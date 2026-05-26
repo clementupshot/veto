@@ -6,6 +6,16 @@ import (
 	"unicode"
 )
 
+// IsExactPEP440 reports whether raw parses as a single PEP 440 version
+// (no range operators, no wildcards). Used by package-manager parsers
+// that need to decide whether a manifest version string is an exact
+// pin or a constraint expression. One canonical implementation —
+// callers must not re-derive their own predicate.
+func IsExactPEP440(raw string) bool {
+	_, ok := parsePEP440Version(raw)
+	return ok
+}
+
 type pep440Version struct {
 	epoch   int
 	release []int

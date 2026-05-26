@@ -12,6 +12,20 @@ current user-facing behavior.
   envp via `snapshot_environ` + `rewrite_envp`) closes the actual
   security finding; this task only adds regression coverage for the
   three Linux-only exec variants. Best done from a Linux box / CI.
+- Phase 1.6.2 deferred: route `pnpm dlx` / `yarn dlx` / `bun x` /
+  `bun create` through `internal/packagemanager/exec.Manager` so the
+  `--package=<spec>` flag is honored and trailing positionals after
+  the spec are not over-gated. Today these verbs go through
+  `jsspec.ParseInstallArgs` which treats every positional as a spec.
+- Phase 1.6.5 partial: jsmanifest does NOT yet walk `workspaces`
+  glob patterns recursively. The lockfile expanders pick up
+  workspace-member deps in practice (the resolver writes them
+  through), but the manifest path on a fresh-checkout monorepo
+  misses them.
+- Phase 1.6 followup: gate `jsspec.tryParseAlias` on
+  `isLegalNpmName(name)` so `user/repo@npm:evil@1` is treated as
+  github-shorthand (OpaqueRemote) rather than alias-unwrapped to
+  `evil`. Minor precedence quirk; no known exploit path in argv.
 - Add an authenticated online lookup layer for vulnerability surfaces that do
   not fit the cached bulk-source model yet, especially Socket.dev vuln data and
   SafeDep PMG real-time package analysis.

@@ -159,8 +159,19 @@ func exactPin(version string) string {
 	if v == "" || v == "*" || v == "latest" || v == "next" {
 		return ""
 	}
-	for _, c := range v {
-		if c == '^' || c == '~' || c == '>' || c == '<' || c == '=' || c == ' ' || c == '|' || c == ',' || c == 'x' || c == 'X' {
+	// Range / comparator characters disqualify outright.
+	if strings.ContainsAny(v, "^~><=| ,") {
+		return ""
+	}
+	// Phase 1.6: anchor x/X wildcards to segment boundaries so legitimate
+	// exact pins like "1.0.0-experimental", "1.2.3-Xfix", or
+	// "2.0.0+build.x12" stay exact. A bare segment of "x" or "X" — or
+	// the literal token "x" / "X" — still counts as a wildcard.
+	if v == "x" || v == "X" {
+		return ""
+	}
+	for _, seg := range strings.FieldsFunc(v, func(r rune) bool { return r == '.' }) {
+		if seg == "x" || seg == "X" {
 			return ""
 		}
 	}

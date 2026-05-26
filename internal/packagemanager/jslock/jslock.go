@@ -427,5 +427,9 @@ func nameFromYarnHeader(header string) string {
 		}
 		return first[:idx]
 	}
-	return first
+	// Header without an `@` is a yarn-berry pseudo-entry (e.g.
+	// `__metadata:`). Return empty so the caller skips emission —
+	// these are not real packages and would pollute the gate's
+	// verdict log under a synthetic "__metadata" name.
+	return ""
 }

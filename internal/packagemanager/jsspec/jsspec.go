@@ -97,6 +97,17 @@ func IsLocalPathSpec(spec string) bool {
 	if strings.HasPrefix(spec, "file:") {
 		return true
 	}
+	// Phase 1.6: yarn berry and pnpm workspace pins. None of these
+	// fetch from the registry; they reference paths or workspace
+	// members the user already controls. Without this, the previous
+	// classifier sent `link:./pkg` through IsOpaqueRemoteSpec (which
+	// matched on the embedded `/`) and gates would refuse legitimate
+	// monorepo installs.
+	for _, prefix := range []string{"link:", "portal:", "workspace:", "catalog:", "patch:"} {
+		if strings.HasPrefix(spec, prefix) {
+			return true
+		}
+	}
 	return false
 }
 

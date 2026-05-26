@@ -129,14 +129,19 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 
 	reports, err := parsePayload(eco, payload)
 	if err != nil {
-		// Etag-on-disk now points to a payload we couldn't parse. Drop it
-		// so the next refresh re-downloads instead of 304-looping on the
-		// same malformed cache file.
+		// Etag-on-disk (if any) still points to a payload we couldn't
+		// parse. Drop it so the next refresh re-downloads. Phase 1.9:
+		// also drop the .pending etag so it isn't promoted later.
 		if rmErr := os.Remove(cachedEtag); rmErr != nil && !os.IsNotExist(rmErr) {
 			s.logger.Warn().Err(rmErr).Msg("remove etag after parse failure")
 		}
+		if rmErr := os.Remove(cachedEtag + ".pending"); rmErr != nil && !os.IsNotExist(rmErr) {
+			s.logger.Warn().Err(rmErr).Msg("remove etag.pending after parse failure")
+		}
 		return nil, err
 	}
+	// Phase 1.9: parse succeeded — commit the pending etag atomically.
+	s.commitEtagAfterParse(cachedEtag)
 	return reports, nil
 }
 
@@ -235,14 +240,31 @@ func (s *Source) fetchWithCacheBounded(ctx context.Context, url, payloadPath, et
 	if err := fsutil.WriteAtomic(payloadPath, body); err != nil {
 		return nil, errors.With(err, "cache payload")
 	}
+	// Phase 1.9: write the etag to a `.pending` sibling. The caller's
+	// commitEtagAfterParse promotes it to the canonical path only
+	// after the body parses cleanly. Closes the race where a transient
+	// malformed payload could persist an etag pointing at unparseable
+	// bytes and 304-loop forever.
 	if etag := resp.Header.Get("ETag"); etag != "" {
-		if err := fsutil.WriteAtomic(etagPath, []byte(etag)); err != nil {
-			// Etag is an optimization — log and continue rather than failing.
-			s.logger.Warn().Err(err).Msg("write etag")
+		if err := fsutil.WriteAtomic(etagPath+".pending", []byte(etag)); err != nil {
+			s.logger.Warn().Err(err).Msg("write etag.pending")
 		}
 	}
 
 	return body, nil
+}
+
+// commitEtagAfterParse promotes a `.pending` etag file to the canonical
+// path. Called by Fetch() after the body parses cleanly. The rename is
+// atomic on POSIX.
+func (s *Source) commitEtagAfterParse(etagPath string) {
+	pending := etagPath + ".pending"
+	if _, err := os.Stat(pending); err != nil {
+		return
+	}
+	if err := os.Rename(pending, etagPath); err != nil {
+		s.logger.Warn().Err(err).Str("from", pending).Str("to", etagPath).Msg("commit etag")
+	}
 }
 
 func feedPath(eco intel.Ecosystem) (string, bool) {

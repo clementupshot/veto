@@ -164,12 +164,21 @@ func (s *Source) ensureLoaded(ctx context.Context) ([]intel.MalwareReport, error
 	}
 
 	reports, err := s.parseTarball(tarballPath)
+	etagPath := filepath.Join(s.cacheDir, "main.etag")
 	if err != nil {
-		etagPath := filepath.Join(s.cacheDir, "main.etag")
+		if rmErr := os.Remove(etagPath + ".pending"); rmErr != nil && !os.IsNotExist(rmErr) {
+			s.logger.Warn().Err(rmErr).Msg("remove etag.pending after parse failure")
+		}
 		if rmErr := os.Remove(etagPath); rmErr != nil && !os.IsNotExist(rmErr) {
 			s.logger.Warn().Err(rmErr).Msg("remove etag after parse failure")
 		}
 		return nil, errors.With(err, "ghsa: parse tarball")
+	}
+	// Phase 1.9: parse succeeded — promote the pending etag.
+	if _, statErr := os.Stat(etagPath + ".pending"); statErr == nil {
+		if mvErr := os.Rename(etagPath+".pending", etagPath); mvErr != nil {
+			s.logger.Warn().Err(mvErr).Msg("commit etag")
+		}
 	}
 
 	if err := s.writeGob(etag, reports); err != nil {
@@ -251,8 +260,10 @@ func (s *Source) downloadIfChanged(ctx context.Context, upstreamEtag string) (st
 		os.Remove(tmpPath)
 		return "", "", errors.With(err, "rename tarball")
 	}
-	if err := os.WriteFile(etagPath, []byte(upstreamEtag), 0o644); err != nil {
-		s.logger.Warn().Err(err).Msg("write etag")
+	// Phase 1.9: write etag to a `.pending` sibling. Promoted by the
+	// caller after parseTarball succeeds.
+	if err := os.WriteFile(etagPath+".pending", []byte(upstreamEtag), 0o600); err != nil {
+		s.logger.Warn().Err(err).Msg("write etag.pending")
 	}
 	return tarballPath, upstreamEtag, nil
 }

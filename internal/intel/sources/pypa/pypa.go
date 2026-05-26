@@ -135,13 +135,22 @@ func (s *Source) Fetch(ctx context.Context, eco intel.Ecosystem) ([]intel.Malwar
 	}
 	reports, err := parseTarball(payload, s.logger)
 	if err != nil {
-		// Etag on disk now references a tarball we couldn't parse. Drop it
-		// so the next refresh re-downloads rather than 304-looping on the
-		// broken payload forever.
+		// Drop the pending etag so it isn't promoted; also drop the
+		// canonical etag so the next refresh re-downloads instead of
+		// 304-looping on the broken payload.
+		if rmErr := os.Remove(etagPath + ".pending"); rmErr != nil && !os.IsNotExist(rmErr) {
+			s.logger.Warn().Err(rmErr).Msg("remove etag.pending after parse failure")
+		}
 		if rmErr := os.Remove(etagPath); rmErr != nil && !os.IsNotExist(rmErr) {
 			s.logger.Warn().Err(rmErr).Msg("remove etag after parse failure")
 		}
 		return nil, err
+	}
+	// Phase 1.9: parse succeeded — promote the pending etag.
+	if _, statErr := os.Stat(etagPath + ".pending"); statErr == nil {
+		if mvErr := os.Rename(etagPath+".pending", etagPath); mvErr != nil {
+			s.logger.Warn().Err(mvErr).Msg("commit etag")
+		}
 	}
 	return reports, nil
 }
@@ -219,9 +228,11 @@ func (s *Source) fetchWithCacheBounded(ctx context.Context, payloadPath, etagPat
 	if err := fsutil.WriteAtomic(payloadPath, body); err != nil {
 		return nil, errors.With(err, "cache payload")
 	}
+	// Phase 1.9: etag goes to a `.pending` sibling. The caller promotes
+	// it after parseTarball succeeds.
 	if etag := resp.Header.Get("ETag"); etag != "" {
-		if err := fsutil.WriteAtomic(etagPath, []byte(etag)); err != nil {
-			s.logger.Warn().Err(err).Msg("write etag")
+		if err := fsutil.WriteAtomic(etagPath+".pending", []byte(etag)); err != nil {
+			s.logger.Warn().Err(err).Msg("write etag.pending")
 		}
 	}
 	return body, nil

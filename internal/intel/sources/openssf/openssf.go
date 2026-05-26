@@ -181,16 +181,24 @@ func (s *Source) ensureLoaded(ctx context.Context) ([]intel.MalwareReport, error
 	}
 
 	reports, err := s.parseTarball(tarballPath)
+	etagPath := filepath.Join(s.cacheDir, "main.etag")
 	if err != nil {
-		// Etag on disk now references a tarball we couldn't parse, and
-		// downloadIfChanged's short-circuit (etag-matches-upstream → reuse
-		// cached file) would loop on the same broken payload on every
-		// future refresh. Drop the etag so the next call re-downloads.
-		etagPath := filepath.Join(s.cacheDir, "main.etag")
+		// Drop the pending etag so it isn't promoted; also drop the
+		// canonical etag if it exists from a previous run, to force
+		// a re-download on the next refresh.
+		if rmErr := os.Remove(etagPath + ".pending"); rmErr != nil && !os.IsNotExist(rmErr) {
+			s.logger.Warn().Err(rmErr).Msg("remove etag.pending after parse failure")
+		}
 		if rmErr := os.Remove(etagPath); rmErr != nil && !os.IsNotExist(rmErr) {
 			s.logger.Warn().Err(rmErr).Msg("remove etag after parse failure")
 		}
 		return nil, errors.With(err, "openssf: parse tarball")
+	}
+	// Phase 1.9: parse succeeded — promote the pending etag.
+	if _, statErr := os.Stat(etagPath + ".pending"); statErr == nil {
+		if mvErr := os.Rename(etagPath+".pending", etagPath); mvErr != nil {
+			s.logger.Warn().Err(mvErr).Msg("commit etag")
+		}
 	}
 
 	if err := s.writeGob(etag, reports); err != nil {
@@ -278,8 +286,12 @@ func (s *Source) downloadIfChanged(ctx context.Context, upstreamEtag string) (st
 		os.Remove(tmpPath)
 		return "", "", errors.With(err, "rename tarball")
 	}
-	if err := os.WriteFile(etagPath, []byte(upstreamEtag), 0o644); err != nil {
-		s.logger.Warn().Err(err).Msg("write etag")
+	// Phase 1.9: write etag to a `.pending` sibling. The caller's
+	// Fetch promotes it to the canonical path only after parseTarball
+	// succeeds. Closes the race where a malformed tarball persists an
+	// etag and the next refresh 304-loops on the same broken body.
+	if err := os.WriteFile(etagPath+".pending", []byte(upstreamEtag), 0o600); err != nil {
+		s.logger.Warn().Err(err).Msg("write etag.pending")
 	}
 	return tarballPath, upstreamEtag, nil
 }

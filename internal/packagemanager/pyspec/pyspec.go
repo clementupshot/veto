@@ -39,6 +39,15 @@ var operators = []string{"===", "==", ">=", "<=", "~=", "!=", ">", "<"}
 // refs set OpaqueRemote=true. See package doc for policy semantics.
 func Parse(spec string) packagemanager.Install {
 	raw := spec
+	// Phase 1.7: reject specs that begin with `-`. The argv-layer should
+	// have stripped flags already, but pyreq + manifest expanders also
+	// call Parse and could pass through an unknown flag (`--no-deps`,
+	// `--extra-index-url=...`). Without this guard, those become
+	// installs named `--no-deps` that miss the index and silently allow.
+	// Return an empty-Name install so the caller skips emission.
+	if strings.HasPrefix(spec, "-") {
+		return packagemanager.Install{RawSpec: raw}
+	}
 	if isLocalPathSpec(spec) {
 		return packagemanager.Install{
 			Ref:       intel.PackageRef{Ecosystem: intel.EcosystemPyPI, Name: spec},
@@ -141,6 +150,24 @@ func isLocalPathSpec(spec string) bool {
 		return true
 	}
 	if strings.HasPrefix(spec, "file:") {
+		return true
+	}
+	// Phase 1.7: Windows drive-letter paths (`C:\pkg`, `C:/pkg`).
+	// veto runs on darwin/linux today, but a cross-build would
+	// otherwise let these fall through to PyPI lookup.
+	if len(spec) >= 2 && spec[1] == ':' &&
+		((spec[0] >= 'a' && spec[0] <= 'z') || (spec[0] >= 'A' && spec[0] <= 'Z')) {
+		return true
+	}
+	// Phase 1.7: bare-name-with-separator. pip resolves any existing
+	// on-disk path; `evil/` or `evil/sub` with a setup.py in it runs
+	// arbitrary code without being a registry name. Treat anything
+	// containing `/` or `\` as LocalPath UNLESS it's a remote-scheme
+	// or PEP 508 URL spec, which have their own dedicated parser paths.
+	if isOpaqueRemoteSpec(spec) || strings.Contains(spec, " @ ") {
+		return false
+	}
+	if strings.ContainsAny(spec, `/\`) {
 		return true
 	}
 	return false

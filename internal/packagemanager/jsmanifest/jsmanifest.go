@@ -39,12 +39,15 @@ func New() *Expander { return &Expander{} }
 
 // packageJSON is the subset of fields the expander cares about. Anything not
 // listed here is ignored. The four maps cover the dependency surfaces npm,
-// pnpm, yarn, and bun all read from when resolving an install set.
+// pnpm, yarn, and bun all read from when resolving an install set;
+// BundleDependencies (Phase 1.6) catches the array-form list of names
+// that get bundled into the published tarball.
 type packageJSON struct {
 	Dependencies         map[string]string `json:"dependencies"`
 	DevDependencies      map[string]string `json:"devDependencies"`
 	PeerDependencies     map[string]string `json:"peerDependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
+	BundleDependencies   []string          `json:"bundleDependencies"`
 }
 
 // Expand reads ref.Path and returns the []Install its direct-dependency maps
@@ -77,11 +80,21 @@ func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Inst
 	// a single map, so the resulting slice is grouped by section rather than
 	// by name. That's fine — the gate's lookup is order-independent.
 	approx := len(pkg.Dependencies) + len(pkg.DevDependencies) + len(pkg.PeerDependencies) + len(pkg.OptionalDependencies)
-	installs := make([]packagemanager.Install, 0, approx)
+	installs := make([]packagemanager.Install, 0, approx+len(pkg.BundleDependencies))
 	installs = appendDeps(installs, pkg.Dependencies)
 	installs = appendDeps(installs, pkg.DevDependencies)
 	installs = appendDeps(installs, pkg.PeerDependencies)
 	installs = appendDeps(installs, pkg.OptionalDependencies)
+	// Phase 1.6: bundleDependencies is a JSON array of names that get
+	// bundled into the published tarball. The names exist in the
+	// registry and can be flagged by intel; gate by name (no version
+	// is recorded in this field).
+	for _, name := range pkg.BundleDependencies {
+		installs = append(installs, packagemanager.Install{
+			Ref:     intel.PackageRef{Ecosystem: intel.EcosystemNPM, Name: strings.TrimSpace(name)},
+			RawSpec: name,
+		})
+	}
 	return installs, nil
 }
 

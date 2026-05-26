@@ -52,8 +52,19 @@ type lockfile struct {
 }
 
 type packageEntry struct {
-	Name    string `toml:"name"`
-	Version string `toml:"version"`
+	Name    string         `toml:"name"`
+	Version string         `toml:"version"`
+	Source  *packageSource `toml:"source"`
+}
+
+// packageSource models the per-package source block. uv.lock emits
+// `source.editable = true` for workspace-member entries and
+// `source.virtual = true` for venv-only synthetic entries; gating
+// those against PyPI is a false positive risk (the name might collide
+// with a real malicious package on PyPI). Skip them at parse time.
+type packageSource struct {
+	Editable bool `toml:"editable"`
+	Virtual  bool `toml:"virtual"`
 }
 
 func expand(path string) ([]packagemanager.Install, error) {
@@ -73,6 +84,10 @@ func expand(path string) ([]packagemanager.Install, error) {
 	out := make([]packagemanager.Install, 0, len(packages))
 	for _, p := range packages {
 		if p.Name == "" || p.Version == "" {
+			continue
+		}
+		// Phase 1.7: skip editable/virtual workspace-member entries.
+		if p.Source != nil && (p.Source.Editable || p.Source.Virtual) {
 			continue
 		}
 		out = append(out, packagemanager.Install{

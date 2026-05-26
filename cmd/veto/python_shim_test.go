@@ -35,8 +35,32 @@ func TestPythonDashMTarget(t *testing.T) {
 		{"-V is benign", []string{"-V"}, "", false},
 		{"-c snippet is benign", []string{"-c", "print('hi')"}, "", false},
 		{"REPL is benign", nil, "", false},
-		{"pre-m flag is intentionally not unwrapped", []string{"-I", "-m", "pip", "install", "foo"}, "", false},
 		{"-m without arg is benign", []string{"-m"}, "", false},
+
+		// Phase 1.3 — pre-`-m` flag bundles and `-m<pm>` (no space).
+		// CPython accepts `python -mpip install foo` as a single-token
+		// equivalent of `python -m pip install foo`; the old parser
+		// missed it and let pip slip past Layer 2. Same with `-I -m pip`
+		// (isolated mode) which agents use commonly. See the L2 reviewer's
+		// "trivially bypassable" finding for the rationale.
+		{"no_space_mpip", []string{"-mpip", "install", "foo"}, "pip", true},
+		{"no_space_muv", []string{"-muv", "pip", "install", "x"}, "uv", true},
+		{"no_space_mpipx", []string{"-mpipx", "install", "black"}, "pipx", true},
+		{"flag_I_then_m", []string{"-I", "-m", "pip", "install", "foo"}, "pip", true},
+		{"flag_E_then_m", []string{"-E", "-m", "pip", "install", "foo"}, "pip", true},
+		{"flag_S_then_m", []string{"-S", "-m", "pip", "install", "foo"}, "pip", true},
+		{"flag_B_then_m", []string{"-B", "-m", "pip", "install", "foo"}, "pip", true},
+		{"flag_bundle_IES_then_m", []string{"-IES", "-m", "pip", "install", "foo"}, "pip", true},
+		{"flag_I_then_no_space_m", []string{"-I", "-mpip", "install", "foo"}, "pip", true},
+		// Non-PM `-m` modules MUST still pass through, even with leading flags.
+		{"flag_I_then_m_venv_benign", []string{"-I", "-m", "venv", ".venv"}, "", false},
+		{"no_space_m_http_server_benign", []string{"-mhttp.server", "8000"}, "", false},
+		// Long options (`--check-hash-based-pycs`) and value-taking short
+		// options (`-c CMD`, `-W ARG`, `-X ARG`) must NOT be conflated
+		// with the no-argument bundle — bail conservatively so they can't
+		// conceal a `-m pip` further in.
+		{"long_option_then_m_bails", []string{"--check-hash-based-pycs", "default", "-m", "pip"}, "", false},
+		{"dash_c_then_m_bails", []string{"-c", "import sys", "-m", "pip"}, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

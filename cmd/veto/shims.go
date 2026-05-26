@@ -162,18 +162,35 @@ func ensureShim(target, vetoPath string, force bool) (string, error) {
 					Set("path", target, "current_target", existing)
 			}
 		} else {
-			// Regular file. Refuse unless forced.
+			// Regular file. Refuse unless forced. Phase 1.3: instead of
+			// deleting the user's pre-existing real binary, rename it to
+			// <target>.veto-displaced so uninstall-shims can restore it.
 			if !force {
 				return "", errors.WithNew("file exists and is not a symlink; pass --force to overwrite").
 					Set("path", target)
 			}
+			displaced := target + ".veto-displaced"
+			if err := os.Rename(target, displaced); err != nil {
+				return "", errors.With(err, "rename pre-existing real binary to .veto-displaced").
+					Set("path", target, "displaced", displaced)
+			}
 		}
-		if err := os.Remove(target); err != nil {
-			return "", errors.With(err, "remove existing").Set("path", target)
+		// Symlink replacement path: a different-pointing symlink can be
+		// removed safely (no user data to preserve).
+		if info != nil && info.Mode()&os.ModeSymlink != 0 {
+			if err := os.Remove(target); err != nil {
+				return "", errors.With(err, "remove existing symlink").Set("path", target)
+			}
 		}
 	}
 
 	if err := os.Symlink(vetoPath, target); err != nil {
+		// Roll back the displacement on symlink failure so the user
+		// isn't left with a missing binary.
+		displaced := target + ".veto-displaced"
+		if _, derr := os.Lstat(displaced); derr == nil {
+			_ = os.Rename(displaced, target)
+		}
 		return "", errors.With(err, "create symlink").Set("path", target)
 	}
 	if info != nil {
@@ -204,6 +221,15 @@ func removeShim(target, vetoPath string) (bool, error) {
 	}
 	if err := os.Remove(target); err != nil {
 		return false, errors.With(err, "remove").Set("path", target)
+	}
+	// Phase 1.3: restore any pre-existing real binary that install-shims
+	// --force displaced to <target>.veto-displaced.
+	displaced := target + ".veto-displaced"
+	if _, derr := os.Lstat(displaced); derr == nil {
+		if err := os.Rename(displaced, target); err != nil {
+			return true, errors.With(err, "restore .veto-displaced after removing shim").
+				Set("path", target, "displaced", displaced)
+		}
 	}
 	return true, nil
 }

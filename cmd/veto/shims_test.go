@@ -80,6 +80,60 @@ func TestEnsureShim(t *testing.T) {
 	})
 }
 
+// TestEnsureShim_Force_RenamesRealBinary proves --force preserves any
+// pre-existing real binary at the target path by renaming it to
+// <target>.veto-displaced rather than deleting it. Closes the L2
+// reviewer's "silently destroys homebrew npm" finding.
+func TestEnsureShim_Force_RenamesRealBinary(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto-binary")
+	require.NoError(t, os.WriteFile(veto, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	target := filepath.Join(dir, "npm")
+	realBinary := []byte("#!/bin/sh\necho real-npm\n")
+	require.NoError(t, os.WriteFile(target, realBinary, 0o755))
+
+	action, err := ensureShim(target, veto, true)
+	require.NoError(t, err)
+	require.Contains(t, action, "updated")
+
+	// Target is now a symlink to veto.
+	resolved, err := os.Readlink(target)
+	require.NoError(t, err)
+	require.Equal(t, veto, resolved)
+
+	// Real binary preserved at .veto-displaced.
+	got, err := os.ReadFile(target + ".veto-displaced")
+	require.NoError(t, err)
+	require.Equal(t, realBinary, got, "real binary must be renamed, not deleted")
+}
+
+// TestRemoveShim_RestoresDisplacedBinary proves uninstall-shims puts
+// the displaced binary back at its original path.
+func TestRemoveShim_RestoresDisplacedBinary(t *testing.T) {
+	dir := t.TempDir()
+	veto := filepath.Join(dir, "veto-binary")
+	require.NoError(t, os.WriteFile(veto, []byte(""), 0o755))
+
+	target := filepath.Join(dir, "npm")
+	original := []byte("real-npm-bytes")
+	require.NoError(t, os.WriteFile(target, original, 0o755))
+
+	_, err := ensureShim(target, veto, true)
+	require.NoError(t, err)
+	// Now: target is symlink, target.veto-displaced has original bytes.
+
+	removed, err := removeShim(target, veto)
+	require.NoError(t, err)
+	require.True(t, removed)
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, original, got, "removeShim must restore the displaced real binary")
+	_, statErr := os.Lstat(target + ".veto-displaced")
+	require.True(t, os.IsNotExist(statErr), ".veto-displaced must be gone after restore")
+}
+
 func TestRemoveShim(t *testing.T) {
 	dir := t.TempDir()
 	veto := filepath.Join(dir, "veto-binary")

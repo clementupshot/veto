@@ -24,6 +24,15 @@ func TestRenderPOSIXShellIntegrationBlock(t *testing.T) {
 	require.Contains(t, block, "\"$_veto_bin\" pip")
 	require.Contains(t, block, "\"$_veto_bin\" uv")
 	require.NotContains(t, block, "typeset -U path PATH 2>/dev/null || true")
+	// Phase 1.3: user-set env wins over the 3-day default. The `:-`
+	// expansion only fires when the var is unset OR empty, which
+	// matches the behavior we want (a user passing
+	// PIP_UPLOADED_PRIOR_TO= explicitly empty also gets the default,
+	// which is a safe over-block).
+	require.Contains(t, block, "${PIP_UPLOADED_PRIOR_TO:-",
+		"wrapper must honor user-set PIP_UPLOADED_PRIOR_TO via :- default expansion")
+	require.Contains(t, block, "${UV_EXCLUDE_NEWER:-",
+		"wrapper must honor user-set UV_EXCLUDE_NEWER via :- default expansion")
 }
 
 func TestRenderBashShellIntegrationBlock(t *testing.T) {
@@ -46,6 +55,12 @@ func TestRenderFishShellIntegrationBlock(t *testing.T) {
 	require.Contains(t, block, "set -gx _veto_bin")
 	require.Contains(t, block, "function uv")
 	require.Contains(t, block, "$_veto_bin uv")
+	// Phase 1.3: user-set env wins. Fish's `set -q VAR; or set VAR …`
+	// idiom mirrors the bash/zsh ${VAR:-default} pattern.
+	require.Contains(t, block, "set -q PIP_UPLOADED_PRIOR_TO; or set",
+		"fish wrapper must honor user-set PIP_UPLOADED_PRIOR_TO via set -q guard")
+	require.Contains(t, block, "set -q UV_EXCLUDE_NEWER; or set",
+		"fish wrapper must honor user-set UV_EXCLUDE_NEWER via set -q guard")
 }
 
 func TestRenderPOSIXShellIntegrationBlockParsesInZshAndBash(t *testing.T) {

@@ -347,10 +347,13 @@ func writePackageAgeFunctions(b *strings.Builder) {
 		b.WriteString("  date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ\n")
 	}
 	b.WriteString("}\n")
-	b.WriteString("pip() { PIP_UPLOADED_PRIOR_TO=\"$(_veto_pkg_age_cutoff_3d_utc)\" \"$_veto_bin\" pip \"$@\"; }\n")
-	b.WriteString("pip3() { PIP_UPLOADED_PRIOR_TO=\"$(_veto_pkg_age_cutoff_3d_utc)\" \"$_veto_bin\" pip3 \"$@\"; }\n")
-	b.WriteString("uv() { UV_EXCLUDE_NEWER=\"$(_veto_pkg_age_cutoff_3d_utc)\" \"$_veto_bin\" uv \"$@\"; }\n")
-	b.WriteString("uvx() { UV_EXCLUDE_NEWER=\"$(_veto_pkg_age_cutoff_3d_utc)\" \"$_veto_bin\" uvx \"$@\"; }\n")
+	// User-set PIP_UPLOADED_PRIOR_TO / UV_EXCLUDE_NEWER win over the
+	// 3-day default — the wrapper only supplies a cutoff when the
+	// caller did not. Avoids silently clobbering CI / .envrc overrides.
+	b.WriteString("pip() { PIP_UPLOADED_PRIOR_TO=\"${PIP_UPLOADED_PRIOR_TO:-$(_veto_pkg_age_cutoff_3d_utc)}\" \"$_veto_bin\" pip \"$@\"; }\n")
+	b.WriteString("pip3() { PIP_UPLOADED_PRIOR_TO=\"${PIP_UPLOADED_PRIOR_TO:-$(_veto_pkg_age_cutoff_3d_utc)}\" \"$_veto_bin\" pip3 \"$@\"; }\n")
+	b.WriteString("uv() { UV_EXCLUDE_NEWER=\"${UV_EXCLUDE_NEWER:-$(_veto_pkg_age_cutoff_3d_utc)}\" \"$_veto_bin\" uv \"$@\"; }\n")
+	b.WriteString("uvx() { UV_EXCLUDE_NEWER=\"${UV_EXCLUDE_NEWER:-$(_veto_pkg_age_cutoff_3d_utc)}\" \"$_veto_bin\" uvx \"$@\"; }\n")
 }
 
 func renderFishShellIntegrationBlock(shimDir, vetoPath string) string {
@@ -369,10 +372,12 @@ func renderFishShellIntegrationBlock(shimDir, vetoPath string) string {
 		b.WriteString("  date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ\n")
 	}
 	b.WriteString("end\n")
-	b.WriteString("function pip\n  env PIP_UPLOADED_PRIOR_TO=(_veto_pkg_age_cutoff_3d_utc) $_veto_bin pip $argv\nend\n")
-	b.WriteString("function pip3\n  env PIP_UPLOADED_PRIOR_TO=(_veto_pkg_age_cutoff_3d_utc) $_veto_bin pip3 $argv\nend\n")
-	b.WriteString("function uv\n  env UV_EXCLUDE_NEWER=(_veto_pkg_age_cutoff_3d_utc) $_veto_bin uv $argv\nend\n")
-	b.WriteString("function uvx\n  env UV_EXCLUDE_NEWER=(_veto_pkg_age_cutoff_3d_utc) $_veto_bin uvx $argv\nend\n")
+	// Fish: `set -q` tests whether the var is already set. Mirrors the
+	// bash/zsh ${VAR:-default} pattern — user-set values win.
+	b.WriteString("function pip\n  set -q PIP_UPLOADED_PRIOR_TO; or set -gx PIP_UPLOADED_PRIOR_TO (_veto_pkg_age_cutoff_3d_utc)\n  $_veto_bin pip $argv\nend\n")
+	b.WriteString("function pip3\n  set -q PIP_UPLOADED_PRIOR_TO; or set -gx PIP_UPLOADED_PRIOR_TO (_veto_pkg_age_cutoff_3d_utc)\n  $_veto_bin pip3 $argv\nend\n")
+	b.WriteString("function uv\n  set -q UV_EXCLUDE_NEWER; or set -gx UV_EXCLUDE_NEWER (_veto_pkg_age_cutoff_3d_utc)\n  $_veto_bin uv $argv\nend\n")
+	b.WriteString("function uvx\n  set -q UV_EXCLUDE_NEWER; or set -gx UV_EXCLUDE_NEWER (_veto_pkg_age_cutoff_3d_utc)\n  $_veto_bin uvx $argv\nend\n")
 	b.WriteString(shellMarkerEnd + "\n")
 	return b.String()
 }

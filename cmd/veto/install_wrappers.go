@@ -708,18 +708,41 @@ func unwrap(w wrapperEntry, vetoPath string, dryRun bool) error {
 			return errors.WithNew("path no longer points at veto; refusing to overwrite").
 				Set("path", w.Path, "current_target", current, "expected_veto", vetoPath)
 		}
-		// TOCTOU note: there's a window between pointsAtVeto and Remove
-		// where a same-UID attacker could repoint w.Path elsewhere. That's
-		// safe here: os.Remove on a symlink unlinks the symlink inode
-		// itself, not the target it points at — the attacker is only
-		// cleaning up their own swap, not tricking us into deleting
-		// something we wouldn't have. The check is "is this our state?"
-		// not "is this safe to unlink?", and unlinking a symlink is
-		// always safe.
+		// Phase 1.5 atomic-unwrap: stage the .veto-original to a
+		// transient sibling BEFORE removing the veto symlink, so a
+		// failure at any step leaves the user with either the
+		// original at target, the original at .veto-restoring (manual
+		// recovery), or — only briefly — both. The prior order
+		// (remove → rename .veto-original → target) could leave
+		// target missing if the final rename failed.
+		restoring := w.Path + ".veto-restoring"
+		hasOriginal := false
+		if _, err := os.Lstat(w.OriginalPath); err == nil {
+			hasOriginal = true
+			if err := os.Rename(w.OriginalPath, restoring); err != nil {
+				return errors.With(err, "stage .veto-original to .veto-restoring").
+					Set("original", w.OriginalPath, "restoring", restoring)
+			}
+		}
+		// TOCTOU note: see commentary above on Remove-on-symlink safety.
 		if err := os.Remove(w.Path); err != nil {
+			if hasOriginal {
+				// Best-effort rollback: put the original back.
+				_ = os.Rename(restoring, w.OriginalPath)
+			}
 			return errors.With(err, "remove veto symlink").Set("path", w.Path)
 		}
+		if hasOriginal {
+			if err := os.Rename(restoring, w.Path); err != nil {
+				return errors.With(err, "rename .veto-restoring into place").
+					Set("restoring", restoring, "target", w.Path)
+			}
+		}
+		return nil
 	}
+	// Non-symlink at w.Path (e.g. upgrade put a real binary back).
+	// Restore the .veto-original only if it's still around AND the
+	// target is no longer a symlink to leave the upgrade in place.
 	if _, err := os.Lstat(w.OriginalPath); err == nil {
 		if err := os.Rename(w.OriginalPath, w.Path); err != nil {
 			return errors.With(err, "restore real binary").Set("from", w.OriginalPath, "to", w.Path)
@@ -807,11 +830,26 @@ func saveWrapperState(cfg config, state wrapperState) error {
 		_ = tmp.Close()
 		return errors.With(err, "write tmpfile")
 	}
+	// Phase 1.5: fsync tmpfile + chmod 0o600 + fsync parent dir so an
+	// unclean shutdown can't produce a zero-byte registry on disk and
+	// the registry isn't world-readable on shared hosts.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return errors.With(err, "fsync tmpfile")
+	}
 	if err := tmp.Close(); err != nil {
 		return errors.With(err, "close tmpfile")
 	}
-	if err := os.Chmod(tmpPath, 0o644); err != nil {
-		return errors.With(err, "chmod tmpfile")
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return errors.With(err, "chmod tmpfile to 0o600")
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return errors.With(err, "rename into place")
+	}
+	// fsync the parent dir so the rename survives an unclean shutdown.
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }

@@ -638,6 +638,20 @@ func TestUnwrap_RefusesImpostorVetoSymlink(t *testing.T) {
 	require.Contains(t, err.Error(), "refusing to overwrite")
 }
 
+// TestSaveWrapperState_FileIsPrivateMode asserts the registry is
+// written with 0o600 — protects "which PMs are wrapped where" on
+// shared hosts whose XDG_CACHE_HOME ends up world-traversable.
+func TestSaveWrapperState_FileIsPrivateMode(t *testing.T) {
+	root := t.TempDir()
+	cfg := config{CacheDir: filepath.Join(root, "cache")}
+	state := wrapperState{Wrappers: []wrapperEntry{{Path: "/x", OriginalPath: "/x.veto-original", PM: "npm", Source: "test"}}}
+	require.NoError(t, saveWrapperState(cfg, state))
+	info, err := os.Stat(filepath.Join(cfg.CacheDir, stateFileName))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
+		"wrappers.json must be 0o600, not 0o644")
+}
+
 // TestLoadWrapperState_CorruptJSONReturnsError asserts that a malformed
 // wrappers.json fails loudly instead of silently truncating the registry.
 // Phase 1.5 propagates this error through runInstallWrappers (previously

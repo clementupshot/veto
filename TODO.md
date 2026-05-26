@@ -6,6 +6,12 @@ current user-facing behavior.
 - Verify Linux end-to-end: interposer build, shell integration, and Layer 4
   wrapper discovery for common Linux installs, including mise/asdf-managed
   package-manager binaries.
+- Phase 1.4.2 deferred: add e2e coverage for `execvpe`, `fexecve`, and
+  `execveat` (Linux-only) by extending `cmd/veto/testdata/interpose_spawner`
+  with cgo helpers and a `--mode` flag. The Phase 1.4.1 fix (synthetic
+  envp via `snapshot_environ` + `rewrite_envp`) closes the actual
+  security finding; this task only adds regression coverage for the
+  three Linux-only exec variants. Best done from a Linux box / CI.
 - Add an authenticated online lookup layer for vulnerability surfaces that do
   not fit the cached bulk-source model yet, especially Socket.dev vuln data and
   SafeDep PMG real-time package analysis.

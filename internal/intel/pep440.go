@@ -311,6 +311,11 @@ func compareIntSlicesZeroPadded(a, b []int) int {
 	return 0
 }
 
+// comparePEP440Local sorts local labels segment-by-segment per PEP 440:
+// numeric segments compare numerically (so "10" > "9"), alphanumeric
+// segments compare lexically, and numeric segments outrank alphanumeric.
+// The prior strings.Compare gave the wrong answer for multi-digit
+// numeric segments (e.g. "10" < "9" lexicographically).
 func comparePEP440Local(a, b string) int {
 	if a == b {
 		return 0
@@ -321,7 +326,29 @@ func comparePEP440Local(a, b string) int {
 	if b == "" {
 		return 1
 	}
-	return strings.Compare(a, b)
+	aSeg := strings.FieldsFunc(a, func(r rune) bool { return r == '.' })
+	bSeg := strings.FieldsFunc(b, func(r rune) bool { return r == '.' })
+	for i := 0; i < len(aSeg) && i < len(bSeg); i++ {
+		ai, aErr := strconv.Atoi(aSeg[i])
+		bi, bErr := strconv.Atoi(bSeg[i])
+		aIsNum := aErr == nil
+		bIsNum := bErr == nil
+		switch {
+		case aIsNum && bIsNum:
+			if c := cmpInt(ai, bi); c != 0 {
+				return c
+			}
+		case aIsNum && !bIsNum:
+			return 1
+		case !aIsNum && bIsNum:
+			return -1
+		default:
+			if c := strings.Compare(aSeg[i], bSeg[i]); c != 0 {
+				return c
+			}
+		}
+	}
+	return cmpInt(len(aSeg), len(bSeg))
 }
 
 func cmpInt(a, b int) int {

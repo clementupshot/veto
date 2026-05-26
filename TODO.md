@@ -26,6 +26,29 @@ current user-facing behavior.
   `isLegalNpmName(name)` so `user/repo@npm:evil@1` is treated as
   github-shorthand (OpaqueRemote) rather than alias-unwrapped to
   `evil`. Minor precedence quirk; no known exploit path in argv.
+- Phase 1.7.3 deferred: pip and uv resolver prescans should forward
+  user-supplied `--index-url`, `--extra-index-url`, `--find-links`,
+  `--keyring-provider`, `--override`, `--prerelease`, `--resolution`,
+  `--python` flags so private-index installs prescan correctly, and
+  should strip `--no-deps` / `--no-build-isolation` so the dry-run
+  sees the full transitive set the real install will pull. Today
+  the prescan synthesizes a fixed argv and silently misses these.
+- Phase 1.7.4 deferred: `uv add` / `uv install` against a missing or
+  stale lockfile should fall through to ResolverPreScan (synthesize
+  a requirements input, run `uv pip compile`) instead of gating the
+  pre-existing — now incomplete — lockfile. Real fail-OPEN against
+  `uv add <new-malware>`.
+- Phase 1.7.5 partial: pymanifest does NOT yet read
+  `[tool.uv] dependencies / dev-dependencies / workspace.members`
+  or `[tool.pdm.dev-dependencies]`. uv/pdm projects fall back to
+  the lockfile path (covered) but a fresh checkout with no lockfile
+  yet would miss these direct deps.
+- Phase 1.8.2 deferred: cargo coverage still needs `publish` in
+  ParseInstalls (it fetches + builds); `doc`, `package` added to
+  ProjectPreflight (they run build.rs / proc-macros);
+  `cargomanifest` registry classifier (non-crates-io `registry = ...`
+  should be OpaqueRemote, mirroring cargolock); and `[workspace]`
+  members expansion for monorepo Cargo.toml roots.
 - Add an authenticated online lookup layer for vulnerability surfaces that do
   not fit the cached bulk-source model yet, especially Socket.dev vuln data and
   SafeDep PMG real-time package analysis.

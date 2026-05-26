@@ -134,7 +134,17 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 		return exitInternal
 	}
 
-	state, _ := loadWrapperState(cfg) // empty state is fine
+	// Phase 1.5: propagate load errors so a corrupt wrappers.json fails
+	// loudly instead of being silently truncated by the next save.
+	// loadWrapperState already treats "missing file" as (empty, nil), so
+	// any error here means the registry exists and is malformed.
+	state, err := loadWrapperState(cfg)
+	if err != nil {
+		logger.Error().Err(err).
+			Str("path", filepath.Join(cfg.CacheDir, "wrappers.json")).
+			Msg("wrappers.json is malformed; refusing to overwrite a load-bearing registry. Inspect or move the file aside and re-run.")
+		return exitInternal
+	}
 
 	// Discovery includes already-ours paths, so empty candidates now
 	// genuinely means nothing on disk — no PMs in known dirs at all.

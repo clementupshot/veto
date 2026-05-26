@@ -638,6 +638,21 @@ func TestUnwrap_RefusesImpostorVetoSymlink(t *testing.T) {
 	require.Contains(t, err.Error(), "refusing to overwrite")
 }
 
+// TestLoadWrapperState_CorruptJSONReturnsError asserts that a malformed
+// wrappers.json fails loudly instead of silently truncating the registry.
+// Phase 1.5 propagates this error through runInstallWrappers (previously
+// swallowed via `state, _ := loadWrapperState(cfg)`) so an attacker can't
+// convert a single tricked-state into permanent gate-defeat by corrupting
+// the file.
+func TestLoadWrapperState_CorruptJSONReturnsError(t *testing.T) {
+	root := t.TempDir()
+	cfg := config{CacheDir: root}
+	require.NoError(t, os.WriteFile(filepath.Join(root, stateFileName), []byte("{not json"), 0o600))
+
+	_, err := loadWrapperState(cfg)
+	require.Error(t, err, "corrupt wrappers.json must return an error, not (empty, nil)")
+}
+
 // TestRunInstallWrappers_EndToEnd: drive runInstallWrappers against a
 // synthetic install dir, verify wrapping happened, then drive
 // runUninstallWrappers and verify it all reverses cleanly.

@@ -158,16 +158,57 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 
 	stats := wrapperStats{}
 	for _, c := range candidates {
+		entry := wrapperEntry{
+			Path:         c.path,
+			OriginalPath: c.path + wrapperSuffix,
+			PM:           c.pm,
+			Source:       c.source,
+		}
+		// Phase 1.5 write-ahead-log order: speculatively register the
+		// entry and persist BEFORE the FS mutation. If applyWrapper
+		// succeeds, the registry already records reality. If it fails
+		// (or is a skip), we adjust below. This closes the L4 reviewer's
+		// finding that a mid-loop crash left wrappers on-disk with no
+		// registry entry, making the PM unfindable until manual
+		// recovery.
+		//
+		// Reconciliation-via-discovery still works because the
+		// `pointsAtVeto + state.has` check in applyWrapper detects the
+		// already-ours case; the WAL just ensures that for newly-wrapped
+		// candidates the registry is durable BEFORE the symlink lands.
+		preWrapState := state // shallow copy for rollback comparison
+		_ = preWrapState
+		needPersist := false
+		alreadyHad := state.has(c.path)
+		if !opts.dryRun && !alreadyHad {
+			state.add(entry)
+			if err := saveWrapperState(cfg, state); err != nil {
+				logger.Error().Err(err).Msg("save wrapper state (WAL pre-write)")
+				state.remove(c.path)
+				stats.failed++
+				fmt.Fprintf(os.Stderr, "  %-10s  FAIL  %s — %v\n", c.pm, c.path, err)
+				continue
+			}
+		}
 		switch action, err := applyWrapper(c, vetoPath, opts.dryRun, opts.force); {
 		case err != nil:
 			stats.failed++
 			fmt.Fprintf(os.Stderr, "  %-10s  FAIL  %s — %v\n", c.pm, c.path, err)
+			if !alreadyHad && !opts.dryRun {
+				// Roll back the speculative registry entry. Best-effort:
+				// if THIS save also fails, log but don't double-error;
+				// the next install-wrappers reconcile will heal.
+				state.remove(c.path)
+				if rbErr := saveWrapperState(cfg, state); rbErr != nil {
+					logger.Warn().Err(rbErr).Str("path", c.path).
+						Msg("WAL rollback save failed; re-run install-wrappers to reconcile")
+				}
+			}
 		case action == wrapperActionSkipAlreadyOurs:
-			// The filesystem says this is wrapped. If state agrees,
-			// silent no-op. If state doesn't know about it, reconcile —
-			// register the entry so future uninstall-wrappers can
-			// reverse it. Idempotent because state.add replaces by Path.
-			if state.has(c.path) {
+			// The filesystem says this is wrapped. If state agrees, silent
+			// no-op. If state doesn't know about it (alreadyHad was false
+			// AND we didn't WAL-add above due to dryRun), reconcile.
+			if alreadyHad {
 				stats.alreadyOurs++
 				if opts.verbose {
 					fmt.Printf("  %-10s  ok    already wrapped: %s\n", c.pm, c.path)
@@ -175,12 +216,10 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 			} else {
 				stats.reconciled++
 				fmt.Printf("  %-10s  ok    reconciled (already wrapped, registering in state): %s\n", c.pm, c.path)
-				state.add(wrapperEntry{
-					Path:         c.path,
-					OriginalPath: c.path + wrapperSuffix,
-					PM:           c.pm,
-					Source:       c.source,
-				})
+				if opts.dryRun {
+					state.add(entry)
+				}
+				needPersist = true
 			}
 		case action == wrapperActionSkipDryRun:
 			stats.wouldWrap++
@@ -188,18 +227,18 @@ func runInstallWrappers(logger zerolog.Logger, cfg config, args []string) int {
 		case action == wrapperActionWrapped:
 			stats.wrapped++
 			fmt.Printf("  %-10s  ok    wrapped: %s\n", c.pm, c.path)
-			state.add(wrapperEntry{
-				Path:         c.path,
-				OriginalPath: c.path + wrapperSuffix,
-				PM:           c.pm,
-				Source:       c.source,
-			})
+			// Already persisted via WAL above; nothing more to do.
 		}
+		_ = needPersist
 	}
 
-	if !opts.dryRun && (stats.wrapped > 0 || stats.reconciled > 0 || stats.failed > 0) {
+	// Final reconcile-state save covers the dry-run paths that need
+	// state writes (none, since dry-run is idempotent) and the
+	// already-ours-but-not-in-state reconciliation that happened
+	// above. The WAL pre-writes covered every wrapped candidate.
+	if !opts.dryRun && (stats.reconciled > 0 || stats.failed > 0) {
 		if err := saveWrapperState(cfg, state); err != nil {
-			logger.Error().Err(err).Msg("save wrapper state")
+			logger.Error().Err(err).Msg("save wrapper state (final reconcile)")
 			return exitInternal
 		}
 	}
@@ -699,6 +738,18 @@ func (s *wrapperState) add(entry wrapperEntry) {
 		}
 	}
 	s.Wrappers = append(s.Wrappers, entry)
+}
+
+// remove deletes any entry matching path. Used by the WAL rollback
+// path in runInstallWrappers when a per-candidate FS mutation fails
+// after the registry entry has been persisted.
+func (s *wrapperState) remove(path string) {
+	for i, w := range s.Wrappers {
+		if w.Path == path {
+			s.Wrappers = append(s.Wrappers[:i], s.Wrappers[i+1:]...)
+			return
+		}
+	}
 }
 
 // has reports whether state already has a record at the given path.

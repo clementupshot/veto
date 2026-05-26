@@ -301,6 +301,26 @@ static char **rewrite_argv(const char *veto_path, const char *pm_name,
   return out;
 }
 
+extern char **environ;
+
+// snapshot_environ returns a NULL-terminated argv-style copy of `environ`
+// (pointers aliased into the live env, no strdup). Used by the execv/execvp
+// shadows that lack an envp parameter to feed rewrite_envp with the current
+// process env WITHOUT mutating it via setenv. Returns NULL on alloc failure
+// (caller falls back to the legacy setenv path, which is correct-but-leaky).
+//
+// The returned array is owned by the caller and freed with free() (the
+// individual char* slots are NOT freed — they alias into `environ`).
+static char **snapshot_environ(void) {
+  size_t n = 0;
+  while (environ && environ[n]) n++;
+  char **out = (char **)calloc(n + 1, sizeof(char *));
+  if (!out) return NULL;
+  for (size_t i = 0; i < n; i++) out[i] = environ[i];
+  out[n] = NULL;
+  return out;
+}
+
 // rewrite_envp returns a newly-allocated envp array equal to envp with
 // one entry added/replaced. The added entry is of the form
 // "NAME=VALUE" (the caller must pre-build this string; the lifetime is
@@ -484,15 +504,30 @@ static int veto_execvp(const char *file, char *const argv[]) {
   invocation_t inv = classify_invocation(file, argv);
   char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
   if (!new_argv) { free(inv.env_kv); return execvp(file, argv); }
-  if (inv.env_kv) {
-    // execvp uses the process environ; setenv() reflects into the
-    // child. We accept the (rare) cost of leaking the entry into our
-    // own process — exec replaces us anyway on success, and on failure
-    // a stray VETO_PYTHON_M_ORIGINAL in our env is harmless.
-    setenv("VETO_PYTHON_M_ORIGINAL", inv.env_kv + strlen("VETO_PYTHON_M_ORIGINAL="), 1);
-  }
   log_route(pm, file);
-  int rc = execvp(bp, new_argv);
+  int rc;
+  if (inv.env_kv) {
+    // Phase 1.4: build a synthetic envp from environ + the new entry
+    // and call execve() directly (bp is always absolute, no PATH lookup
+    // needed). Avoids the process-global setenv() that previously raced
+    // multi-threaded callers and leaked VETO_PYTHON_M_ORIGINAL on exec
+    // failure.
+    char **snap = snapshot_environ();
+    char **new_envp = snap ? rewrite_envp(snap, inv.env_kv) : NULL;
+    if (new_envp) {
+      rc = execve(bp, new_argv, new_envp);
+      free(new_envp);
+    } else {
+      // Allocation failed — fall back to the legacy process-env path
+      // so the gate still runs. Degraded behavior (env leak) is
+      // strictly better than failing closed.
+      setenv("VETO_PYTHON_M_ORIGINAL", inv.env_kv + strlen("VETO_PYTHON_M_ORIGINAL="), 1);
+      rc = execvp(bp, new_argv);
+    }
+    free(snap);
+  } else {
+    rc = execvp(bp, new_argv);
+  }
   free(new_argv);
   free(inv.env_kv);
   return rc;
@@ -506,11 +541,23 @@ static int veto_execv(const char *path, char *const argv[]) {
   invocation_t inv = classify_invocation(path, argv);
   char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
   if (!new_argv) { free(inv.env_kv); return execv(path, argv); }
-  if (inv.env_kv) {
-    setenv("VETO_PYTHON_M_ORIGINAL", inv.env_kv + strlen("VETO_PYTHON_M_ORIGINAL="), 1);
-  }
   log_route(pm, path);
-  int rc = execv(bp, new_argv);
+  int rc;
+  if (inv.env_kv) {
+    // Phase 1.4: see veto_execvp above for the synthetic-envp rationale.
+    char **snap = snapshot_environ();
+    char **new_envp = snap ? rewrite_envp(snap, inv.env_kv) : NULL;
+    if (new_envp) {
+      rc = execve(bp, new_argv, new_envp);
+      free(new_envp);
+    } else {
+      setenv("VETO_PYTHON_M_ORIGINAL", inv.env_kv + strlen("VETO_PYTHON_M_ORIGINAL="), 1);
+      rc = execv(bp, new_argv);
+    }
+    free(snap);
+  } else {
+    rc = execv(bp, new_argv);
+  }
   free(new_argv);
   free(inv.env_kv);
   return rc;
@@ -704,11 +751,26 @@ int execvp(const char *file, char *const argv[]) {
   invocation_t inv = classify_invocation(file, argv);
   char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
   if (!new_argv) { free(inv.env_kv); return real_execvp(file, argv); }
-  if (inv.env_kv) {
-    setenv("VETO_PYTHON_M_ORIGINAL", inv.env_kv + strlen("VETO_PYTHON_M_ORIGINAL="), 1);
-  }
   log_route(pm, file);
-  int rc = real_execvp(bp, new_argv);
+  int rc;
+  if (inv.env_kv) {
+    // Phase 1.4: synthetic envp via snapshot + rewrite_envp + execve.
+    // bp is absolute, so we don't need PATH resolution; real_execve
+    // is the cleanest target. Falls back to setenv+execvp if snapshot
+    // allocation fails (degraded but still gated).
+    char **snap = snapshot_environ();
+    char **new_envp = snap ? rewrite_envp(snap, inv.env_kv) : NULL;
+    if (new_envp) {
+      rc = real_execve(bp, new_argv, new_envp);
+      free(new_envp);
+    } else {
+      setenv("VETO_PYTHON_M_ORIGINAL", inv.env_kv + strlen("VETO_PYTHON_M_ORIGINAL="), 1);
+      rc = real_execvp(bp, new_argv);
+    }
+    free(snap);
+  } else {
+    rc = real_execvp(bp, new_argv);
+  }
   free(new_argv);
   free(inv.env_kv);
   return rc;
@@ -722,11 +784,23 @@ int execv(const char *path, char *const argv[]) {
   invocation_t inv = classify_invocation(path, argv);
   char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
   if (!new_argv) { free(inv.env_kv); return real_execv(path, argv); }
-  if (inv.env_kv) {
-    setenv("VETO_PYTHON_M_ORIGINAL", inv.env_kv + strlen("VETO_PYTHON_M_ORIGINAL="), 1);
-  }
   log_route(pm, path);
-  int rc = real_execv(bp, new_argv);
+  int rc;
+  if (inv.env_kv) {
+    // Phase 1.4: see execvp above.
+    char **snap = snapshot_environ();
+    char **new_envp = snap ? rewrite_envp(snap, inv.env_kv) : NULL;
+    if (new_envp) {
+      rc = real_execve(bp, new_argv, new_envp);
+      free(new_envp);
+    } else {
+      setenv("VETO_PYTHON_M_ORIGINAL", inv.env_kv + strlen("VETO_PYTHON_M_ORIGINAL="), 1);
+      rc = real_execv(bp, new_argv);
+    }
+    free(snap);
+  } else {
+    rc = real_execv(bp, new_argv);
+  }
   free(new_argv);
   free(inv.env_kv);
   return rc;

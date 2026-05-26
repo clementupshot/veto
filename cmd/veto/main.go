@@ -162,19 +162,54 @@ var pythonDashMTargets = map[string]string{
 // "python" or "python3". `args` here is the python interpreter's own
 // argv tail (everything after argv[0]).
 //
-// We accept the form `-m <pm> …` only when `-m` is the first token —
-// flags like `-I -m pip install foo` are real but vanishingly rare in
-// the install-form footprint, and adding tolerance for arbitrary
-// pre-`-m` flags would also let a malicious crafter slip a non-`-m`
-// invocation past the gate. Keeping the check strict and false-negative
-// here is fine: any python invocation we don't gate at this layer is
-// still caught by the interposer (Layer 3) when present.
+// Accepts:
+//   -m <pm> ...                      (canonical)
+//   -m<pm> ...                       (no space — valid CPython syntax)
+//   <no-arg-flag-bundle> -m <pm> ... (e.g. -I -m pip, -IES -m pip)
+//   <no-arg-flag-bundle> -m<pm> ...
+//
+// Pre-`-m` flag bundles are the union of CPython's no-argument short
+// options: -b -B -d -E -h -i -I -O -P -q -s -S -u -v -V -x -? .
+// Options that take values (-c CMD, -m MOD, -W ARG, -X ARG) and any
+// long option (--check-hash-based-pycs, …) bail conservatively because
+// they could conceal arbitrary code or shift the position of -m.
 func pythonDashMTarget(args []string) (string, bool) {
-	if len(args) < 2 || args[0] != "-m" {
-		return "", false
+	const noArgShortFlags = "bBdEhiIOPqsSuvVxX?"
+
+	for i := 0; i < len(args); i++ {
+		tok := args[i]
+		if !strings.HasPrefix(tok, "-") || tok == "-" {
+			return "", false
+		}
+		if tok == "--" {
+			return "", false
+		}
+		// `-m<pm>` (no space).
+		if strings.HasPrefix(tok, "-m") && len(tok) > 2 {
+			pm, ok := pythonDashMTargets[tok[2:]]
+			return pm, ok
+		}
+		if tok == "-m" {
+			if i+1 >= len(args) {
+				return "", false
+			}
+			pm, ok := pythonDashMTargets[args[i+1]]
+			return pm, ok
+		}
+		// Long options bail — we don't model whether they consume a value.
+		if strings.HasPrefix(tok, "--") {
+			return "", false
+		}
+		// Short-flag bundle: every char after the leading dash must be in
+		// the no-argument set. Otherwise bail (the rune might denote
+		// a value-taking short option like -c / -W / -X).
+		for _, r := range tok[1:] {
+			if !strings.ContainsRune(noArgShortFlags, r) {
+				return "", false
+			}
+		}
 	}
-	pm, ok := pythonDashMTargets[args[1]]
-	return pm, ok
+	return "", false
 }
 
 func run(args []string) int {

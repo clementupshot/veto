@@ -118,6 +118,18 @@ func runClaudeCodeHook(logger zerolog.Logger, stdin io.Reader, stdout io.Writer)
 		return exitOK
 	}
 
+	// Shell-expansion refusal (Phase 1.2 band-aid for $(), backticks,
+	// <(), >(), <<<). There's no "prefix with veto" correction — the
+	// agent must reissue without the construct. Phase 3.1 (sh/v3
+	// AST walker) will replace this with structural detection.
+	if finding.PM == "shell-expansion" {
+		msg := "veto-hook: refusing to evaluate shell command-substitution / herestring.\n" +
+			"The command contains $(...), backticks, <(...), >(...), or <<< — these hide commands from " +
+			"veto's analyzer. Reissue the command without the substitution construct, or invoke " +
+			"the package manager directly via `veto <pm> ...`."
+		return writeDecisionOrFail(stdout, msg)
+	}
+
 	// Defense layer 2: if veto itself isn't on PATH at hook time,
 	// telling the agent to "prefix with veto" is useless. Fail closed
 	// loudly so the mis-install is visible.

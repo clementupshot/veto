@@ -132,6 +132,18 @@ func setOf(items ...string) map[string]struct{} {
 // the command is safe to let through unchanged (or unparseable; we defer
 // to the shell in that case, matching the Python original).
 func Analyze(cmd string) (Finding, bool) {
+	// Command substitution and herestrings are opaque to shlex: $(...),
+	// `...`, <(...), >(...), and <<<. Rather than half-parse them, refuse
+	// the install — the agent can re-issue without the construct. Phase
+	// 3.1 (sh/v3/syntax) replaces this band-aid with a real AST walker.
+	// Regressions: TestAnalyze_CommandSubstitution_Refused,
+	// TestAnalyze_Herestring_Refused.
+	if containsShellExpansion(cmd) {
+		return Finding{
+			PM:     "shell-expansion",
+			Tokens: []string{cmd},
+		}, true
+	}
 	top, err := shlex.Split(cmd)
 	if err != nil || len(top) == 0 {
 		// Unparseable — defer to the shell, same as the Python version.
@@ -151,6 +163,28 @@ func Analyze(cmd string) (Finding, bool) {
 		}
 	}
 	return Finding{}, false
+}
+
+// containsShellExpansion reports whether the raw command string contains
+// constructs that hide commands from a token-pipeline parser: command
+// substitution ($(...) and backticks), process substitution (<(...),
+// >(...)), and herestrings (<<<). Any of these can route a PM call past
+// the analyzer; Phase 1.2 refuses them to close the fail-OPEN until
+// Phase 3.1 swaps in a real shell AST.
+func containsShellExpansion(s string) bool {
+	if strings.Contains(s, "$(") {
+		return true
+	}
+	if strings.Contains(s, "`") {
+		return true
+	}
+	if strings.Contains(s, "<(") || strings.Contains(s, ">(") {
+		return true
+	}
+	if strings.Contains(s, "<<<") {
+		return true
+	}
+	return false
 }
 
 // splitInlineSeparators turns tokens like `/tmp;` into [`/tmp`, `;`] so
@@ -310,6 +344,13 @@ func expandShellInvocations(tokens []string) [][]string {
 			if err != nil {
 				return [][]string{tokens}
 			}
+			// Recover unspaced separators in the nested payload —
+			// the top-level Analyze loop already does this, but the
+			// inner re-shlex of `bash -c "cd /tmp;npm install foo"`
+			// would otherwise leave `cd /tmp;npm` glued and the leaf
+			// `cd` would shadow the npm install.
+			// Regression: TestAnalyze_NestedBashC_UnspacedSeparators.
+			inner = splitInlineSeparators(inner)
 			inner = stripRedirects(inner)
 			var out [][]string
 			for _, sub := range splitBySeparators(inner) {

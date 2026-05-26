@@ -79,20 +79,32 @@ func expandFile(path string, depth int) ([]packagemanager.Install, error) {
 	baseDir := filepath.Dir(path)
 	var installs []packagemanager.Install
 
+	// Phase 1.7: glue backslash line-continuations BEFORE parsing.
+	// The previous "won't do" stance let an attacker hide a spec on
+	// a continuation line:
+	//   legit==1.0 \
+	//   evil==9.9.9
+	// pip installed both; veto saw only legit. The accumulator below
+	// joins continuations into a single logical line, then strips
+	// embedded comments per-line as before.
 	scanner := bufio.NewScanner(f)
+	var acc strings.Builder
 	for scanner.Scan() {
-		line := stripComment(scanner.Text())
-		line = strings.TrimSpace(line)
+		raw := scanner.Text()
+		trimmedR := strings.TrimRight(raw, "\r")
+		// Continuation: trailing `\` (not inside a comment).
+		stripped := stripComment(trimmedR)
+		if strings.HasSuffix(stripped, `\`) && !lineIsEntirelyComment(trimmedR) {
+			acc.WriteString(strings.TrimSuffix(stripped, `\`))
+			acc.WriteString(" ")
+			continue
+		}
+		acc.WriteString(stripped)
+		line := strings.TrimSpace(acc.String())
+		acc.Reset()
 		if line == "" {
 			continue
 		}
-
-		// pip allows backslash line-continuation; we do not glue them. The
-		// leftover backslash would not parse cleanly as a spec (skipped
-		// silently). Real requirements.txt files almost never use this
-		// (it's an artifact of hand-rolled flake8-style configs); committing
-		// to "won't do" keeps the parser simple. If a real workflow ever
-		// breaks, the fix is one line of accumulation here.
 
 		if include, kind, ok := parseIncludeDirective(line); ok {
 			resolved := include
@@ -193,4 +205,13 @@ func parseIncludeDirective(line string) (string, packagemanager.ManifestKind, bo
 func stripComment(line string) string {
 	before, _, _ := strings.Cut(line, "#")
 	return before
+}
+
+// lineIsEntirelyComment reports whether line (raw, with comments
+// intact) is just a comment after leading whitespace. Used by the
+// continuation accumulator so a `#` at end of a content line is
+// still treated as comment-with-no-continuation.
+func lineIsEntirelyComment(raw string) bool {
+	t := strings.TrimSpace(raw)
+	return strings.HasPrefix(t, "#")
 }

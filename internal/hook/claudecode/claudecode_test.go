@@ -71,15 +71,13 @@ func TestAnalyze(t *testing.T) {
 
 		{"env var assignment", "FOO=bar npm install foo", "npm"},
 		{"two env var assignments", "FOO=bar BAZ=qux pip install requests", "pip"},
-		{"explicit bypass", "VETO_BYPASS=1 npm install foo", ""},
-		// Only the literal value "1" disables the gate. Any other value
-		// (including the foot-gun "0", which a user might assume means
-		// "off") MUST still be flagged. The C interposer and runGate
-		// honor the same rule — see veto_interpose.c::is_risky and
-		// cmd/veto/main.go::vetoBypassEnabled.
-		{"bypass with value 0 is not a bypass", "VETO_BYPASS=0 npm install foo", "npm"},
-		{"bypass with empty value is not a bypass", "VETO_BYPASS= npm install foo", "npm"},
-		{"bypass with arbitrary value is not a bypass", "VETO_BYPASS=true npm install foo", "npm"},
+		// VETO_BYPASS has been removed from the contract. Any value of
+		// the env (including the legacy "=1") must NOT disable the gate;
+		// the env is treated as ordinary env-assignment noise and the
+		// risky command still flags.
+		{"legacy VETO_BYPASS=1 is now ignored", "VETO_BYPASS=1 npm install foo", "npm"},
+		{"legacy VETO_BYPASS=0 still flags", "VETO_BYPASS=0 npm install foo", "npm"},
+		{"legacy VETO_BYPASS= still flags", "VETO_BYPASS= npm install foo", "npm"},
 
 		{"redirect operator", "npm install foo > /tmp/log 2>&1", "npm"},
 		{"redirect operator with append", "pip install foo >> /tmp/log", "pip"},
@@ -193,6 +191,68 @@ func TestTokensSurfacedForRefusalMessage(t *testing.T) {
 	finding, ok := Analyze("timeout 30 npm install --save-dev lodash")
 	require.True(t, ok)
 	require.Equal(t, []string{"npm", "install", "--save-dev", "lodash"}, finding.Tokens)
+}
+
+// TestAnalyze_NestedBashC_UnspacedSeparators proves the analyzer
+// handles `bash -c "cd /tmp;npm install foo"` — the inner shlex-and-split
+// must also recover unspaced separators, not just the top-level pass.
+// Regression for the L1 reviewer's first fail-OPEN finding.
+func TestAnalyze_NestedBashC_UnspacedSeparators(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		pm   string
+	}{
+		{"semicolon_unspaced", `bash -c "cd /tmp;npm install foo"`, "npm"},
+		{"and_unspaced", `bash -c "true&&npm install foo"`, "npm"},
+		{"or_unspaced", `bash -c "false||npm install foo"`, "npm"},
+		{"semicolon_then_chain", `bash -c "echo hi;true;npm install foo"`, "npm"},
+		{"sh_dash_c_semicolon", `sh -c "cd /tmp;pip install requests"`, "pip"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			finding, ok := Analyze(tc.cmd)
+			require.True(t, ok, "must detect %q as risky", tc.cmd)
+			require.Equal(t, tc.pm, finding.PM)
+		})
+	}
+}
+
+// TestAnalyze_CommandSubstitution_Refused proves $(...) / backticks /
+// <(...) / >(...) are NOT silently passed; they emit a Finding so the
+// hook can deny. Regression for the L1 reviewer's command-substitution
+// fail-OPEN. Phase 3.1 replaces the band-aid with a real AST walk; the
+// contract here must keep passing.
+func TestAnalyze_CommandSubstitution_Refused(t *testing.T) {
+	cases := []string{
+		`echo $(npm install foo)`,
+		"echo `npm install foo`",
+		`diff <(echo a) <(npm install foo)`,
+		`echo >(npm install foo)`,
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			_, ok := Analyze(c)
+			require.True(t, ok,
+				"command substitution must be treated as risky for %q", c)
+		})
+	}
+}
+
+// TestAnalyze_Herestring_Refused — `sh <<< 'npm install foo'`. The <<<
+// herestring is opaque to shlex, and the legacy redirect-stripper
+// discarded the payload entirely. Phase 1.2 surfaces this as risky.
+func TestAnalyze_Herestring_Refused(t *testing.T) {
+	cases := []string{
+		`sh <<< 'npm install foo'`,
+		`bash <<< "pip install requests"`,
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			_, ok := Analyze(c)
+			require.True(t, ok, "<<< herestrings must not silently drop the payload (%q)", c)
+		})
+	}
 }
 
 // TestPythonDashMTokensPreserveOriginalInvocation confirms the

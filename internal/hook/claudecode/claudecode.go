@@ -137,9 +137,6 @@ func Analyze(cmd string) (Finding, bool) {
 		// Unparseable — defer to the shell, same as the Python version.
 		return Finding{}, false
 	}
-	if top[0] == "VETO_BYPASS=1" {
-		return Finding{}, false
-	}
 
 	top = splitInlineSeparators(top)
 	top = stripRedirects(top)

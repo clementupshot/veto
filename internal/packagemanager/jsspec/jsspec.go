@@ -257,6 +257,10 @@ func PackageJSONManifestRefs(
 		{Path: "npm-shrinkwrap.json", Kind: packagemanager.ManifestKindNpmShrinkwrap},
 		{Path: "pnpm-lock.yaml", Kind: packagemanager.ManifestKindPnpmLockYAML},
 		{Path: "yarn.lock", Kind: packagemanager.ManifestKindYarnLock},
+		// Phase 1.6: bun.lock (text JSONC) joins the speculative set so
+		// pure-bun projects gate their full transitive tree. bun.lockb
+		// (binary) intentionally not gated until a stable spec exists.
+		{Path: "bun.lock", Kind: packagemanager.ManifestKindBunLock},
 	}
 	if _, always := alwaysReadsManifest[verb]; always {
 		return append([]packagemanager.ManifestRef{{Path: "package.json", Kind: packagemanager.ManifestKindPackageJSON}}, lockRefs...)

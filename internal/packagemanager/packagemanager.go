@@ -97,6 +97,10 @@ const (
 	// ("berry") uses a different schema; gating against it is best-effort.
 	ManifestKindYarnLock ManifestKind = "yarn.lock"
 
+	// ManifestKindBunLock is bun's bun.lock (text JSONC). bun.lockb
+	// (binary) is intentionally unsupported until a stable spec exists.
+	ManifestKindBunLock ManifestKind = "bun.lock"
+
 	// ManifestKindUvLock is uv's uv.lock (TOML).
 	ManifestKindUvLock ManifestKind = "uv.lock"
 

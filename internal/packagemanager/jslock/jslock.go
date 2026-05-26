@@ -58,6 +58,12 @@ func (e *Expander) Expand(ref packagemanager.ManifestRef) ([]packagemanager.Inst
 		return expandPnpmLock(ref.Path)
 	case packagemanager.ManifestKindYarnLock:
 		return expandYarnLock(ref.Path)
+	case packagemanager.ManifestKindBunLock:
+		data, ok, err := readFile(ref.Path)
+		if err != nil || !ok {
+			return nil, err
+		}
+		return expandBunLock(data)
 	default:
 		return nil, nil
 	}

@@ -102,10 +102,32 @@ func (Manager) ManifestRefs(args []string) []packagemanager.ManifestRef {
 		if removalOnly(rest) {
 			return nil
 		}
+		// Phase 1.8: `go get -u` (no positionals) walks the existing
+		// module graph; gate go.mod's transitive set instead of
+		// returning nil.
 		if len(argv.CollectPositionalsWithTable(rest, flagsWithValues)) == 0 {
-			return nil
+			return goModuleRefs(baseDir, modFile)
 		}
 		return goModuleRefs(baseDir, modFile)
+	case "install":
+		// Phase 1.8: `go install ./cmd/foo` (local-path positionals)
+		// compiles local code that links to go.mod's deps; emit
+		// module refs so the gate sees the transitive set. Pure-
+		// remote forms (`go install pkg@v1`) are caught by
+		// ParseInstalls and don't need module refs (the remote
+		// install uses its own go.mod from the module cache).
+		positionals := argv.CollectPositionalsWithTable(rest, flagsWithValues)
+		anyLocal := len(positionals) == 0
+		for _, p := range positionals {
+			if isLocalGoSpec(p) {
+				anyLocal = true
+				break
+			}
+		}
+		if anyLocal {
+			return goModuleRefs(baseDir, modFile)
+		}
+		return nil
 	case "mod":
 		subVerb, _, subOK := argv.FirstNonFlagWithTable(rest, flagsWithValues)
 		if !subOK {
@@ -130,6 +152,14 @@ func (Manager) ProjectPreflight(args []string) (packagemanager.ProjectPreflightP
 	switch verb {
 	case "build", "test", "vet":
 		return packagemanager.ProjectPreflightPlan{ManifestRefs: goModuleRefs(baseDir, modFile)}, true
+	case "install":
+		// Phase 1.8: `go install` with no positionals compiles current
+		// module's commands; same semantics as `go build` but to $GOBIN.
+		// With positionals it goes through ParseInstalls + ManifestRefs.
+		if len(argv.CollectPositionalsWithTable(rest, flagsWithValues)) == 0 {
+			return packagemanager.ProjectPreflightPlan{ManifestRefs: goModuleRefs(baseDir, modFile)}, true
+		}
+		return packagemanager.ProjectPreflightPlan{}, false
 	case "run":
 		if !goRunIsLocal(rest) {
 			return packagemanager.ProjectPreflightPlan{}, false
@@ -314,7 +344,14 @@ func goModuleRefs(baseDir, modFile string) []packagemanager.ManifestRef {
 	if !filepath.IsAbs(modPath) {
 		modPath = filepath.Join(baseDir, modPath)
 	}
-	sumPath := strings.TrimSuffix(modPath, filepath.Ext(modPath)) + ".sum"
+	// Phase 1.8: only swap the extension when it's literally `.mod`.
+	// Go's internal modload behavior: -modfile=foo.bar produces
+	// foo.bar.sum (append, not strip). The prior TrimSuffix unconditionally
+	// stripped any extension and produced "foo.sum" for "foo.bar".
+	sumPath := modPath + ".sum"
+	if filepath.Ext(modPath) == ".mod" {
+		sumPath = strings.TrimSuffix(modPath, ".mod") + ".sum"
+	}
 	return []packagemanager.ManifestRef{
 		{Path: modPath, Kind: packagemanager.ManifestKindGoMod},
 		{Path: sumPath, Kind: packagemanager.ManifestKindGoSum},

@@ -70,7 +70,12 @@ func TestManifestRefs(t *testing.T) {
 	}
 
 	require.Nil(t, m.ManifestRefs([]string{"get", "github.com/old/module@none"}))
-	require.Nil(t, m.ManifestRefs([]string{"get"}))
+	// Phase 1.8: `go get` with no positionals must gate go.mod's
+	// transitive set — `go get -u` walks the existing graph.
+	require.Equal(t, []packagemanager.ManifestRef{
+		{Path: "go.mod", Kind: packagemanager.ManifestKindGoMod},
+		{Path: "go.sum", Kind: packagemanager.ManifestKindGoSum},
+	}, m.ManifestRefs([]string{"get"}))
 	require.Nil(t, m.ManifestRefs([]string{"install", "github.com/evil/cmd@v0.2.0"}))
 	require.Nil(t, m.ManifestRefs([]string{"run", "github.com/evil/cmd@v0.2.0"}))
 	require.Nil(t, m.ManifestRefs([]string{"build", "./..."}))

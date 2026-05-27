@@ -77,6 +77,22 @@
   #include <dlfcn.h>
 #endif
 
+// glibc declares fexecve/execveat with __attribute__((nonnull)) on argv
+// and path. When we define our own versions to interpose, gcc inherits
+// those attributes and uses them to delete `argv && ...` / `!path` guards
+// at -O2 as provably-dead. For a libc interposer those guards aren't
+// defensive theatre — third-party callers, JITs, and malicious code can
+// and do pass NULL, and a NULL deref here crashes the host process. The
+// inline-asm barrier launders the pointer through a register so the
+// optimizer can no longer reason about its nullness at the comparison
+// site. Empty asm + "+r" emits zero instructions; it's a pure compiler
+// barrier. Gated on GNU/clang; no-op elsewhere.
+#if defined(__GNUC__) || defined(__clang__)
+  #define VETO_HIDE_PTR(p) ({ __typeof__(p) _veto_p = (p); __asm__ volatile("" : "+r"(_veto_p)); _veto_p; })
+#else
+  #define VETO_HIDE_PTR(p) (p)
+#endif
+
 // PM_NAMES is generated from the canonical Go list
 // (internal/packagemanager/pmlist.InterposerPMs) so the C interposer,
 // the Go shim-dispatch, the Go install-shims / install-wrappers code,
@@ -954,13 +970,16 @@ int execvpe(const char *file, char *const argv[], char *const envp[]) {
 // command-line paths.
 int fexecve(int fd, char *const argv[], char *const envp[]) {
   if (!real_fexecve) { errno = ENOSYS; return -1; }
-  const char *fake_path = (argv && argv[0]) ? argv[0] : "";
-  const char *pm = is_risky(fake_path, argv);
+  // Launder argv through VETO_HIDE_PTR so gcc can't use glibc's nonnull
+  // attribute to elide the guard below — see the macro's comment.
+  char *const *a = VETO_HIDE_PTR(argv);
+  const char *fake_path = (a && a[0]) ? a[0] : "";
+  const char *pm = is_risky(fake_path, a);
   if (!pm) return real_fexecve(fd, argv, envp);
   const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return real_fexecve(fd, argv, envp);
-  invocation_t inv = classify_invocation(fake_path, argv);
-  char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
+  invocation_t inv = classify_invocation(fake_path, a);
+  char **new_argv = rewrite_argv(bp, pm, a, inv.skip);
   if (!new_argv) { free(inv.env_kv); return real_fexecve(fd, argv, envp); }
   char **new_envp = (char **)envp;
   char **allocated_envp = NULL;
@@ -991,20 +1010,24 @@ int fexecve(int fd, char *const argv[], char *const envp[]) {
 int execveat(int dirfd, const char *path, char *const argv[],
              char *const envp[], int flags) {
   if (!real_execveat) { errno = ENOSYS; return -1; }
+  // Launder path/argv through VETO_HIDE_PTR so gcc can't use glibc's
+  // nonnull attribute on execveat to elide the guards below.
+  const char *p = VETO_HIDE_PTR(path);
+  char *const *a = VETO_HIDE_PTR(argv);
 #ifdef AT_EMPTY_PATH
-  int empty_path = (flags & AT_EMPTY_PATH) && (!path || !*path);
+  int empty_path = (flags & AT_EMPTY_PATH) && (!p || !*p);
 #else
-  int empty_path = (!path || !*path);
+  int empty_path = (!p || !*p);
 #endif
   const char *probe_path = empty_path
-    ? ((argv && argv[0]) ? argv[0] : "")
-    : path;
-  const char *pm = is_risky(probe_path, argv);
+    ? ((a && a[0]) ? a[0] : "")
+    : p;
+  const char *pm = is_risky(probe_path, a);
   if (!pm) return real_execveat(dirfd, path, argv, envp, flags);
   const char *bp = getenv("VETO_PATH");
   if (!bp || !*bp) return real_execveat(dirfd, path, argv, envp, flags);
-  invocation_t inv = classify_invocation(probe_path, argv);
-  char **new_argv = rewrite_argv(bp, pm, argv, inv.skip);
+  invocation_t inv = classify_invocation(probe_path, a);
+  char **new_argv = rewrite_argv(bp, pm, a, inv.skip);
   if (!new_argv) { free(inv.env_kv); return real_execveat(dirfd, path, argv, envp, flags); }
   char **new_envp = (char **)envp;
   char **allocated_envp = NULL;
